@@ -1,0 +1,1 @@
+# shared.backtest — fast rule-based backtest engine for GA

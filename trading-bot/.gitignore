@@ -1,0 +1,13 @@
+# .gitignore — never commit API keys, models, checkpoints, or logs
+.env
+*.pyc
+__pycache__/
+*.pt
+*.pth
+champions/*.json
+challengers/*.json
+archive/*.json
+logs/*.csv
+ledger.csv
+data/*.csv
+*.tmp
