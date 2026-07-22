@@ -1,6 +1,8 @@
 .PHONY: help check-env build evolver bots dashboard all up stop down logs ps restart clean
 
-SERVICES_BOTS=bot_funds bot_etf bot_stocks bot_crypto bot_politician
+SERVICES_BOTS=bot_funds bot_etf bot_stocks bot_crypto
+# bot_politician disabled until Quiver API key is set — start manually:
+#   docker compose up -d bot_politician
 SERVICES_ALL=evolver $(SERVICES_BOTS) dashboard
 
 help:
