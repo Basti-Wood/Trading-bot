@@ -1,58 +1,63 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cmd="${1:-all}"
+cmd="${1:-}"
 
-if [[ ! -f .env ]]; then
-  echo "ERROR: .env not found in current folder."
-  exit 1
+# ============================================================================
+# Default (no args): build everything and launch detached
+# ============================================================================
+if [[ -z "$cmd" ]]; then
+  if [[ ! -f .env ]]; then
+    echo "ERROR: .env not found. Copy .env.example to .env and fill in your keys."
+    exit 1
+  fi
+
+  echo ""
+  echo "[1/3] Building base image (trading-bot-base)..."
+  docker build -f Dockerfile.base -t trading-bot-base .
+
+  echo ""
+  echo "[2/3] Building all services..."
+  docker compose build
+
+  echo ""
+  echo "[3/3] Starting all services detached..."
+  docker compose up -d evolver bot_funds bot_etf bot_stocks bot_crypto bot_politician dashboard
+
+  echo ""
+  echo "All services running. Dashboard at http://localhost:1337"
+  echo "Use './start.sh ps' to see status, './start.sh logs' to follow logs."
+  exit 0
 fi
 
+# ============================================================================
+# Commands
+# ============================================================================
+
 help() {
-  cat <<EOF
-Trading Bot Commands
-  ./start.sh build      - Build all images
-  ./start.sh evolver    - Start evolver only
-  ./start.sh bots       - Start all trading bots
-  ./start.sh dashboard  - Start dashboard only
-  ./start.sh all        - Start evolver + bots + dashboard
-  ./start.sh up         - Alias for all
-  ./start.sh logs       - Follow all logs
-  ./start.sh ps         - Show running services
-  ./start.sh restart    - Restart all services
-  ./start.sh stop       - Stop containers
-  ./start.sh down       - Stop and remove containers
-  ./start.sh clean      - Down plus remove volumes
-EOF
+  echo ""
+  echo "Trading Bot — start.sh"
+  echo ""
+  echo "  ./start.sh              Build everything & start detached (default)"
+  echo "  ./start.sh ps           Show running services"
+  echo "  ./start.sh logs         Follow all logs"
+  echo "  ./start.sh restart      Restart all services"
+  echo "  ./start.sh stop         Stop containers"
+  echo "  ./start.sh down         Stop & remove containers"
+  echo "  ./start.sh clean        Down + remove volumes"
+  echo "  ./start.sh fclean       Full clean: down, remove volumes & base image"
+  echo ""
 }
 
 case "$cmd" in
   help)
     help
     ;;
-  build)
-    docker compose build
-    ;;
-  evolver)
-    docker compose up -d evolver
-    ;;
-  bots)
-    docker compose up -d bot_funds bot_etf bot_stocks bot_crypto bot_politician
-    ;;
-  dashboard)
-    docker compose up -d dashboard
-    ;;
-  all|up)
-    docker compose up -d evolver bot_funds bot_etf bot_stocks bot_crypto bot_politician dashboard
-    ;;
-  logs)
-    docker compose logs -f
-    ;;
   ps)
     docker compose ps
     ;;
-  restart)
-    docker compose restart evolver bot_funds bot_etf bot_stocks bot_crypto bot_politician dashboard
+  logs)
+    docker compose logs -f
     ;;
   stop)
     docker compose stop
@@ -60,8 +65,17 @@ case "$cmd" in
   down)
     docker compose down
     ;;
+  restart)
+    docker compose restart evolver bot_funds bot_etf bot_stocks bot_crypto bot_politician dashboard
+    ;;
   clean)
     docker compose down -v
+    ;;
+  fclean)
+    echo "Removing containers, volumes, AND base image..."
+    docker compose down -v
+    docker rmi trading-bot-base 2>/dev/null || true
+    echo "Done."
     ;;
   *)
     echo "Unknown command: $cmd"

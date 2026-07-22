@@ -88,7 +88,9 @@ services:
   # -------------------------------------------------------------------
 
   evolver:
-    build: evolver
+    build:
+      context: .
+      dockerfile: evolver/Dockerfile
     container_name: evolver
     restart: unless-stopped
     <<: *common-env
@@ -114,12 +116,14 @@ services:
   # -------------------------------------------------------------------
 
   dashboard:
-    build: dashboard
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
     container_name: dashboard
     restart: unless-stopped
     <<: *common-env
     ports:
-      - "8080:8080"
+      - "1337:80"
     volumes:
       - ./shared:/app/shared
       - champions:/app/champions

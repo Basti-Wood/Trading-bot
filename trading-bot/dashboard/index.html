@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trading Bot — Dashboard</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#c9d1d9;
+          --green:#3fb950; --red:#f85149; --yellow:#d2991d; --blue:#58a6ff;
+          --purple:#bc8cff; --cyan:#39d2c0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         padding:20px; line-height:1.5; }
+  h1 { font-size:1.6rem; margin-bottom:4px; }
+  h2 { font-size:1.2rem; margin:24px 0 12px; }
+  .sub { color:#8b949e; font-size:0.85rem; margin-bottom:8px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:16px; }
+  .card h3 { font-size:1.05rem; margin-bottom:10px; display:flex; align-items:center; gap:8px; }
+  .badge { font-size:0.7rem; padding:2px 8px; border-radius:10px; font-weight:600; }
+  .badge-live { background:#1b3a1b; color:var(--green); }
+  .badge-off { background:#3a1b1b; color:var(--red); }
+  .badge-short { background:#1b2a3a; color:var(--blue); }
+  table { width:100%; border-collapse:collapse; font-size:0.82rem; }
+  td { padding:4px 8px; border-bottom:1px solid var(--border); }
+  td:last-child { text-align:right; font-weight:600; }
+  .green{color:var(--green)} .red{color:var(--red)} .yellow{color:var(--yellow)}
+  .verdict{ margin-top:12px; padding:8px 12px; border-radius:6px; font-size:0.82rem;
+             background:#1b2a1b; border:1px solid #2a4a2a; }
+  .loading{text-align:center;padding:40px;color:#8b949e}
+  .error{color:var(--red)}
+  .bar-wrap{background:var(--border);border-radius:4px;height:8px;margin:4px 0 12px;overflow:hidden}
+  .bar-fill{background:var(--green);height:100%;border-radius:4px;transition:width .5s}
+  .bar-fill.warn{background:var(--yellow)} .bar-fill.bad{background:var(--red)}
+  .nav{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+  .tabs{display:flex;gap:4px;margin-bottom:20px;flex-wrap:wrap}
+  .tab{padding:6px 16px;border:1px solid var(--border);border-radius:6px 6px 0 0;cursor:pointer;
+       background:var(--card);color:var(--text);font-size:.82rem;border-bottom:none}
+  .tab.active{background:var(--blue);color:#000;border-color:var(--blue)}
+  .tab-content{display:none}
+  .tab-content.active{display:block}
+  .leaderboard-table{width:100%;border-collapse:collapse;font-size:.84rem}
+  .leaderboard-table th{text-align:left;padding:8px 10px;border-bottom:2px solid var(--border);
+      color:#8b949e;font-weight:600;font-size:.75rem;text-transform:uppercase}
+  .leaderboard-table td{padding:8px 10px;border-bottom:1px solid var(--border)}
+  .rank-1{color:#ffd700} .rank-2{color:#c0c0c0} .rank-3{color:#cd7f32}
+  .ctl-global{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:14px}
+  .ctl-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+  .ctl-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px}
+  .ctl-card h3{margin:0 0 8px;font-size:.95rem;text-transform:capitalize}
+  .ctl-row{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid #21262d}
+  .ctl-row:last-child{border-bottom:none}
+  .ctl-hint{color:#8b949e;font-size:.75rem;line-height:1.3}
+  .switch{position:relative;display:inline-block;width:46px;height:24px;flex:0 0 46px}
+  .switch input{opacity:0;width:0;height:0}
+  .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#6e7681;transition:.2s;border-radius:24px}
+  .slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:#fff;transition:.2s;border-radius:50%}
+  .switch input:checked + .slider{background:var(--green)}
+  .switch.danger input:checked + .slider{background:var(--red)}
+  .switch input:checked + .slider:before{transform:translateX(22px)}
+  .promote-btn{margin-top:10px;width:100%;padding:7px 10px;background:var(--blue);color:#000;border:none;border-radius:6px;font-weight:700;font-size:.78rem;cursor:pointer}
+  .promote-btn:hover{opacity:.9}
+  footer{margin-top:32px;text-align:center;color:#484f58;font-size:.75rem}
+  @keyframes pulse{0%,100%{opacity:.4} 50%{opacity:1}}
+  /* Network viz */
+  .net-container{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:20px;overflow-x:auto}
+  .net-select{margin-bottom:16px}
+  .net-select select{background:var(--card);color:var(--text);border:1px solid var(--border);padding:6px 12px;border-radius:4px;font-size:.85rem;margin-right:8px}
+  .net-diagram{min-width:700px}
+  .net-layer{display:flex;align-items:center;margin:8px 0}
+  .net-label{width:130px;font-size:.75rem;color:#8b949e;text-align:right;padding-right:12px;flex-shrink:0}
+  .net-nodes{display:flex;gap:3px;flex-wrap:wrap;align-items:center}
+  .net-node{width:10px;height:10px;border-radius:2px;transition:all .3s}
+  .net-node.input{background:var(--cyan)}
+  .net-node.lstm{background:var(--purple)}
+  .net-node.linear{background:var(--yellow)}
+  .net-node.relu{background:var(--green)}
+  .net-node.dropout{background:var(--red)}
+  .net-node.output{background:var(--blue)}
+  .net-arrow-row{display:flex;align-items:center;margin:0}
+  .net-arrow-spacer{width:130px;flex-shrink:0}
+  .net-arrow{color:#484f58;font-size:.7rem;text-align:center;flex:1}
+  .net-legend{display:flex;gap:16px;font-size:.72rem;color:#8b949e;margin-top:16px;flex-wrap:wrap}
+  .net-legend span{display:flex;align-items:center;gap:5px}
+  .net-dot{width:8px;height:8px;border-radius:2px;display:inline-block}
+  .net-info{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid var(--border)}
+  .net-info-item{font-size:.78rem}
+  .net-info-item .val{color:var(--blue);font-weight:600}
+</style>
+</head>
+<body>
+<div class="nav">
+  <div>
+    <h1>🤖 Trading Bot Dashboard</h1>
+    <p class="sub">Auto-refreshes every 30s · <span id="lastUpdate">loading...</span></p>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="bots" onclick="switchTab('bots')">🤖 Bots</div>
+  <div class="tab" data-tab="leaderboard" onclick="switchTab('leaderboard')">🏆 Leaderboard</div>
+  <div class="tab" data-tab="trades" onclick="switchTab('trades')">📈 Trades</div>
+  <div class="tab" data-tab="network" onclick="switchTab('network')">🧠 Network</div>
+  <div class="tab" data-tab="controls" onclick="switchTab('controls')">🎛️ Controls</div>
+</div>
+
+<!-- Bots Tab -->
+<div class="tab-content active" id="tab-bots">
+  <div class="grid" id="grid"><div class="loading">Loading bot data...</div></div>
+</div>
+
+<!-- Leaderboard Tab -->
+<div class="tab-content" id="tab-leaderboard">
+  <h2>🏆 Contender Rankings</h2>
+  <p class="sub">All champions & challengers ranked by Sharpe ratio</p>
+  <div id="leaderboard"><div class="loading">Loading leaderboard...</div></div>
+</div>
+
+<!-- Trades Tab -->
+<div class="tab-content" id="tab-trades">
+  <h2>📈 Trade History</h2>
+  <p class="sub">Every buy, sell, short, and close — select an asset class.
+     <span style="margin-left:16px">🔵 Buy/Long &nbsp; 🔴 Sell/Short &nbsp; ⚫ Close</span></p>
+  <div style="margin-bottom:12px">
+    <label for="tradeAsset" style="color:#8b949e;font-size:.82rem">Asset class: </label>
+    <select id="tradeAsset" onchange="loadTrades()"
+      style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px">
+      <option value="crypto">Crypto</option><option value="stocks">Stocks</option>
+      <option value="etf">ETF</option><option value="politician">Politician</option>
+      <option value="funds">Funds</option>
+    </select>
+  </div>
+  <div id="trades-table"></div>
+</div>
+
+<!-- Network Tab -->
+<div class="tab-content" id="tab-network">
+  <h2>🧠 Neural Network Architecture</h2>
+  <p class="sub">Real LSTM topology from champion/challenger DNA — see exactly what the AI is running.
+     Nodes scale with layer size. Hover for details.</p>
+  <div class="net-select">
+    <label for="netAsset" style="color:#8b949e;font-size:.82rem">Asset class: </label>
+    <select id="netAsset" onchange="loadNetwork()"
+      style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:6px 12px;border-radius:4px">
+      <option value="crypto">Crypto</option><option value="stocks" selected>Stocks</option>
+      <option value="etf">ETF</option><option value="politician">Politician</option><option value="funds">Funds</option>
+    </select>
+    <label for="netRole" style="color:#8b949e;font-size:.82rem;margin-left:12px">DNA: </label>
+    <select id="netRole" onchange="loadNetwork()"
+      style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:6px 12px;border-radius:4px">
+      <option value="champion">👑 Champion</option>
+      <option value="challenger">🥊 Challenger</option>
+    </select>
+  </div>
+  <div class="net-container">
+    <div id="network-diagram"><div class="loading">Select an asset class above to visualize the network</div></div>
+  </div>
+  <div class="net-legend">
+    <span><span class="net-dot" style="background:var(--cyan)"></span> Input Features</span>
+    <span><span class="net-dot" style="background:var(--purple)"></span> LSTM Hidden</span>
+    <span><span class="net-dot" style="background:var(--yellow)"></span> Dense/Linear</span>
+    <span><span class="net-dot" style="background:var(--green)"></span> ReLU Activation</span>
+    <span><span class="net-dot" style="background:var(--red)"></span> Dropout</span>
+    <span><span class="net-dot" style="background:var(--blue)"></span> Output (UP/DOWN)</span>
+  </div>
+</div>
+
+<!-- Controls Tab -->
+<div class="tab-content" id="tab-controls">
+  <h2>🎛️ Strategy Controls</h2>
+  <p class="sub">Kill switches &amp; strategy toggles — bots re-read these every cycle.
+     ⚠️ Shorting has <b>unlimited</b> loss potential and is OFF by default.</p>
+  <div id="controls"><div class="loading">Loading controls...</div></div>
+</div>
+
+<footer>Trading Bot Dashboard · Nginx + Python API · <span id="refreshCount">0</span> refreshes</footer>
+
+<script>
+// =========================================================================
+// Tab switching
+// =========================================================================
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
+  document.getElementById(`tab-${name}`).classList.add('active');
+  if (name === 'bots') loadBots();
+  if (name === 'leaderboard') loadLeaderboard();
+  if (name === 'trades') loadTrades();
+  if (name === 'network') loadNetwork();
+  if (name === 'controls') loadControls();
+}
+
+// =========================================================================
+// API helpers
+// =========================================================================
+async function api(url, opts = {}) {
+  const resp = await fetch(url, opts);
+  if (!resp.ok) throw new Error(`${resp.status}`);
+  return resp.json();
+}
+
+// =========================================================================
+// Bots tab
+// =========================================================================
+async function loadBots() {
+  const grid = document.getElementById('grid');
+  try {
+    const data = await api('/api/status');
+    let html = '';
+    for (const [asset, s] of Object.entries(data)) {
+      const champBadge = s.champion_active
+        ? `<span class="badge badge-live">champion active</span>`
+        : `<span class="badge badge-off">no champion</span>`;
+      const shortBadge = s.champion_short
+        ? `<span class="badge badge-short">shorting ON</span>` : '';
+      const challBadge = s.challenger_ready
+        ? `<span class="badge badge-live">challenger ready</span>`
+        : `<span class="badge badge-off">no challenger</span>`;
+
+      const deltaClass = s.sharpe_delta > 0 ? 'green' : s.sharpe_delta < 0 ? 'red' : '';
+      const verdict = s.sharpe_delta > 0.2
+        ? '🔺 Challenger BETTER — promote recommended'
+        : s.sharpe_delta > 0
+          ? '📈 Challenger slightly ahead'
+          : s.sharpe_delta > -0.1
+            ? '✅ Champion holding strong'
+            : '🏆 Champion dominant';
+
+      html += `<div class="card">
+        <h3>${asset.toUpperCase()} ${champBadge} ${shortBadge}</h3>
+        <table>
+          <tr><td>Champion Sharpe</td><td>${s.champion_sharpe.toFixed(3)}</td></tr>
+          <tr><td>Temperature</td><td>${s.champion_temp.toFixed(2)}</td></tr>
+          <tr><td>Generation</td><td>${s.generation}</td></tr>
+          <tr><td>Challenger Sharpe</td><td>${s.challenger_sharpe.toFixed(3)}</td></tr>
+          <tr><td>Sharpe Δ</td><td class="${deltaClass}">${s.sharpe_delta >= 0 ? '+' : ''}${s.sharpe_delta.toFixed(3)}</td></tr>
+        </table>
+        <div class="verdict">${verdict}</div>
+        ${s.challenger_ready ? `<button class="promote-btn" onclick="promote('${asset}')">⬆ Promote Challenger to Champion</button>` : ''}
+      </div>`;
+    }
+    grid.innerHTML = html || '<div class="loading">No bot data yet — start the evolver first.</div>';
+  } catch (e) {
+    grid.innerHTML = `<div class="error">Failed to load: ${e.message}</div>`;
+  }
+}
+
+async function promote(asset) {
+  try {
+    const resp = await fetch(`/api/promote/${asset}`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.promoted) {
+      alert(`${asset}: Challenger promoted!`);
+      loadBots();
+    } else {
+      alert(`Failed to promote ${asset}`);
+    }
+  } catch (e) {
+    alert(`Error: ${e.message}`);
+  }
+}
+
+// =========================================================================
+// Leaderboard tab
+// =========================================================================
+async function loadLeaderboard() {
+  const div = document.getElementById('leaderboard');
+  try {
+    const entries = await api('/api/leaderboard');
+    if (!entries.length) { div.innerHTML = '<div class="loading">No contenders yet.</div>'; return; }
+    let html = `<table class="leaderboard-table">
+      <thead><tr><th>#</th><th>Role</th><th>Asset</th><th>Sharpe</th><th>Temp</th><th>Gen</th><th>Short</th><th>Layers</th><th>Seq</th></tr></thead><tbody>`;
+    for (const e of entries) {
+      const rankClass = e.rank <= 3 ? `rank-${e.rank}` : '';
+      html += `<tr>
+        <td class="${rankClass}">#${e.rank}</td>
+        <td>${e.role}</td>
+        <td>${e.asset_class.toUpperCase()}</td>
+        <td><b>${e.sharpe.toFixed(3)}</b></td>
+        <td>${e.temperature.toFixed(2)}</td>
+        <td>${e.generation}</td>
+        <td>${e.short_enabled ? '✅' : '—'}</td>
+        <td>${e.num_layers}</td>
+        <td>${e.seq_len}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    div.innerHTML = html;
+  } catch (e) {
+    div.innerHTML = `<div class="error">Failed to load: ${e.message}</div>`;
+  }
+}
+
+// =========================================================================
+// Trades tab
+// =========================================================================
+async function loadTrades() {
+  const asset = document.getElementById('tradeAsset').value;
+  const div = document.getElementById('trades-table');
+  div.innerHTML = '<div class="loading">Loading trades...</div>';
+  try {
+    const data = await api(`/api/trades/${asset}`);
+    const trades = data.trades || [];
+    if (!trades.length) { div.innerHTML = '<p style="color:#8b949e">No trades yet for this asset class.</p>'; return; }
+    let html = `<table class="leaderboard-table">
+      <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Price</th><th>Notional</th><th>Qty</th><th>Conf</th></tr></thead><tbody>`;
+    for (const t of trades.slice(-50).reverse()) {
+      const sideColor = t.side?.includes('LONG') ? 'green' : t.side?.includes('SHORT') ? 'red' : '';
+      html += `<tr>
+        <td style="font-size:.75rem">${t.timestamp || ''}</td>
+        <td><b>${t.symbol || ''}</b></td>
+        <td class="${sideColor}">${t.side || ''}</td>
+        <td>${t.price || ''}</td>
+        <td>${t.notional_usd ? '$' + t.notional_usd : ''}</td>
+        <td>${t.qty || ''}</td>
+        <td>${t.confidence || ''}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    div.innerHTML = html;
+  } catch (e) {
+    div.innerHTML = `<div class="error">Failed to load: ${e.message}</div>`;
+  }
+}
+
+// =========================================================================
+// Controls tab
+// =========================================================================
+async function loadControls() {
+  const div = document.getElementById('controls');
+  try {
+    const ctrl = await api('/api/controls');
+    let html = `<div class="ctl-global">
+      <h3 style="margin:0 0 8px">🌐 Global</h3>
+      <div class="ctl-row">
+        <span>Trading Enabled</span>
+        <label class="switch"><input type="checkbox" ${ctrl.global_trading ? 'checked' : ''} onchange="setControl(['global_trading'],this.checked)"><span class="slider"></span></label>
+      </div>
+      <div class="ctl-row">
+        <span>Shorting (global kill switch) <span class="ctl-hint">⚠️ Unlimited loss</span></span>
+        <label class="switch danger"><input type="checkbox" ${ctrl.global_shorting ? 'checked' : ''} onchange="setControl(['global_shorting'],this.checked)"><span class="slider"></span></label>
+      </div>
+    </div>
+    <div class="ctl-grid">`;
+
+    for (const [asset, ac] of Object.entries(ctrl.per_asset || {})) {
+      html += `<div class="ctl-card">
+        <h3>${asset}</h3>
+        <div class="ctl-row">
+          <span>Trading</span>
+          <label class="switch"><input type="checkbox" ${ac.trading_enabled ? 'checked' : ''} onchange="setControl(['per_asset','${asset}','trading_enabled'],this.checked)"><span class="slider"></span></label>
+        </div>
+        <div class="ctl-row">
+          <span>Shorting <span class="ctl-hint">per-asset</span></span>
+          <label class="switch danger"><input type="checkbox" ${ac.shorting_enabled ? 'checked' : ''} onchange="setControl(['per_asset','${asset}','shorting_enabled'],this.checked)"><span class="slider"></span></label>
+        </div>
+        <div class="ctl-row">
+          <span>ML Strategy</span>
+          <label class="switch"><input type="checkbox" ${ac.strategies?.ml ? 'checked' : ''} onchange="setControl(['per_asset','${asset}','strategies','ml'],this.checked)"><span class="slider"></span></label>
+        </div>
+        <div class="ctl-row">
+          <span>Fallback Strategy</span>
+          <label class="switch"><input type="checkbox" ${ac.strategies?.fallback ? 'checked' : ''} onchange="setControl(['per_asset','${asset}','strategies','fallback'],this.checked)"><span class="slider"></span></label>
+        </div>
+        <div class="ctl-row">
+          <span>Politician Signal</span>
+          <label class="switch"><input type="checkbox" ${ac.strategies?.politician ? 'checked' : ''} onchange="setControl(['per_asset','${asset}','strategies','politician'],this.checked)"><span class="slider"></span></label>
+        </div>
+        <div class="ctl-row">
+          <span>Auto-Promote</span>
+          <label class="switch"><input type="checkbox" ${ac.auto_promote ? 'checked' : ''} onchange="setControl(['per_asset','${asset}','auto_promote'],this.checked)"><span class="slider"></span></label>
+        </div>
+      </div>`;
+    }
+    html += '</div>';
+    div.innerHTML = html;
+  } catch (e) {
+    div.innerHTML = `<div class="error">Failed to load: ${e.message}</div>`;
+  }
+}
+
+async function setControl(path, value) {
+  try {
+    await fetch('/api/controls', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, value })
+    });
+  } catch (e) {
+    console.error('setControl failed:', e);
+  }
+}
+
+// =========================================================================
+// Network tab — LSTM architecture visualizer
+// =========================================================================
+async function loadNetwork() {
+  const asset = document.getElementById('netAsset').value;
+  const role = document.getElementById('netRole').value;
+  const div = document.getElementById('network-diagram');
+  div.innerHTML = '<div class="loading">Loading network topology...</div>';
+
+  try {
+    const data = await api(`/api/network/${asset}`);
+    const net = data[role];
+    if (!net || !net.topology) {
+      div.innerHTML = `<p style="color:#8b949e">No ${role} DNA found for ${asset.toUpperCase()} — run the evolver first.</p>`;
+      return;
+    }
+    renderNetwork(div, net, asset, data.n_features, data.feature_names);
+  } catch (e) {
+    div.innerHTML = `<div class="error">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function renderNetwork(container, net, asset, nFeatures, featureNames) {
+  const topology = net.topology;
+  // Cap displayed nodes at 32 per layer for readability, scale down proportionally
+  const MAX_VISIBLE = 32;
+
+  let html = `<div class="net-diagram">`;
+
+  for (let i = 0; i < topology.length; i++) {
+    const layer = topology[i];
+    const displaySize = Math.min(layer.size, MAX_VISIBLE);
+    const scaled = layer.size > MAX_VISIBLE
+      ? `showing ${displaySize}/${layer.size} nodes`
+      : `${layer.size} neurons`;
+
+    // Layer label + size
+    html += `<div class="net-layer">`;
+    html += `<div class="net-label">${layer.label}<br><small>${scaled}</small></div>`;
+    html += `<div class="net-nodes">`;
+
+    const typeClass = layer.type;
+    const nodeSize = layer.size <= 16 ? '12px' : layer.size <= 32 ? '9px' : '7px';
+
+    for (let j = 0; j < displaySize; j++) {
+      const opacity = layer.size > MAX_VISIBLE ? 0.4 + (0.6 * (1 - j / MAX_VISIBLE)) : 1;
+      html += `<span class="net-node ${typeClass}" style="width:${nodeSize};height:${nodeSize};opacity:${opacity.toFixed(2)}"
+        title="${layer.label} — neuron ${j+1}/${layer.size}"></span>`;
+    }
+    html += `</div></div>`;
+
+    // Arrow between layers
+    if (i < topology.length - 1) {
+      const next = topology[i + 1];
+      const connDesc = `${layer.size} → ${next.size}`;
+      html += `<div class="net-arrow-row">
+        <div class="net-arrow-spacer"></div>
+        <div class="net-arrow">▼ fully connected (${connDesc})</div>
+      </div>`;
+    }
+  }
+
+  html += `</div>`;
+
+  // Info panel
+  html += `<div class="net-info">
+    <div class="net-info-item">📐 <b>Asset</b><br><span class="val">${asset.toUpperCase()}</span></div>
+    <div class="net-info-item">🔢 <b>Input Features</b><br><span class="val">${nFeatures}</span></div>
+    <div class="net-info-item">📏 <b>Sequence Length</b><br><span class="val">${net.seq_len} candles</span></div>
+    <div class="net-info-item">🔮 <b>Hidden Size</b><br><span class="val">${net.hidden_size}</span></div>
+    <div class="net-info-item">📚 <b>LSTM Layers</b><br><span class="val">${net.num_layers}</span></div>
+    <div class="net-info-item">🎲 <b>Dropout</b><br><span class="val">${net.dropout}</span></div>
+    <div class="net-info-item">📊 <b>Sharpe Ratio</b><br><span class="val">${net.sharpe.toFixed(3)}</span></div>
+    <div class="net-info-item">🧬 <b>Generation</b><br><span class="val">${net.generation}</span></div>
+    <div class="net-info-item">🌡️ <b>Temperature</b><br><span class="val">${net.temperature.toFixed(2)}</span></div>
+    <div class="net-info-item">📋 <b>Features</b><br><span class="val" style="font-size:.68rem">${featureNames.join(', ')}</span></div>
+  </div>`;
+
+  // Output explanation
+  html += `<div style="margin-top:12px;padding:8px 12px;background:#1b2a1b;border:1px solid #2a4a2a;border-radius:6px;font-size:.78rem;color:var(--green)">
+    🟢 <b>UP</b> (neuron 1) — predict price rises in next 5 candles &nbsp;|&nbsp;
+    🔴 <b>DOWN</b> (neuron 2) — predict price drops in next 5 candles
+  </div>`;
+
+  container.innerHTML = html;
+}
+
+// =========================================================================
+// Auto-refresh
+// =========================================================================
+let refreshCount = 0;
+function autoRefresh() {
+  refreshCount++;
+  document.getElementById('refreshCount').textContent = refreshCount;
+  document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+  const activeTab = document.querySelector('.tab-content.active');
+  if (activeTab) {
+    const id = activeTab.id;
+    if (id === 'tab-bots') loadBots();
+    if (id === 'tab-leaderboard') loadLeaderboard();
+  }
+}
+
+// Initial load
+loadBots();
+setInterval(autoRefresh, 30000);
+</script>
+</body>
+</html>
