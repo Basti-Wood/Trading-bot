@@ -119,7 +119,7 @@ def open_long(symbol: str, notional_usd: float, stop_loss: float,
     return True
 
 
-def close_long(symbol: str, qty: float) -> None:
+def close_long(symbol: str, qty: float) -> bool:
     try:
         get_client().submit_order(MarketOrderRequest(
             symbol=symbol,
@@ -128,7 +128,8 @@ def close_long(symbol: str, qty: float) -> None:
             time_in_force=TimeInForce.DAY,
         ))
     except Exception:
-        return
+        return False
+    return True
 
 
 def open_short(symbol: str, notional_usd: float, stop_loss: float,
@@ -163,7 +164,7 @@ def open_short(symbol: str, notional_usd: float, stop_loss: float,
     return whole_shares
 
 
-def close_short(symbol: str, qty: float) -> None:
+def close_short(symbol: str, qty: float) -> bool:
     try:
         get_client().submit_order(MarketOrderRequest(
             symbol=symbol,
@@ -172,7 +173,8 @@ def close_short(symbol: str, qty: float) -> None:
             time_in_force=TimeInForce.DAY,
         ))
     except Exception:
-        return
+        return False
+    return True
 
 
 def get_portfolio_value() -> float:

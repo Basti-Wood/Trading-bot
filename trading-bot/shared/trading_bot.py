@@ -119,14 +119,13 @@ class TradingBot:
     def _close_all(self) -> None:
         for ticker in list(self.tracker.positions):
             pos = self.tracker.positions[ticker]
-            try:
-                if pos.side == "LONG":
-                    broker.close_long(ticker, pos.qty)
-                else:
-                    broker.close_short(ticker, pos.qty)
-            except Exception as exc:
-                print(f"[{self.asset_class}] close {ticker} failed: {exc}")
-            self.tracker.close(ticker)
+            closed = (broker.close_long(ticker, pos.qty)
+                      if pos.side == "LONG"
+                      else broker.close_short(ticker, pos.qty))
+            if closed:
+                self.tracker.close(ticker)
+            else:
+                print(f"[{self.asset_class}] close {ticker} failed; position retained")
 
     # ------------------------------------------------------------------
 
@@ -159,10 +158,10 @@ class TradingBot:
 
         if signal == "BUY":
             if self.tracker.is_short(symbol):
-                self._log_trade(symbol, "CLOSE_SHORT", row["close"],
-                                qty=self.tracker.positions[symbol].qty)
-                broker.close_short(symbol, self.tracker.positions[symbol].qty)
-                self.tracker.close(symbol)
+                qty = self.tracker.positions[symbol].qty
+                if broker.close_short(symbol, qty):
+                    self.tracker.close(symbol)
+                    self._log_trade(symbol, "CLOSE_SHORT", row["close"], qty=qty)
             if self.tracker.is_flat(symbol):
                 frac = broker.is_fractionable(symbol)
                 if broker.open_long(symbol, notional_usd, sl, row["close"]):
@@ -175,10 +174,10 @@ class TradingBot:
 
         elif signal == "SELL":
             if self.tracker.is_long(symbol):
-                self._log_trade(symbol, "CLOSE_LONG", row["close"],
-                                qty=self.tracker.positions[symbol].qty)
-                broker.close_long(symbol, self.tracker.positions[symbol].qty)
-                self.tracker.close(symbol)
+                qty = self.tracker.positions[symbol].qty
+                if broker.close_long(symbol, qty):
+                    self.tracker.close(symbol)
+                    self._log_trade(symbol, "CLOSE_LONG", row["close"], qty=qty)
             # Short only if DNA wants it AND dashboard kill switches allow it
             if (self.tracker.is_flat(symbol)
                     and self.dna.short_enabled
@@ -240,29 +239,35 @@ class TradingBot:
         for ticker in check_short_positions(self.tracker, prices,
                                             self.breaker.max_short_loss):
             price = prices.get(ticker, 0)
-            self._log_trade(ticker, "FORCE_CLOSE_SHORT", price,
-                            qty=self.tracker.positions[ticker].qty)
-            print(f"[{self.asset_class}] FORCE-CLOSING short {ticker} (>3% loss)")
-            broker.close_short(ticker, self.tracker.positions[ticker].qty)
-            self.tracker.close(ticker)
+            qty = self.tracker.positions[ticker].qty
+            if broker.close_short(ticker, qty):
+                self._log_trade(ticker, "FORCE_CLOSE_SHORT", price, qty=qty)
+                print(f"[{self.asset_class}] FORCE-CLOSED short {ticker} (>3% loss)")
+                self.tracker.close(ticker)
+            else:
+                print(f"[{self.asset_class}] force-close {ticker} failed; will retry")
         for ticker in self.tracker.shorts_older_than(self.dna.short_hold_days):
             price = prices.get(ticker, 0)
-            self._log_trade(ticker, "CLOSE_SHORT", price,
-                            qty=self.tracker.positions[ticker].qty)
-            print(f"[{self.asset_class}] Closing aged short {ticker}")
-            broker.close_short(ticker, self.tracker.positions[ticker].qty)
-            self.tracker.close(ticker)
+            qty = self.tracker.positions[ticker].qty
+            if broker.close_short(ticker, qty):
+                self._log_trade(ticker, "CLOSE_SHORT", price, qty=qty)
+                print(f"[{self.asset_class}] Closed aged short {ticker}")
+                self.tracker.close(ticker)
+            else:
+                print(f"[{self.asset_class}] aged-short close {ticker} failed; will retry")
 
         # Emergency: if global shorting was killed from dashboard, flatten shorts
         if not ctl.shorting_allowed(self.asset_class, controls):
             for ticker in [t for t, p in self.tracker.positions.items()
                            if p.side == "SHORT"]:
                 price = prices.get(ticker, 0)
-                self._log_trade(ticker, "KILL_CLOSE_SHORT", price,
-                                qty=self.tracker.positions[ticker].qty)
-                print(f"[{self.asset_class}] Kill switch — closing short {ticker}")
-                broker.close_short(ticker, self.tracker.positions[ticker].qty)
-                self.tracker.close(ticker)
+                qty = self.tracker.positions[ticker].qty
+                if broker.close_short(ticker, qty):
+                    self._log_trade(ticker, "KILL_CLOSE_SHORT", price, qty=qty)
+                    print(f"[{self.asset_class}] Kill switch closed short {ticker}")
+                    self.tracker.close(ticker)
+                else:
+                    print(f"[{self.asset_class}] kill-switch close {ticker} failed; will retry")
 
         status = self.breaker.update(broker.get_portfolio_value())
         if status == "DEMOTE":

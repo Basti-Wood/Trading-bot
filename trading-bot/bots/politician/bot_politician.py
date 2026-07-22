@@ -96,11 +96,14 @@ class PoliticianBot:
         # Get current price for the log (best-effort)
         close_price = get_current_price(ticker)
         side = f"CLOSE_{pos.side}" if pos.side in ("LONG", "SHORT") else "CLOSE"
-        self._log_trade(ticker, side, close_price, qty=pos.qty)
         if pos.side == "LONG":
-            broker.close_long(ticker, pos.qty)
+            closed = broker.close_long(ticker, pos.qty)
         else:
-            broker.close_short(ticker, pos.qty)
+            closed = broker.close_short(ticker, pos.qty)
+        if not closed:
+            print(f"[politician] close {ticker} failed; position retained")
+            return
+        self._log_trade(ticker, side, close_price, qty=pos.qty)
         self.tracker.close(ticker)
         print(f"[politician] closed {pos.side} {ticker}")
 
