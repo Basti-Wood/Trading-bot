@@ -17,10 +17,14 @@ from dataclasses import asdict
 from shared.evolution.dna import AgentDNA
 from shared.backtest.engine import fitness
 
-WORKER_CORES = 5   # i5-9400: 6 cores total, leave 1 for OS + Docker
+WORKER_CORES = int(os.environ.get("GA_WORKER_CORES", 5))  # GA fitness eval parallelism
 
+CHAMPIONS_DIR = os.environ.get("CHAMPIONS_DIR", "champions")
 CHALLENGERS_DIR = os.environ.get("CHALLENGERS_DIR", "challengers")
 LOGS_DIR = os.environ.get("LOGS_DIR", "logs")
+
+# Fraction of population seeded from previous champion (rest random)
+SEED_FRACTION = 0.20   # 20% champion-derived, 80% fresh blood
 
 
 class GeneticOptimizer:
@@ -33,12 +37,74 @@ class GeneticOptimizer:
         self.pop_size = population_size
         self.keep = max(2, int(population_size * survivor_rate))
         self.data = historical_data          # pre-loaded into RAM — no disk I/O
-        self.population = [AgentDNA.random() for _ in range(population_size)]
+        self.population = self._seed_population(population_size)
         self.best_ever: AgentDNA | None = None
+
+    def _seed_population(self, size: int) -> list:
+        """Warm-start: seed ~20% from previous champion, 80% random."""
+        champion = self._load_champion_dna()
+        if champion is None:
+            print(f"[{self.asset_class}] No previous champion — fresh random population.")
+            return [AgentDNA.random() for _ in range(size)]
+
+        seeded = max(2, int(size * SEED_FRACTION))
+        random_count = size - seeded
+        print(f"[{self.asset_class}] Warm-start: {seeded} from champion "
+              f"(Sharpe {champion.last_sharpe:.3f}) + {random_count} random agents.")
+
+        pop = []
+        # Champion itself survives unchanged
+        pop.append(champion)
+        # Slightly mutated champion variants
+        for _ in range(seeded - 1):
+            pop.append(champion.clone().mutate())
+        # Fresh random blood
+        for _ in range(random_count):
+            pop.append(AgentDNA.random())
+        return pop
+
+    def _load_champion_dna(self) -> "AgentDNA | None":
+        """Try loading the previously saved champion DNA from disk."""
+        path = os.path.join(CHAMPIONS_DIR, f"{self.asset_class}_champion.json")
+        try:
+            with open(path) as f:
+                return AgentDNA.from_dict(json.load(f))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+    def _diagnose_data(self) -> None:
+        """Run one backtest in the main process to verify data integrity."""
+        if not self.data:
+            print(f"[{self.asset_class}] DIAGNOSE: self.data is empty/falsy!")
+            return
+        if isinstance(self.data, dict):
+            syms = list(self.data.keys())
+            sample_sym = syms[0]
+            sample_df = self.data[sample_sym]
+            print(f"[{self.asset_class}] DIAGNOSE: {len(syms)} symbols, "
+                  f"sample='{sample_sym}' rows={len(sample_df)} "
+                  f"cols={list(sample_df.columns)}")
+            # Show a few close prices
+            if "close" in sample_df.columns and len(sample_df) > 0:
+                closes = sample_df["close"].dropna()
+                print(f"[{self.asset_class}] DIAGNOSE: close range "
+                      f"[{closes.min():.2f}, {closes.max():.2f}], "
+                      f"first={closes.iloc[0]:.2f}, last={closes.iloc[-1]:.2f}")
+            # Run a test backtest
+            test_dna = AgentDNA.random()
+            test_dna.temperature = 0.5  # neutral temp
+            score = fitness(test_dna, self.data)
+            print(f"[{self.asset_class}] DIAGNOSE: test fitness (temp=0.5) = {score:.4f}")
+        else:
+            print(f"[{self.asset_class}] DIAGNOSE: data type={type(self.data).__name__}, "
+                  f"len={len(self.data) if hasattr(self.data, '__len__') else 'N/A'}")
 
     def evolve(self, generations: int = 500) -> AgentDNA:
         os.makedirs(LOGS_DIR, exist_ok=True)
         log_path = os.path.join(LOGS_DIR, f"evolution_log_{self.asset_class}.csv")
+
+        # ---- Quick diagnostic: run one backtest in the main process ----
+        self._diagnose_data()
 
         for gen in range(generations):
             # Parallel fitness evaluation — Pool(5) for i5-9400

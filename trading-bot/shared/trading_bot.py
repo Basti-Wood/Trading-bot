@@ -49,6 +49,7 @@ class TradingBot:
         self.pol_api_key = os.environ.get("QUIVER_API_KEY")
         self._warned_no_broker = False
         self._warned_bad_equity = False
+        self._warned_no_champion = False
         self._trades_path = os.path.join(LOGS_DIR, f"trades_{self.asset_class}.csv")
         self._load_champion()
 
@@ -111,9 +112,13 @@ class TradingBot:
             with open(dna_path) as f:
                 self.dna = AgentDNA.from_dict(json.load(f))
         except (FileNotFoundError, json.JSONDecodeError):
-            print(f"[{self.asset_class}] No champion DNA yet — waiting for evolver.")
+            if not self._warned_no_champion:
+                print(f"[{self.asset_class}] No champion DNA yet — waiting for evolver.")
+                self._warned_no_champion = True
             self.dna = None
             return
+
+        self._warned_no_champion = False
 
         self.risk = RiskManager(self.dna, self.pool_config)
         self.ml = MLPredictor(self.dna, self.asset_class)

@@ -77,6 +77,10 @@ class AgentDNA:
     # Genetic operators
     # ------------------------------------------------------------------
 
+    def clone(self) -> "AgentDNA":
+        """Deep copy — returns an identical independent copy."""
+        return copy.deepcopy(self)
+
     def mutate(self, rate: float = 0.2) -> "AgentDNA":
         """
         Mutate this DNA with per-gene probability `rate`.

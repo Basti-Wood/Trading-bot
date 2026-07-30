@@ -19,7 +19,7 @@ from typing import List, Union
 
 CRYPTO_SYMBOLS = [
     "BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD", "AVAX-USD",
-    "MATIC-USD", "LINK-USD", "DOT-USD", "UNI-USD", "ATOM-USD",
+    "XRP-USD", "LINK-USD", "DOT-USD", "ADA-USD", "ATOM-USD",
 ]
 
 STOCK_SYMBOLS = [

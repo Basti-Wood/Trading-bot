@@ -8,7 +8,8 @@ Runs continuously — when markets are closed the evolver ramps up
 generations and retrains LSTM models. During market hours it runs
 lighter evolution cycles so the bots get CPU priority.
 
-Asset classes run sequentially — not enough cores for parallel.
+Asset classes run sequentially (ThreadPool + mp.Pool = fork deadlock).
+Use GA_WORKER_CORES to control per-asset parallelism (default 5 cores).
 
 Env vars (all optional, defaults shown):
   EVOLVER_CONTINUOUS=true        # keep evolving forever

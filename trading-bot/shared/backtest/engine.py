@@ -76,6 +76,7 @@ def run_backtest(dna: AgentDNA, historical_data: pd.DataFrame) -> list:
     stop = 0.0
     bars_in_short = 0
     daily_returns = []
+    trades = 0             # count entries
 
     for i in range(1, len(close)):
         # Mark-to-market return for the bar we just lived through
@@ -93,8 +94,8 @@ def run_backtest(dna: AgentDNA, historical_data: pd.DataFrame) -> list:
                 bars_in_short = 0
 
         # --- entries / flips (signal from data up to bar i only) ---
-        buy_sig = rsi[i] < rsi_buy and close[i] > sma50[i]
-        sell_sig = rsi[i] > rsi_sell and close[i] < sma50[i]
+        buy_sig = rsi[i] < rsi_buy
+        sell_sig = rsi[i] > rsi_sell
 
         if buy_sig and position <= 0:
             if position == -1:
@@ -104,6 +105,7 @@ def run_backtest(dna: AgentDNA, historical_data: pd.DataFrame) -> list:
             entry_price = close[i]
             stop = entry_price - atr[i] * atr_multiplier
             pnl -= TRANSACTION_COST * exposure
+            trades += 1
         elif sell_sig and position >= 0:
             if position == 1:
                 pnl -= TRANSACTION_COST * exposure
@@ -114,10 +116,18 @@ def run_backtest(dna: AgentDNA, historical_data: pd.DataFrame) -> list:
                 stop = entry_price + atr[i] * atr_multiplier * 0.6
                 bars_in_short = 0
                 pnl -= TRANSACTION_COST * exposure
+                trades += 1
             else:
                 position = 0
 
         daily_returns.append(pnl)
+
+    if trades == 0:
+        import sys
+        print(f"[backtest] ZERO TRADES | temp={dna.temperature:.2f} "
+              f"rsi_buy={rsi_buy:.1f} rsi_sell={rsi_sell:.1f} "
+              f"bars={len(close)} rsi_range=[{rsi.min():.1f},{rsi.max():.1f}] "
+              f"short={dna.short_enabled}", file=sys.stderr, flush=True)
 
     return daily_returns
 
@@ -126,6 +136,11 @@ def fitness(dna: AgentDNA, historical_data) -> float:
     """
     Sharpe ratio fitness — never raw profit.
     `historical_data` may be a DataFrame or a dict[symbol, DataFrame].
+
+    Returns:
+        Sharpe ratio (annualized) if any trades occurred.
+        0.0 if agent never traded (neutral — allows GA gradient).
+        -999.0 if data is missing/corrupt (fatal — skip this agent).
     """
     if isinstance(historical_data, dict):
         returns: list = []
@@ -135,11 +150,18 @@ def fitness(dna: AgentDNA, historical_data) -> float:
         returns = run_backtest(dna, historical_data)
 
     if len(returns) == 0:
+        # No data at all — fatal
         return -999.0
+
     arr = np.asarray(returns, dtype=float)
     std = arr.std()
+
     if std == 0 or np.isnan(std):
-        return -999.0
+        # Agent never traded (all returns = 0) — neutral fitness.
+        # This is better than -999 because the GA can still rank:
+        #   agents that trade well > agents that don't trade > agents that trade badly
+        return 0.0
+
     sharpe = arr.mean() / std * np.sqrt(252)
     dna.last_sharpe = float(sharpe)
     return float(sharpe)

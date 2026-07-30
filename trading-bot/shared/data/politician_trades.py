@@ -26,6 +26,7 @@ STALE_SIGNAL_DAYS = 45
 # Simple in-process cache to respect the free-tier rate limit
 _cache: dict = {}
 _CACHE_TTL = timedelta(hours=6)
+_error_cache: dict = {}  # suppress repeated 401 spam per ticker
 
 
 def get_politician_trades(ticker: str, api_key: str) -> pd.DataFrame:
@@ -46,7 +47,11 @@ def get_politician_trades(ticker: str, api_key: str) -> pd.DataFrame:
         resp.raise_for_status()
         rows = resp.json()
     except Exception as exc:
-        print(f"[politician] fetch failed for {ticker}: {exc}")
+        # Only log each ticker's error once per cache TTL
+        last_logged = _error_cache.get(ticker)
+        if last_logged is None or now - last_logged > _CACHE_TTL:
+            print(f"[politician] fetch failed for {ticker}: {exc}")
+            _error_cache[ticker] = now
         return pd.DataFrame(columns=["Date", "Politician", "Party", "Chamber",
                                      "Committee", "Transaction", "Amount", "weight"])
 
