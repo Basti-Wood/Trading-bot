@@ -16,12 +16,34 @@ _client: TradingClient | None = None
 _broker_unavailable_reason: str | None = None
 
 
+def _set_broker_reason(reason: str | None) -> None:
+    global _broker_unavailable_reason
+    _broker_unavailable_reason = reason
+
+
+def unavailable_reason() -> str | None:
+    """Last known broker problem (None when healthy)."""
+    return _broker_unavailable_reason
+
+
+def _fmt_qty(qty: float) -> str:
+    """Format qty in Alpaca-friendly decimal string form."""
+    out = f"{round(qty, 6):.6f}".rstrip("0").rstrip(".")
+    return out or "0"
+
+
 def _invalid_value(v: str | None) -> bool:
     if not v:
         return True
     return v.strip().lower() in {
         "your_key_here",
         "your_secret_here",
+        "your_alpaca_key_here",
+        "your_alpaca_secret_here",
+        "your_api_key_here",
+        "your_api_secret_here",
+        "your_alpaca_api_key",
+        "your_alpaca_secret_key",
         "changeme",
         "none",
         "null",
@@ -39,11 +61,11 @@ def get_client() -> TradingClient:
     global _client, _broker_unavailable_reason
     if _client is None:
         if not _credentials_configured():
-            _broker_unavailable_reason = (
+            _set_broker_reason(
                 "ALPACA_API_KEY/ALPACA_SECRET_KEY not configured "
                 "(still empty or placeholder values)."
             )
-            raise RuntimeError(_broker_unavailable_reason)
+            raise RuntimeError(_broker_unavailable_reason or "broker unavailable")
         paper = os.environ.get("ALPACA_PAPER", "true").lower() != "false"
         try:
             _client = TradingClient(
@@ -51,9 +73,10 @@ def get_client() -> TradingClient:
                 os.environ["ALPACA_SECRET_KEY"],
                 paper=paper,
             )
+            _set_broker_reason(None)
         except Exception as exc:
-            _broker_unavailable_reason = f"Alpaca client init failed: {exc}"
-            raise RuntimeError(_broker_unavailable_reason)
+            _set_broker_reason(f"Alpaca client init failed: {exc}")
+            raise RuntimeError(_broker_unavailable_reason or "broker unavailable")
     return _client
 
 
@@ -80,42 +103,61 @@ def open_long(symbol: str, notional_usd: float, stop_loss: float,
         client = get_client()
     except Exception:
         return False
-    if notional_usd < 1.0:
+    if notional_usd < 1.0 or current_price <= 0:
         return False
 
     if is_fractionable(symbol):
-        client.submit_order(MarketOrderRequest(
-            symbol=symbol,
-            notional=str(round(notional_usd, 2)),
-            side=OrderSide.BUY,
-            time_in_force=TimeInForce.DAY,
-        ))
-        approx_qty = max(1, round(notional_usd / current_price))
-        client.submit_order(StopOrderRequest(
-            symbol=symbol,
-            qty=str(approx_qty),
-            side=OrderSide.SELL,
-            stop_price=str(round(stop_loss, 2)),
-            time_in_force=TimeInForce.GTC,
-        ))
+        try:
+            client.submit_order(MarketOrderRequest(
+                symbol=symbol,
+                notional=str(round(notional_usd, 2)),
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            ))
+        except Exception as exc:
+            _set_broker_reason(f"Long entry failed for {symbol}: {exc}")
+            return False
+
+        stop_qty = notional_usd / current_price
+        try:
+            client.submit_order(StopOrderRequest(
+                symbol=symbol,
+                qty=_fmt_qty(stop_qty),
+                side=OrderSide.SELL,
+                stop_price=str(round(stop_loss, 2)),
+                time_in_force=TimeInForce.GTC,
+            ))
+        except Exception as exc:
+            _set_broker_reason(f"Long stop placement failed for {symbol}: {exc}")
+            return True
+        _set_broker_reason(None)
         return True
 
     whole_shares = int(notional_usd // current_price)
     if whole_shares < 1:
         return False   # can't afford one share — skip
-    client.submit_order(MarketOrderRequest(
-        symbol=symbol,
-        qty=str(whole_shares),
-        side=OrderSide.BUY,
-        time_in_force=TimeInForce.DAY,
-    ))
-    client.submit_order(StopOrderRequest(
-        symbol=symbol,
-        qty=str(whole_shares),
-        side=OrderSide.SELL,
-        stop_price=str(round(stop_loss, 2)),
-        time_in_force=TimeInForce.GTC,
-    ))
+    try:
+        client.submit_order(MarketOrderRequest(
+            symbol=symbol,
+            qty=str(whole_shares),
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+        ))
+    except Exception as exc:
+        _set_broker_reason(f"Long entry failed for {symbol}: {exc}")
+        return False
+    try:
+        client.submit_order(StopOrderRequest(
+            symbol=symbol,
+            qty=str(whole_shares),
+            side=OrderSide.SELL,
+            stop_price=str(round(stop_loss, 2)),
+            time_in_force=TimeInForce.GTC,
+        ))
+    except Exception as exc:
+        _set_broker_reason(f"Long stop placement failed for {symbol}: {exc}")
+        return True
+    _set_broker_reason(None)
     return True
 
 
@@ -127,7 +169,9 @@ def close_long(symbol: str, qty: float) -> bool:
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
         ))
-    except Exception:
+        _set_broker_reason(None)
+    except Exception as exc:
+        _set_broker_reason(f"Close long failed for {symbol}: {exc}")
         return False
     return True
 
@@ -147,20 +191,25 @@ def open_short(symbol: str, notional_usd: float, stop_loss: float,
         client = get_client()
     except Exception:
         return 0
-    client.submit_order(MarketOrderRequest(
-        symbol=symbol,
-        qty=str(whole_shares),
-        side=OrderSide.SELL,     # sell to open short
-        time_in_force=TimeInForce.DAY,
-    ))
-    # Stop-loss for short: BUY order above entry to cap losses
-    client.submit_order(StopOrderRequest(
-        symbol=symbol,
-        qty=str(whole_shares),
-        side=OrderSide.BUY,      # buy to close short
-        stop_price=str(round(stop_loss, 2)),
-        time_in_force=TimeInForce.GTC,
-    ))
+    try:
+        client.submit_order(MarketOrderRequest(
+            symbol=symbol,
+            qty=str(whole_shares),
+            side=OrderSide.SELL,     # sell to open short
+            time_in_force=TimeInForce.DAY,
+        ))
+        # Stop-loss for short: BUY order above entry to cap losses
+        client.submit_order(StopOrderRequest(
+            symbol=symbol,
+            qty=str(whole_shares),
+            side=OrderSide.BUY,      # buy to close short
+            stop_price=str(round(stop_loss, 2)),
+            time_in_force=TimeInForce.GTC,
+        ))
+        _set_broker_reason(None)
+    except Exception as exc:
+        _set_broker_reason(f"Short entry failed for {symbol}: {exc}")
+        return 0
     return whole_shares
 
 
@@ -172,7 +221,9 @@ def close_short(symbol: str, qty: float) -> bool:
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
         ))
-    except Exception:
+        _set_broker_reason(None)
+    except Exception as exc:
+        _set_broker_reason(f"Close short failed for {symbol}: {exc}")
         return False
     return True
 
@@ -180,8 +231,11 @@ def close_short(symbol: str, qty: float) -> bool:
 def get_portfolio_value() -> float:
     """Current account equity."""
     try:
-        return float(get_client().get_account().equity)
-    except Exception:
+        value = float(get_client().get_account().equity)
+        _set_broker_reason(None)
+        return value
+    except Exception as exc:
+        _set_broker_reason(f"Account fetch failed: {exc}")
         return 0.0
 
 

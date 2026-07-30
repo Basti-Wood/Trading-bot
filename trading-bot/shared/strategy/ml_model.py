@@ -172,6 +172,10 @@ class MLPredictor:
         self.confidence_threshold = 0.80 - (dna.temperature * 0.28)
         self.buffer: list = []
         self.model: TradingLSTM | None = None
+        # Exposed for dashboard visualization
+        self.last_proba_up: float = 0.0
+        self.last_proba_down: float = 0.0
+        self.last_features: dict[str, float] = {}
         if model_path:
             self.load(model_path)
 
@@ -211,6 +215,16 @@ class MLPredictor:
         x = torch.from_numpy(window).unsqueeze(0)   # (1, seq_len, features)
         with torch.no_grad():
             proba = torch.softmax(self.model(x), dim=1)[0]
+
+        self.last_proba_down = float(proba[0])
+        self.last_proba_up = float(proba[1])
+        # Store last feature values for dashboard visualization
+        if self.buffer:
+            latest = self.buffer[-1]
+            self.last_features = {
+                self.feature_cols[i]: float(latest[i])
+                for i in range(min(len(self.feature_cols), len(latest)))
+            }
 
         conf = float(proba.max())
         if conf < self.confidence_threshold:

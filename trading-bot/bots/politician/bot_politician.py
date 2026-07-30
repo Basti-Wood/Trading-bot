@@ -109,10 +109,15 @@ class PoliticianBot:
 
     def run(self) -> None:
         print("[politician] Bot starting (hourly, rule-based).")
+        warned_closed = False
         while True:
             try:
                 if market_open():
+                    warned_closed = False
                     self._cycle()
+                elif not warned_closed:
+                    print("[politician] Market is closed — waiting for 09:30-16:00 ET.")
+                    warned_closed = True
             except Exception as exc:
                 print(f"[politician] cycle error: {exc}")
             time.sleep(CHECK_SECONDS)

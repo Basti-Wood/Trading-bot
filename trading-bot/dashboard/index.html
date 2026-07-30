@@ -80,8 +80,13 @@
   .net-arrow-row{display:flex;align-items:center;margin:0}
   .net-arrow-spacer{width:130px;flex-shrink:0}
   .net-arrow{color:#484f58;font-size:.7rem;text-align:center;flex:1}
-  .net-legend{display:flex;gap:16px;font-size:.72rem;color:#8b949e;margin-top:16px;flex-wrap:wrap}
-  .net-legend span{display:flex;align-items:center;gap:5px}
+  .net-legend{display:flex;gap:16px;font-size:.72rem;color:#8b949e;margin-top:8px;flex-wrap:wrap}
+  .net-legend span{display:flex;align-items:center;gap:4px}
+  #inferBtn:hover{opacity:0.85;box-shadow:0 0 12px var(--purple)}
+  #inferBtn:disabled{opacity:0.5;cursor:not-allowed}
+  #netCanvas{cursor:crosshair}
+  #netTooltip{pointer-events:none;transition:opacity .15s}
+  @keyframes pulse-glow{0%,100%{filter:brightness(1)} 50%{filter:brightness(2.5)}}
   .net-dot{width:8px;height:8px;border-radius:2px;display:inline-block}
   .net-info{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid var(--border)}
   .net-info-item{font-size:.78rem}
@@ -136,8 +141,8 @@
 <!-- Network Tab -->
 <div class="tab-content" id="tab-network">
   <h2>🧠 Neural Network Architecture</h2>
-  <p class="sub">Real LSTM topology from champion/challenger DNA — see exactly what the AI is running.
-     Nodes scale with layer size. Hover for details.</p>
+  <p class="sub">Real LSTM topology from champion/challenger DNA — click <b>Simulate Inference</b> to watch the AI think.
+     Hover nodes for details; activation pulses light up as signals flow.</p>
   <div class="net-select">
     <label for="netAsset" style="color:#8b949e;font-size:.82rem">Asset class: </label>
     <select id="netAsset" onchange="loadNetwork()"
@@ -151,18 +156,29 @@
       <option value="champion">👑 Champion</option>
       <option value="challenger">🥊 Challenger</option>
     </select>
+    <button onclick="triggerInference()" id="inferBtn"
+      style="margin-left:16px;padding:6px 16px;background:var(--purple);color:#fff;border:none;border-radius:4px;font-weight:600;font-size:.82rem;cursor:pointer">
+      ⚡ Simulate Inference
+    </button>
+    <span id="predLive" style="margin-left:12px;font-size:.78rem;color:#8b949e;display:none">
+      Last: <b id="predSignal" style="color:var(--blue)">—</b>
+      <span id="predProbs"></span>
+    </span>
   </div>
-  <div class="net-container">
-    <div id="network-diagram"><div class="loading">Select an asset class above to visualize the network</div></div>
+  <div class="net-container" style="position:relative">
+    <canvas id="netCanvas" width="900" height="500" style="width:100%;height:auto;display:block"></canvas>
+    <div id="netTooltip" style="display:none;position:absolute;background:#1c2128;border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:.72rem;color:var(--text);pointer-events:none;z-index:10;white-space:nowrap"></div>
   </div>
-  <div class="net-legend">
+  <div class="net-legend" style="display:flex;gap:16px;font-size:.72rem;color:#8b949e;margin-top:12px;flex-wrap:wrap">
     <span><span class="net-dot" style="background:var(--cyan)"></span> Input Features</span>
     <span><span class="net-dot" style="background:var(--purple)"></span> LSTM Hidden</span>
     <span><span class="net-dot" style="background:var(--yellow)"></span> Dense/Linear</span>
-    <span><span class="net-dot" style="background:var(--green)"></span> ReLU Activation</span>
+    <span><span class="net-dot" style="background:var(--green)"></span> ReLU</span>
     <span><span class="net-dot" style="background:var(--red)"></span> Dropout</span>
-    <span><span class="net-dot" style="background:var(--blue)"></span> Output (UP/DOWN)</span>
+    <span><span class="net-dot" style="background:var(--blue)"></span> Output</span>
+    <span style="margin-left:auto;color:var(--green)">⬤ lit = activated during inference</span>
   </div>
+  <div id="netInfo" style="margin-top:12px"></div>
 </div>
 
 <!-- Controls Tab -->
@@ -393,90 +409,400 @@ async function setControl(path, value) {
 }
 
 // =========================================================================
-// Network tab — LSTM architecture visualizer
+// Network tab — Canvas-based animated LSTM architecture visualizer
 // =========================================================================
+
+const netState = {
+  topology: null, asset: '', nFeatures: 0, featureNames: [],
+  netMeta: null, animId: null, activation: null, predData: null
+};
+
+const LAYER_COLORS = {
+  input:   '#39d2c0',  // cyan
+  lstm:    '#bc8cff',  // purple
+  linear:  '#d2991d',  // yellow
+  relu:    '#3fb950',  // green
+  dropout: '#f85149',  // red
+  output:  '#58a6ff',  // blue
+};
+
+const LAYER_COLORS_GLOW = {
+  input:   '#7ff0e0',
+  lstm:    '#d4b8ff',
+  linear:  '#f0c040',
+  relu:    '#6fdf80',
+  dropout: '#ff7060',
+  output:  '#80c0ff',
+};
+
 async function loadNetwork() {
   const asset = document.getElementById('netAsset').value;
   const role = document.getElementById('netRole').value;
-  const div = document.getElementById('network-diagram');
-  div.innerHTML = '<div class="loading">Loading network topology...</div>';
+  const canvas = document.getElementById('netCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '14px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Loading network topology...', canvas.width/2, canvas.height/2);
+
+  // Cancel any running animation
+  if (netState.animId) { cancelAnimationFrame(netState.animId); netState.animId = null; }
+  netState.activation = null;
 
   try {
-    const data = await api(`/api/network/${asset}`);
-    const net = data[role];
+    const [netData, predData] = await Promise.all([
+      api(`/api/network/${asset}`),
+      api(`/api/prediction/${asset}`).catch(() => ({ empty: true }))
+    ]);
+    const net = netData[role];
     if (!net || !net.topology) {
-      div.innerHTML = `<p style="color:#8b949e">No ${role} DNA found for ${asset.toUpperCase()} — run the evolver first.</p>`;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#8b949e';
+      ctx.fillText(`No ${role} DNA found for ${asset.toUpperCase()} — run the evolver first.`, canvas.width/2, canvas.height/2);
+      document.getElementById('netInfo').innerHTML = '';
+      document.getElementById('predLive').style.display = 'none';
       return;
     }
-    renderNetwork(div, net, asset, data.n_features, data.feature_names);
+
+    netState.topology = net.topology;
+    netState.asset = asset;
+    netState.nFeatures = netData.n_features;
+    netState.featureNames = netData.feature_names;
+    netState.netMeta = net;
+    netState.predData = predData.empty ? null : predData;
+
+    // Show live prediction if available
+    const predLive = document.getElementById('predLive');
+    if (predData && !predData.empty) {
+      predLive.style.display = 'inline';
+      document.getElementById('predSignal').textContent = predData.signal;
+      document.getElementById('predSignal').style.color = predData.signal === 'BUY' ? 'var(--green)' : predData.signal === 'SELL' ? 'var(--red)' : 'var(--yellow)';
+      document.getElementById('predProbs').innerHTML =
+        `⬆ ${(predData.prob_up*100).toFixed(1)}% / ⬇ ${(predData.prob_down*100).toFixed(1)}%`;
+    } else {
+      predLive.style.display = 'none';
+    }
+
+    drawNetwork(ctx, canvas.width, canvas.height);
+    renderNetInfo();
+
+    // Auto-trigger one inference pulse after load
+    setTimeout(() => triggerInference(), 800);
+
   } catch (e) {
-    div.innerHTML = `<div class="error">Failed to load: ${e.message}</div>`;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#f85149';
+    ctx.fillText(`Failed to load: ${e.message}`, canvas.width/2, canvas.height/2);
+    document.getElementById('netInfo').innerHTML = '';
   }
 }
 
-function renderNetwork(container, net, asset, nFeatures, featureNames) {
-  const topology = net.topology;
-  // Cap displayed nodes at 32 per layer for readability, scale down proportionally
-  const MAX_VISIBLE = 32;
+// ---------------------------------------------------------------------------
+// Canvas drawing
+// ---------------------------------------------------------------------------
 
-  let html = `<div class="net-diagram">`;
+function drawNetwork(ctx, w, h, activationProgress = -1) {
+  const { topology } = netState;
+  if (!topology) return;
 
-  for (let i = 0; i < topology.length; i++) {
-    const layer = topology[i];
-    const displaySize = Math.min(layer.size, MAX_VISIBLE);
-    const scaled = layer.size > MAX_VISIBLE
-      ? `showing ${displaySize}/${layer.size} nodes`
-      : `${layer.size} neurons`;
+  ctx.clearRect(0, 0, w, h);
 
-    // Layer label + size
-    html += `<div class="net-layer">`;
-    html += `<div class="net-label">${layer.label}<br><small>${scaled}</small></div>`;
-    html += `<div class="net-nodes">`;
+  const nLayers = topology.length;
+  const marginX = 100;
+  const marginY = 60;
+  const usableW = w - marginX * 2;
+  const usableH = h - marginY * 2;
+  const layerSpacing = usableW / Math.max(1, nLayers - 1);
+  const maxVisible = 64; // max nodes to draw per layer
 
-    const typeClass = layer.type;
-    const nodeSize = layer.size <= 16 ? '12px' : layer.size <= 32 ? '9px' : '7px';
-
-    for (let j = 0; j < displaySize; j++) {
-      const opacity = layer.size > MAX_VISIBLE ? 0.4 + (0.6 * (1 - j / MAX_VISIBLE)) : 1;
-      html += `<span class="net-node ${typeClass}" style="width:${nodeSize};height:${nodeSize};opacity:${opacity.toFixed(2)}"
-        title="${layer.label} — neuron ${j+1}/${layer.size}"></span>`;
+  // Precompute layer positions
+  const layers = topology.map((layer, li) => {
+    const x = marginX + li * layerSpacing;
+    const drawCount = Math.min(layer.size, maxVisible);
+    const nodeSpacing = Math.min(18, usableH / Math.max(1, drawCount + 1));
+    const totalH = (drawCount - 1) * nodeSpacing;
+    const startY = marginY + (usableH - totalH) / 2;
+    const nodes = [];
+    for (let j = 0; j < drawCount; j++) {
+      nodes.push({ x, y: startY + j * nodeSpacing, idx: j });
     }
-    html += `</div></div>`;
+    return { ...layer, x, drawCount, nodes, nodeSpacing };
+  });
 
-    // Arrow between layers
-    if (i < topology.length - 1) {
-      const next = topology[i + 1];
-      const connDesc = `${layer.size} → ${next.size}`;
-      html += `<div class="net-arrow-row">
-        <div class="net-arrow-spacer"></div>
-        <div class="net-arrow">▼ fully connected (${connDesc})</div>
-      </div>`;
+  // --- Draw connections ---
+  for (let li = 0; li < layers.length - 1; li++) {
+    const from = layers[li];
+    const to = layers[li + 1];
+    const connAlpha = activationProgress >= 0
+      ? (activationProgress > li && activationProgress <= li + 2 ? 0.25 : 0.04)
+      : 0.05;
+    ctx.strokeStyle = `rgba(139, 148, 158, ${connAlpha})`;
+    ctx.lineWidth = 0.5;
+
+    // Draw connection bands for large layers, individual lines for small layers
+    if (from.drawCount <= 16 && to.drawCount <= 16) {
+      // Individual connections
+      for (const fn of from.nodes) {
+        for (const tn of to.nodes) {
+          ctx.beginPath();
+          ctx.moveTo(fn.x, fn.y);
+          ctx.lineTo(tn.x, tn.y);
+          ctx.stroke();
+        }
+      }
+    } else {
+      // Band connections: draw a few representative lines
+      const stepFrom = Math.max(1, Math.floor(from.drawCount / 8));
+      const stepTo = Math.max(1, Math.floor(to.drawCount / 8));
+      for (let fi = 0; fi < from.drawCount; fi += stepFrom) {
+        for (let ti = 0; ti < to.drawCount; ti += stepTo) {
+          ctx.beginPath();
+          ctx.moveTo(from.nodes[fi].x, from.nodes[fi].y);
+          ctx.lineTo(to.nodes[ti].x, to.nodes[ti].y);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // Connection label
+    ctx.fillStyle = '#484f58';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    const midX = (from.x + to.x) / 2;
+    ctx.fillText(`${from.size}→${to.size}`, midX, marginY - 10);
+  }
+
+  // --- Draw nodes ---
+  for (let li = 0; li < layers.length; li++) {
+    const layer = layers[li];
+    const baseColor = LAYER_COLORS[layer.type] || '#888';
+    const glowColor = LAYER_COLORS_GLOW[layer.type] || '#aaa';
+    const isActivated = activationProgress >= 0
+      && activationProgress >= li && activationProgress < li + 1;
+
+    const baseRadius = layer.drawCount <= 16 ? 6 : layer.drawCount <= 32 ? 4.5 : 3;
+    const actRadius = baseRadius * 2.2;
+
+    for (const node of layer.nodes) {
+      const activated = isActivated;
+      // Fade activation within the layer
+      const fadeIn = activationProgress >= 0
+        ? Math.max(0, Math.min(1, (activationProgress - li) * 3))
+        : 0;
+
+      if (activated && fadeIn > 0) {
+        // Glow halo
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, actRadius, 0, Math.PI * 2);
+        ctx.fillStyle = glowColor.replace(')', `, ${0.3 * fadeIn})`).replace('rgb', 'rgba');
+        if (glowColor.startsWith('#')) {
+          ctx.fillStyle = glowColor + Math.round(0.4 * fadeIn * 255).toString(16).padStart(2, '0');
+        }
+        ctx.fill();
+
+        // Bright center
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, baseRadius * 1.3, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.globalAlpha = 0.7 * fadeIn;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      // Node body
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, baseRadius, 0, Math.PI * 2);
+      ctx.fillStyle = activated && fadeIn > 0.5 ? glowColor : baseColor;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    }
+
+    // Layer label
+    ctx.fillStyle = '#c9d1d9';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    const labelY = marginY + usableH + 18;
+    ctx.fillText(layer.label, layer.x, labelY);
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '9px sans-serif';
+    ctx.fillText(`${layer.size} neurons`, layer.x, labelY + 14);
+
+    // Type badge
+    if (layer.type !== 'input' && layer.type !== 'output') {
+      ctx.fillStyle = LAYER_COLORS[layer.type] + '30';
+      ctx.fillRect(layer.x - 20, labelY + 20, 40, 14);
+      ctx.fillStyle = LAYER_COLORS[layer.type];
+      ctx.font = 'bold 8px sans-serif';
+      ctx.fillText(layer.type.toUpperCase(), layer.x, labelY + 31);
     }
   }
 
-  html += `</div>`;
+  // Output layer special: UP / DOWN labels
+  const outLayer = layers[layers.length - 1];
+  if (outLayer && outLayer.type === 'output' && outLayer.nodes.length >= 2) {
+    const n0 = outLayer.nodes[0], n1 = outLayer.nodes[1];
+    ctx.fillStyle = '#f85149';
+    ctx.font = 'bold 9px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText('DOWN', n0.x - 10, n0.y + 3);
+    ctx.textAlign = 'left';
+    ctx.fillText('UP', n1.x + 10, n1.y + 3);
 
-  // Info panel
-  html += `<div class="net-info">
+    // Show real probabilities if available
+    if (netState.predData) {
+      ctx.fillStyle = '#f85149';
+      ctx.textAlign = 'right';
+      ctx.fillText(`${(netState.predData.prob_down * 100).toFixed(0)}%`, n0.x - 10, n0.y + 15);
+      ctx.fillStyle = '#3fb950';
+      ctx.textAlign = 'left';
+      ctx.fillText(`${(netState.predData.prob_up * 100).toFixed(0)}%`, n1.x + 10, n1.y + 15);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Inference animation
+// ---------------------------------------------------------------------------
+
+function triggerInference() {
+  if (!netState.topology) return;
+  if (netState.animId) { cancelAnimationFrame(netState.animId); netState.animId = null; }
+
+  const canvas = document.getElementById('netCanvas');
+  const ctx = canvas.getContext('2d');
+  const nLayers = netState.topology.length;
+  const animDuration = nLayers * 350; // ms per full pass
+  const startTime = performance.now();
+  const btn = document.getElementById('inferBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Processing...';
+
+  function animate(now) {
+    const elapsed = now - startTime;
+    const progress = elapsed / animDuration; // 0 to 1+
+    const layerProgress = progress * nLayers; // float layer index
+
+    if (layerProgress >= nLayers + 0.5) {
+      // Done — draw final state with output lit
+      drawNetwork(ctx, canvas.width, canvas.height, nLayers);
+      btn.disabled = false;
+      btn.textContent = '⚡ Simulate Inference';
+      netState.animId = null;
+
+      // Flash output briefly for UP/DOWN
+      const outLayer = netState.topology[netState.topology.length - 1];
+      if (outLayer && outLayer.type === 'output') {
+        setTimeout(() => {
+          drawNetwork(ctx, canvas.width, canvas.height, -1);
+        }, 1200);
+      }
+      return;
+    }
+
+    drawNetwork(ctx, canvas.width, canvas.height, layerProgress);
+    netState.animId = requestAnimationFrame(animate);
+  }
+
+  netState.animId = requestAnimationFrame(animate);
+}
+
+// ---------------------------------------------------------------------------
+// Canvas hover tooltip
+// ---------------------------------------------------------------------------
+
+(function setupCanvasHover() {
+  const canvas = document.getElementById('netCanvas');
+  const tooltip = document.getElementById('netTooltip');
+
+  canvas.addEventListener('mousemove', function(e) {
+    if (!netState.topology) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top) * scaleY;
+
+    // Find closest node
+    let bestDist = Infinity, bestLayer = null, bestNode = null;
+    const maxVisible = 64;
+    const marginX = 100, marginY = 60;
+    const usableW = canvas.width - marginX * 2;
+    const usableH = canvas.height - marginY * 2;
+    const nLayers = netState.topology.length;
+    const layerSpacing = usableW / Math.max(1, nLayers - 1);
+
+    for (let li = 0; li < nLayers; li++) {
+      const layer = netState.topology[li];
+      const x = marginX + li * layerSpacing;
+      const drawCount = Math.min(layer.size, maxVisible);
+      const nodeSpacing = Math.min(18, usableH / Math.max(1, drawCount + 1));
+      const totalH = (drawCount - 1) * nodeSpacing;
+      const startY = marginY + (usableH - totalH) / 2;
+
+      for (let j = 0; j < drawCount; j++) {
+        const ny = startY + j * nodeSpacing;
+        const dist = Math.hypot(mx - x, my - ny);
+        if (dist < 20 && dist < bestDist) {
+          bestDist = dist;
+          bestLayer = { ...layer, idx: li };
+          bestNode = j;
+        }
+      }
+    }
+
+    if (bestLayer && bestDist < 20) {
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.clientX - canvas.getBoundingClientRect().left + 16) + 'px';
+      tooltip.style.top = (e.clientY - canvas.getBoundingClientRect().top - 10) + 'px';
+      tooltip.innerHTML = `<b>${bestLayer.label}</b><br>
+        Neuron ${bestNode + 1} / ${bestLayer.size}<br>
+        Type: <span style="color:${LAYER_COLORS[bestLayer.type]}">${bestLayer.type.toUpperCase()}</span>`;
+      if (bestLayer.type === 'lstm') {
+        tooltip.innerHTML += `<br>Hidden: ${bestLayer.hidden || '—'} · Seq: ${bestLayer.seq_len || '—'}`;
+      }
+    } else {
+      tooltip.style.display = 'none';
+    }
+  });
+
+  canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+})();
+
+// ---------------------------------------------------------------------------
+// Info panel
+// ---------------------------------------------------------------------------
+
+function renderNetInfo() {
+  const { netMeta, asset, nFeatures, featureNames, predData } = netState;
+  if (!netMeta) return;
+
+  let html = `<div class="net-info">
     <div class="net-info-item">📐 <b>Asset</b><br><span class="val">${asset.toUpperCase()}</span></div>
-    <div class="net-info-item">🔢 <b>Input Features</b><br><span class="val">${nFeatures}</span></div>
-    <div class="net-info-item">📏 <b>Sequence Length</b><br><span class="val">${net.seq_len} candles</span></div>
-    <div class="net-info-item">🔮 <b>Hidden Size</b><br><span class="val">${net.hidden_size}</span></div>
-    <div class="net-info-item">📚 <b>LSTM Layers</b><br><span class="val">${net.num_layers}</span></div>
-    <div class="net-info-item">🎲 <b>Dropout</b><br><span class="val">${net.dropout}</span></div>
-    <div class="net-info-item">📊 <b>Sharpe Ratio</b><br><span class="val">${net.sharpe.toFixed(3)}</span></div>
-    <div class="net-info-item">🧬 <b>Generation</b><br><span class="val">${net.generation}</span></div>
-    <div class="net-info-item">🌡️ <b>Temperature</b><br><span class="val">${net.temperature.toFixed(2)}</span></div>
-    <div class="net-info-item">📋 <b>Features</b><br><span class="val" style="font-size:.68rem">${featureNames.join(', ')}</span></div>
+    <div class="net-info-item">🔢 <b>Features</b><br><span class="val">${nFeatures}</span></div>
+    <div class="net-info-item">📏 <b>Seq Length</b><br><span class="val">${netMeta.seq_len} candles</span></div>
+    <div class="net-info-item">🔮 <b>Hidden</b><br><span class="val">${netMeta.hidden_size}</span></div>
+    <div class="net-info-item">📚 <b>LSTM Layers</b><br><span class="val">${netMeta.num_layers}</span></div>
+    <div class="net-info-item">🎲 <b>Dropout</b><br><span class="val">${netMeta.dropout}</span></div>
+    <div class="net-info-item">📊 <b>Sharpe</b><br><span class="val">${netMeta.sharpe.toFixed(3)}</span></div>
+    <div class="net-info-item">🧬 <b>Gen</b><br><span class="val">${netMeta.generation}</span></div>
+    <div class="net-info-item">🌡️ <b>Temp</b><br><span class="val">${netMeta.temperature.toFixed(2)}</span></div>
+    <div class="net-info-item" style="grid-column:span 2">📋 <b>Feature names</b><br><span class="val" style="font-size:.68rem">${featureNames.join(', ')}</span></div>
   </div>`;
 
-  // Output explanation
-  html += `<div style="margin-top:12px;padding:8px 12px;background:#1b2a1b;border:1px solid #2a4a2a;border-radius:6px;font-size:.78rem;color:var(--green)">
-    🟢 <b>UP</b> (neuron 1) — predict price rises in next 5 candles &nbsp;|&nbsp;
-    🔴 <b>DOWN</b> (neuron 2) — predict price drops in next 5 candles
-  </div>`;
+  if (predData) {
+    html += `<div style="margin-top:8px;padding:8px 12px;background:#1b2a1b;border:1px solid #2a4a2a;border-radius:6px;font-size:.78rem">
+      🔮 <b>Last prediction:</b> ${predData.symbol} →
+      <span style="color:${predData.signal==='BUY'?'var(--green)':predData.signal==='SELL'?'var(--red)':'var(--yellow)'}">${predData.signal}</span>
+      (conf: ${(predData.confidence*100).toFixed(1)}%) ·
+      ⬆ ${(predData.prob_up*100).toFixed(1)}% / ⬇ ${(predData.prob_down*100).toFixed(1)}%
+      <br><span style="color:#8b949e;font-size:.7rem">Feature values: ${Object.entries(predData.features||{}).slice(0,8).map(([k,v])=>`${k}=${Number(v).toFixed(4)}`).join(' · ')}</span>
+    </div>`;
+  }
 
-  container.innerHTML = html;
+  document.getElementById('netInfo').innerHTML = html;
 }
 
 // =========================================================================
@@ -492,6 +818,7 @@ function autoRefresh() {
     const id = activeTab.id;
     if (id === 'tab-bots') loadBots();
     if (id === 'tab-leaderboard') loadLeaderboard();
+    if (id === 'tab-network') loadNetwork();
   }
 }
 

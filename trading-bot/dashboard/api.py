@@ -187,6 +187,16 @@ def handle_promote(asset_class: str) -> tuple:
         return 500, _json_bytes({"error": str(e)}), "application/json"
 
 
+def handle_prediction(asset_class: str) -> tuple:
+    """GET /api/prediction/<asset_class> — last model prediction state."""
+    if asset_class not in ASSET_CLASSES:
+        return 404, _json_bytes({"error": f"Unknown: {asset_class}"}), "application/json"
+    pred = _read_json(f"logs/predictions_{asset_class}.json")
+    if not pred:
+        return 200, _json_bytes({"empty": True, "asset_class": asset_class}), "application/json"
+    return 200, _json_bytes(pred), "application/json"
+
+
 # ---------------------------------------------------------------------------
 # Network architecture by asset class
 # ---------------------------------------------------------------------------
@@ -311,9 +321,10 @@ class APIHandler(BaseHTTPRequestHandler):
 
         # Parameterized routes
         for prefix, handler_fn in [
-            ("/api/evolution/", handle_evolution),
-            ("/api/trades/",    handle_trades),
-            ("/api/network/",   handle_network),
+            ("/api/evolution/",   handle_evolution),
+            ("/api/trades/",      handle_trades),
+            ("/api/network/",     handle_network),
+            ("/api/prediction/",  handle_prediction),
         ]:
             if path.startswith(prefix):
                 asset = path[len(prefix):]

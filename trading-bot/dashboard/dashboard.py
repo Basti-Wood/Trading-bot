@@ -377,6 +377,18 @@ def api_promote(asset_class: str):
     return jsonify({"promoted": ok, "asset_class": asset_class})
 
 
+@app.route("/api/prediction/<asset_class>")
+@require_auth
+def api_prediction(asset_class: str):
+    """Last model prediction state for network visualization."""
+    if asset_class not in ASSET_CLASSES:
+        abort(404)
+    pred = _read_json(f"logs/predictions_{asset_class}.json")
+    if not pred:
+        return jsonify({"empty": True, "asset_class": asset_class})
+    return jsonify(pred)
+
+
 @app.route("/api/trades/<asset_class>")
 @require_auth
 def api_trades(asset_class: str):

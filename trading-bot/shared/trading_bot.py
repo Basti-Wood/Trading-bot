@@ -48,6 +48,7 @@ class TradingBot:
         self.ml: MLPredictor | None = None
         self.pol_api_key = os.environ.get("QUIVER_API_KEY")
         self._warned_no_broker = False
+        self._warned_bad_equity = False
         self._trades_path = os.path.join(LOGS_DIR, f"trades_{self.asset_class}.csv")
         self._load_champion()
 
@@ -72,6 +73,35 @@ class TradingBot:
             ])
 
     # ------------------------------------------------------------------
+
+    def _write_prediction_state(self, symbol: str, signal: str,
+                                 confidence: float) -> None:
+        """Persist last prediction for dashboard network visualization."""
+        if not self.ml:
+            return
+        state = {
+            "asset_class": self.asset_class,
+            "symbol": symbol,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "signal": signal,
+            "confidence": round(confidence, 4),
+            "prob_up": round(self.ml.last_proba_up, 4),
+            "prob_down": round(self.ml.last_proba_down, 4),
+            "features": self.ml.last_features,
+            "dna": {
+                "hidden_size": self.dna.hidden_size,
+                "num_layers": self.dna.num_layers,
+                "seq_len": self.dna.seq_len,
+                "dropout": self.dna.dropout,
+                "temperature": self.dna.temperature,
+            },
+        }
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        path = os.path.join(LOGS_DIR, f"predictions_{self.asset_class}.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, path)
 
     def _load_champion(self) -> None:
         """Load champion DNA + LSTM weights from the shared volume."""
@@ -147,6 +177,8 @@ class TradingBot:
         if ctl.strategy_enabled(self.asset_class, "ml", controls) and self.ml:
             self.ml.push(row)
             signal, conf = self.ml.predict()
+            # Write prediction state for dashboard network visualization
+            self._write_prediction_state(symbol, signal, conf)
         if signal == "HOLD" and ctl.strategy_enabled(self.asset_class, "fallback", controls):
             signal, conf = self.fallback.predict(row)
         if signal == "HOLD":
@@ -212,8 +244,10 @@ class TradingBot:
 
         if not broker.is_configured():
             if not self._warned_no_broker:
+                reason = broker.unavailable_reason()
                 print(f"[{self.asset_class}] Alpaca credentials not configured. "
-                      f"Bot is idling until .env is set.")
+                      f"Bot is idling until .env is set."
+                      f"{f' Reason: {reason}' if reason else ''}")
                 self._warned_no_broker = True
             return
         self._warned_no_broker = False
@@ -227,6 +261,17 @@ class TradingBot:
             return   # paused from dashboard — hold existing positions
 
         portfolio_value = broker.get_portfolio_value()
+        if portfolio_value <= 0:
+            if not self._warned_bad_equity:
+                reason = broker.unavailable_reason()
+                msg = (f"[{self.asset_class}] Broker equity is non-positive "
+                       f"({portfolio_value:.2f}); skipping cycle.")
+                if reason:
+                    msg += f" Reason: {reason}"
+                print(msg)
+                self._warned_bad_equity = True
+            return
+        self._warned_bad_equity = False
         prices: dict = {}
 
         for symbol in self.symbols:

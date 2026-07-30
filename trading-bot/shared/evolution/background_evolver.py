@@ -3,6 +3,11 @@ shared/evolution/background_evolver.py — Background Challenger Evolution
 
 Runs GA continuously in a daemon thread after initial evolution completes.
 Keeps a fresh challenger ready for the circuit breaker at all times.
+
+During market hours this runs LIGHT evolution (few generations — the main
+evolver container handles heavy overnight training). During off-hours
+it can optionally ramp up, but typically the dedicated evolver container
+owns off-hours training.
 """
 
 import threading
@@ -12,6 +17,9 @@ from dataclasses import asdict
 
 from shared.evolution.dna import AgentDNA
 from shared.evolution.optimizer import GeneticOptimizer, CHALLENGERS_DIR
+
+# Light evolution during market hours; heavy training is the evolver container's job
+BACKGROUND_GENERATIONS = int(os.environ.get("BACKGROUND_GENERATIONS", 25))
 
 
 class BackgroundEvolver:
@@ -33,14 +41,13 @@ class BackgroundEvolver:
         self._stop_event.set()
 
     def _loop(self) -> None:
-        # Reuse same optimizer — population carries over between weekly batches
         optimizer = GeneticOptimizer(
             self.asset_class,
             population_size=self.population_size,
             historical_data=self.data,
         )
         while not self._stop_event.is_set():
-            best = optimizer.evolve(generations=50)   # ~28 min per weekly batch
+            best = optimizer.evolve(generations=BACKGROUND_GENERATIONS)
             with self._lock:
                 self._challenger = best
                 self._save(best)

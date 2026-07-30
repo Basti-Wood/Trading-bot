@@ -30,14 +30,19 @@ def market_open() -> bool:
 class StocksBot(TradingBot):
     def run(self) -> None:
         print("[stocks] Bot starting (market hours 09:30-16:00 ET).")
+        warned_closed = False
         while True:
             if market_open():
+                warned_closed = False
                 try:
                     self._cycle()
                 except Exception as exc:
                     print(f"[stocks] cycle error: {exc}")
                 time.sleep(60)
             else:
+                if not warned_closed:
+                    print("[stocks] Market is closed — waiting for 09:30-16:00 ET.")
+                    warned_closed = True
                 time.sleep(300)   # check every 5 min while closed
 
 
