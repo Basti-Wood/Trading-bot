@@ -1,1 +1,0 @@
-# shared.data — market data fetching & preprocessing

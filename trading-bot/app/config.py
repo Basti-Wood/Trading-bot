@@ -1,0 +1,109 @@
+from dataclasses import dataclass
+import math
+import os
+from pathlib import Path
+import re
+
+
+def flag(name, default=False):
+    value = os.getenv(name, str(default)).lower().strip()
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} must be true or false")
+    return value == "true"
+
+
+@dataclass(frozen=True)
+class Config:
+    data_dir: Path = Path("data")
+    symbols: tuple = ("SPY", "QQQ", "IWM")
+    api_key: str = ""
+    api_secret: str = ""
+    paper: bool = True
+    allow_live: bool = False
+    password: str = ""
+    host: str = "127.0.0.1"
+    port: int = 1337
+    feed: str = "iex"
+    history_days: int = 1800
+    max_bars: int = 1500
+    retrain_hours: int = 24
+    training_timeout: int = 900
+    training_memory_mb: int = 4096
+    capital: float = 10000
+    position_fraction: float = .10
+    gross_fraction: float = .30
+    daily_loss: float = .02
+    stop_loss: float = .05
+    take_profit: float = .10
+    cost_bps: float = 10
+    edge_bps: float = 10
+    max_drawdown: float = .15
+    min_trades: int = 5
+    feedback_weight: float = 2.0
+    validation_bars: int = 30
+    llm_url: str = "https://ai.bastiwood.com/v1"
+    llm_key: str = ""
+    llm_models: tuple = ("auto",)
+    brave_key: str = ""
+
+    def __post_init__(self):
+        if not self.symbols or len(self.symbols) > 8 or len(set(self.symbols)) != len(self.symbols):
+            raise ValueError("Configure 1 to 8 unique US equity/ETF symbols")
+        if any(not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", s) for s in self.symbols):
+            raise ValueError("Only US equity/ETF symbols are supported")
+        if self.feed not in {"iex", "sip"}:
+            raise ValueError("ALPACA_DATA_FEED must be iex or sip")
+        if not self.llm_url.startswith(("http://", "https://")) or len(self.llm_models) > 2:
+            raise ValueError("Set an HTTP FreeLLM base URL and at most two LLM models")
+        if not self.paper and not self.allow_live:
+            raise ValueError("Live trading requires ALLOW_LIVE_TRADING=true as well as ALPACA_PAPER=false")
+        if self.host not in {"127.0.0.1", "localhost", "::1"} and not self.password:
+            raise ValueError("DASHBOARD_PASSWORD is required for a non-loopback host")
+        bounds = {"capital": (100, 1000000), "position_fraction": (.01, .20),
+                  "gross_fraction": (.01, .80), "daily_loss": (.001, .10),
+                  "stop_loss": (.005, .10), "take_profit": (.01, .30),
+                  "cost_bps": (1, 100), "edge_bps": (0, 100),
+                  "training_memory_mb": (256, 4096), "training_timeout": (10, 1800),
+                  "history_days": (400, 3000), "max_bars": (300, 2000),
+                  "retrain_hours": (12, 168), "port": (1, 65535), "feedback_weight": (1, 3),
+                  "validation_bars": (20, 120)}
+        for name, (lo, hi) in bounds.items():
+            value = getattr(self, name)
+            if not math.isfinite(value) or not lo <= value <= hi:
+                raise ValueError(f"{name} must be between {lo} and {hi}")
+        if self.position_fraction > self.gross_fraction:
+            raise ValueError("Position limit cannot exceed gross exposure limit")
+
+    @property
+    def configured(self):
+        return all(v and not v.lower().startswith(("your_", "changeme")) for v in (self.api_key, self.api_secret))
+
+    @property
+    def threshold(self):
+        return (2 * self.cost_bps + self.edge_bps) / 10000
+
+    @classmethod
+    def from_env(cls):
+        return cls(
+            data_dir=Path(os.getenv("DATA_DIR", "data")),
+            symbols=tuple(s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ,IWM").split(",") if s.strip()),
+            api_key=os.getenv("ALPACA_API_KEY", "").strip(), api_secret=os.getenv("ALPACA_SECRET_KEY", "").strip(),
+            paper=flag("ALPACA_PAPER", True), allow_live=flag("ALLOW_LIVE_TRADING"),
+            password=os.getenv("DASHBOARD_PASSWORD", ""), host=os.getenv("HOST", "127.0.0.1"),
+            port=int(os.getenv("PORT", "1337")), feed=os.getenv("ALPACA_DATA_FEED", "iex"),
+            history_days=int(os.getenv("HISTORY_DAYS", "1800")), max_bars=int(os.getenv("MAX_BARS", "1500")),
+            retrain_hours=int(os.getenv("RETRAIN_HOURS", "24")),
+            training_timeout=int(os.getenv("TRAINING_TIMEOUT_SECONDS", "900")),
+            training_memory_mb=int(os.getenv("TRAINING_MEMORY_MB", "4096")),
+            feedback_weight=float(os.getenv("FEEDBACK_SAMPLE_WEIGHT", "2")),
+            validation_bars=int(os.getenv("VALIDATION_BARS", "30")),
+            capital=float(os.getenv("MAX_CAPITAL_USD", "10000")),
+            position_fraction=float(os.getenv("MAX_POSITION_FRACTION", ".10")),
+            gross_fraction=float(os.getenv("MAX_GROSS_FRACTION", ".30")),
+            daily_loss=float(os.getenv("MAX_DAILY_LOSS", ".02")),
+            stop_loss=float(os.getenv("STOP_LOSS", ".05")), take_profit=float(os.getenv("TAKE_PROFIT", ".10")),
+            cost_bps=float(os.getenv("COST_BPS_PER_SIDE", "10")), edge_bps=float(os.getenv("MIN_EDGE_BPS", "10")),
+            llm_url=os.getenv("FREELLM_BASE_URL", "https://ai.bastiwood.com/v1").rstrip("/"),
+            llm_key=os.getenv("FREELLM_API_KEY", ""),
+            llm_models=tuple(s.strip() for s in os.getenv("FREELLM_MODELS", "auto").split(",") if s.strip()),
+            brave_key=os.getenv("BRAVE_SEARCH_API_KEY", ""))

@@ -1,1 +1,6 @@
 /GamePlan
+.venv/
+**/__pycache__/
+*.pyc
+.env
+.local-preview*

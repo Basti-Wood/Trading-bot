@@ -1,140 +1,26 @@
-volumes:
-  shared_data:
-  champions:
-  challengers:
-  archive:
-  logs:
-
-x-common-env: &common-env
-  env_file: .env
-
-x-bot-volumes: &bot-volumes
-  - ./shared:/app/shared
-  - champions:/app/champions
-  - challengers:/app/challengers
-  - logs:/app/logs
-  - archive:/app/archive
-
 services:
-
-  # -------------------------------------------------------------------
-  # Trading bots
-  # -------------------------------------------------------------------
-
-  bot_crypto:
-    build: bots/crypto
-    container_name: bot_crypto
+  trading-bot:
+    build: .
     restart: unless-stopped
-    <<: *common-env
-    volumes: *bot-volumes
-    deploy:
-      resources:
-        limits:
-          cpus: "0.2"
-          memory: 512M
-
-  bot_stocks:
-    build: bots/stocks
-    container_name: bot_stocks
-    restart: unless-stopped
-    <<: *common-env
-    volumes: *bot-volumes
-    deploy:
-      resources:
-        limits:
-          cpus: "0.2"
-          memory: 512M
-
-  bot_etf:
-    build: bots/etf
-    container_name: bot_etf
-    restart: unless-stopped
-    <<: *common-env
-    volumes: *bot-volumes
-    deploy:
-      resources:
-        limits:
-          cpus: "0.2"
-          memory: 256M
-
-  bot_politician:
-    build: bots/politician
-    container_name: bot_politician
-    restart: unless-stopped
-    <<: *common-env
-    volumes: *bot-volumes
-    deploy:
-      resources:
-        limits:
-          cpus: "0.2"
-          memory: 256M
-
-  bot_funds:
-    build: bots/funds
-    container_name: bot_funds
-    restart: unless-stopped
-    <<: *common-env
-    volumes: *bot-volumes
-    deploy:
-      resources:
-        limits:
-          cpus: "0.1"
-          memory: 128M
-
-  # -------------------------------------------------------------------
-  # GA Evolver (GPU)
-  # -------------------------------------------------------------------
-
-  evolver:
-    build:
-      context: .
-      dockerfile: evolver/Dockerfile
-    container_name: evolver
-    restart: unless-stopped
-    <<: *common-env
+    init: true
+    env_file: .env
     environment:
-      - GA_WORKER_CORES=5          # i5-9400: 5 workers, 1 core for OS
-    volumes:
-      - ./shared:/app/shared
-      - shared_data:/app/data
-      - champions:/app/champions
-      - challengers:/app/challengers
-      - logs:/app/logs
-    deploy:
-      resources:
-        limits:
-          cpus: "5"        # 5 of 6 cores — leave 1 for OS + Docker
-          memory: 8G       # pre-load all historical data into RAM
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  # -------------------------------------------------------------------
-  # Dashboard
-  # -------------------------------------------------------------------
-
-  dashboard:
-    build:
-      context: .
-      dockerfile: dashboard/Dockerfile
-    container_name: dashboard
-    restart: unless-stopped
-    <<: *common-env
+      HOST: 0.0.0.0
+      DATA_DIR: /app/data
     ports:
-      - "1337:80"
+      - "${BIND_ADDRESS:-127.0.0.1}:1337:1337"
     volumes:
-      - ./shared:/app/shared
-      - champions:/app/champions
-      - challengers:/app/challengers
-      - logs:/app/logs
-      - archive:/app/archive
-    deploy:
-      resources:
-        limits:
-          cpus: "0.1"
-          memory: 256M
-
-# Total allocated: ~6 CPUs, ~62GB RAM
-# Leaves ~18GB headroom for OS + desktop
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cpus: 2.0
+    mem_limit: 6g
+    memswap_limit: 6g
+    pids_limit: 100
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:1337/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
