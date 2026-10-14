@@ -25,7 +25,8 @@ def create_app(config, store):
             if request.headers.get("X-Bot-Control") != "dashboard" or not request.is_json:
                 return jsonify(error="Use authenticated same-origin dashboard controls"), 403
             origin = request.headers.get("Origin")
-            if origin and origin != request.host_url.rstrip("/"):
+            # Behind an HTTPS reverse proxy host_url is the internal address, so also accept the configured public origins.
+            if origin and origin.lower() not in {request.host_url.rstrip("/").lower(), *config.origins}:
                 return jsonify(error="Cross-origin controls are blocked"), 403
 
     @app.after_request

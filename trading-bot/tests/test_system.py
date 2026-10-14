@@ -236,6 +236,7 @@ class WebTests(TempCase):
         auth["X-Bot-Control"]="dashboard"
         self.assertEqual(client.post("/api/control",json={"action":"pause"},headers={**auth,"Origin":"https://evil.example"}).status_code,403)
         self.store.set("account", {"loss_halt":False})
+        self.assertEqual(client.post("/api/control",json={"action":"resume"},headers={**auth,"Origin":"https://trade.bastiwood.com"}).status_code,200)
         self.assertEqual(client.post("/api/control",json={"action":"resume"},headers=auth).status_code,200)
         self.assertTrue(self.store.get("entries_enabled"))
 

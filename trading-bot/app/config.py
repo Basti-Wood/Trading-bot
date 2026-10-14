@@ -45,6 +45,7 @@ class Config:
     llm_key: str = ""
     llm_models: tuple = ("auto",)
     brave_key: str = ""
+    origins: tuple = ("https://trade.bastiwood.com",)
 
     def __post_init__(self):
         if not self.symbols or len(self.symbols) > 8 or len(set(self.symbols)) != len(self.symbols):
@@ -106,4 +107,5 @@ class Config:
             llm_url=os.getenv("FREELLM_BASE_URL", "https://ai.bastiwood.com/v1").rstrip("/"),
             llm_key=os.getenv("FREELLM_API_KEY", ""),
             llm_models=tuple(s.strip() for s in os.getenv("FREELLM_MODELS", "auto").split(",") if s.strip()),
-            brave_key=os.getenv("BRAVE_SEARCH_API_KEY", ""))
+            brave_key=os.getenv("BRAVE_SEARCH_API_KEY", ""),
+            origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()))
