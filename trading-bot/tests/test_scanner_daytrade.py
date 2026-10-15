@@ -14,11 +14,12 @@ from app.execution import Executor
 from app.features import dataset, features, FEATURES
 from app.feedback import capture_forecast, resolve_outcomes, replay_dataset, summary_key
 from app.models import train_symbol, predict, strategy_signature, evaluate
+from app.daytrade import bracket_stop, setup
 from app.research import combine
 from app.store import Store, utcnow
 from app.universe import scan, screen, active_symbols, monitored_symbols, entries_ready
 from app.web import create_app
-from test_system import TempCase
+from test_system import TempCase, models
 
 
 def intraday_bars(days=16):
@@ -152,12 +153,35 @@ class IntradayModelTests(TempCase):
         Engine(replace(self.cfg, trading_mode='daily'), self.store)
         with self.assertRaisesRegex(ValueError, 'separate DATA_DIR'): Engine(self.cfg, self.store)
 
-    def test_intraday_news_has_short_expiry_without_requiring_same_bar(self):
-        forecast = {'trading_mode': 'daytrade', 'eligible': True, 'forecast_signal': 'BUY', 'bar_at': 'new'}
-        research = {'trading_mode': 'daytrade', 'status': 'ready', 'action': 'BUY', 'bar_at': 'old', 'at': utcnow()}
-        self.assertEqual(combine(forecast, research)[0], 'BUY')
-        self.assertEqual(combine(forecast, {**research, 'trading_mode': 'daily'})[0], 'BUY')
-        self.assertEqual(combine(forecast, {**research, 'at': (pd.Timestamp.now(tz='UTC')-pd.Timedelta(minutes=11)).isoformat()})[0], 'BUY')
+    def test_intraday_votes_use_setup_not_llm(self):
+        forecast = {'trading_mode': 'daytrade', 'eligible': True, 'forecast_signal': 'BUY', 'bar_at': 'new',
+                    'models': models('BUY', 'BUY', 'HOLD'), 'setup': {'signal': 'BUY'}}
+        research = {'trading_mode': 'daily', 'status': 'ready', 'action': 'BUY', 'bar_at': 'new', 'at': utcnow()}
+        self.assertEqual(combine(forecast, None)[0], 'BUY')
+        # Bullish news can never stand in for a missing day-trading setup.
+        self.assertEqual(combine({**forecast, 'setup': {'signal': 'HOLD'}}, research)[0], 'HOLD')
+        self.assertEqual(combine({**forecast, 'models': models('BUY'), 'setup': {'signal': 'SELL'}}, None)[0], 'BUY')
+
+    def test_setup_scores_vwap_trend_breakout_and_volume(self):
+        index = pd.date_range('2026-11-24T14:30:00Z', periods=40, freq='5min')
+        close = pd.Series(np.linspace(100, 101, 40), index=index)
+        frame = pd.DataFrame({'open': close - .02, 'high': close + .05, 'low': close - .05, 'close': close,
+                              'volume': 1000.}, index=index)
+        frame.iloc[-1, frame.columns.get_loc('volume')] = 3000.
+        frame.iloc[-1, frame.columns.get_loc('close')] = 101.3
+        frame.iloc[-1, frame.columns.get_loc('high')] = 101.35
+        result = setup(frame)
+        self.assertEqual(result['bullish_checks'], 4)
+        self.assertEqual(result['signal'], 'HOLD')  # RSI blocks chasing a straight-line rally
+        frame['close'] = 100 + np.sin(np.arange(40) / 2) * .1
+        frame.iloc[-1, frame.columns.get_loc('close')] = frame.high.iloc[:3].max() + .05
+        frame['open'] = frame.close - .01
+        frame['high'] = frame[['open', 'close']].max(axis=1) + .05
+        self.assertEqual(setup(frame)['signal'], 'BUY')
+        stop = bracket_stop(self.cfg, {'setup': {'atr': .001}})
+        self.assertEqual(stop, .003)
+        self.assertEqual(bracket_stop(self.cfg, {'setup': {'atr': .05}}), self.cfg.daytrade_stop_loss)
+        self.assertEqual(bracket_stop(self.cfg, {}), self.cfg.daytrade_stop_loss)
 
 
 class DaytradeExecutionTests(TempCase):
@@ -259,7 +283,7 @@ class DaytradeEngineTests(TempCase):
             self.store.set(f'model:{symbol}', {'version': 'v1', 'data_through': '2026-11-25T05:00:00Z',
                                              'strategy_signature': strategy_signature(engine.config)})
             self.store.set(f'prediction:{symbol}', {'symbol': symbol, 'bar_at': '2026-11-25T05:00:00Z',
-                'model_version': 'v1', 'eligible': True, 'expected_return': expected, 'forecast_signal': 'BUY'})
+                'model_version': 'v1', 'eligible': True, 'expected_return': expected, 'forecast_signal': 'BUY', 'models': models('BUY')})
             self.store.set(f'research:{symbol}', {'status': 'ready', 'action': 'BUY', 'at': utcnow(), 'bar_at': '2026-11-25T05:00:00Z'})
         def execute(symbol, *args, **kwargs):
             engine.executor.changed = symbol == 'BBB'
@@ -273,7 +297,8 @@ class DaytradeEngineTests(TempCase):
         self.store.set('model:SPY', {'version': 'v1', 'data_through': '2026-11-27T14:30:00Z',
                                    'strategy_signature': strategy_signature(engine.config)})
         self.store.set('prediction:SPY', {'symbol': 'SPY', 'bar_at': '2026-11-27T14:45:00Z',
-            'model_version': 'v1', 'eligible': True, 'expected_return': .05, 'forecast_signal': 'BUY', 'trading_mode': 'daytrade'})
+            'model_version': 'v1', 'eligible': True, 'expected_return': .05, 'forecast_signal': 'BUY', 'trading_mode': 'daytrade',
+            'models': models('BUY')})
         self.store.set('research:SPY', {'status': 'ready', 'action': 'BUY', 'at': utcnow(), 'trading_mode': 'daytrade'})
         engine.cycle()
         engine.executor.execute.assert_not_called()

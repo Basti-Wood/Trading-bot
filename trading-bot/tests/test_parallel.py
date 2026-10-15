@@ -11,7 +11,7 @@ from app.portfolio import PortfolioEngine, strategy_contexts
 from app.store import Store, StrategyStore, store_for_config, utcnow
 from app.web import create_app
 from test_system import TempCase
-from test_system import bars
+from test_system import bars, models
 from test_scanner_daytrade import intraday_bars
 
 
@@ -45,7 +45,8 @@ class ParallelTests(TempCase):
         engine.store.set(f'model:{symbol}', {'version': 'v1', 'data_through': at,
                          'strategy_signature': strategy_signature(engine.config)})
         engine.store.set(f'prediction:{symbol}', {'symbol': symbol, 'model_version': 'v1', 'bar_at': at,
-            'eligible': True, 'expected_return': .01, 'forecast_signal': action, 'trading_mode': engine.config.trading_mode})
+            'eligible': True, 'expected_return': .01, 'forecast_signal': action, 'trading_mode': engine.config.trading_mode,
+            'models': models(action)})
         engine.store.set(f'research:{symbol}', {'status': 'ready', 'at': utcnow(), 'bar_at': at,
                          'action': action, 'trading_mode': engine.config.trading_mode})
 

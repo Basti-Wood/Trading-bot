@@ -107,7 +107,7 @@ def create_app(config, store):
                 "universe_mode": cfg.universe_mode, "scan_candidates": cfg.scan_candidates,
                 "poll_seconds": config.poll_seconds, "daytrade_max_positions": cfg.daytrade_max_positions,
                 "daytrade_hold_minutes": cfg.daytrade_hold_minutes, "daytrade_close_minutes": cfg.daytrade_close_minutes,
-                "cost_bps": cfg.cost_bps, "llm_url": cfg.llm_url,
+                "cost_bps": cfg.cost_bps, "llm_url": cfg.llm_url, "min_votes": cfg.min_votes,
                 "llm_models": cfg.llm_models, "llm_configured": bool(cfg.llm_key), "web_search": bool(cfg.brave_key)})
 
     @app.post("/api/control")

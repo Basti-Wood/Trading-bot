@@ -28,6 +28,12 @@ def bars(count=430):
                          "close": close, "volume": 100000 + np.arange(count) * 10}, index=idx)
 
 
+def models(*signals):
+    """Per-model ballots; one signal is repeated for all three prediction models."""
+    signals = signals * 3 if len(signals) == 1 else signals
+    return [{"id": f"m{i}", "name": f"Model {i}", "signal": s} for i, s in enumerate(signals)]
+
+
 class TempCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -93,19 +99,29 @@ class ModelTests(TempCase):
 
 class ResearchTests(unittest.TestCase):
     def setUp(self):
-        self.f = {"eligible": True, "forecast_signal": "BUY", "bar_at": "bar"}
+        self.f = {"eligible": True, "forecast_signal": "BUY", "bar_at": "bar", "models": models("BUY")}
+        self.two = {**self.f, "models": models("BUY", "BUY", "HOLD")}
         self.r = {"status": "ready", "action": "BUY", "bar_at": "bar", "at": utcnow()}
 
-    def test_neutral_news_abstains_and_opposing_news_vetoes(self):
-        self.assertEqual(combine(self.f, self.r)[0], "BUY")
-        self.assertEqual(combine(self.f, {**self.r, "action": "HOLD"})[0], "BUY")
-        self.assertEqual(combine(self.f, {**self.r, "action": "SELL"})[0], "HOLD")
+    def test_three_of_four_votes_trade(self):
+        # All three models agree: a neutral or opposing LLM cannot block the trade.
+        for news in ("BUY", "HOLD", "SELL"):
+            self.assertEqual(combine(self.f, {**self.r, "action": news})[0], "BUY")
+        # Two models need the LLM as the third vote.
+        self.assertEqual(combine(self.two, self.r)[0], "BUY")
+        self.assertEqual(combine(self.two, {**self.r, "action": "HOLD"})[0], "HOLD")
+        self.assertEqual(combine(self.two, {**self.r, "action": "SELL"})[0], "HOLD")
         self.assertEqual(combine({**self.f, "eligible": False}, self.r)[0], "HOLD")
+        self.assertEqual(combine({**self.f, "models": models("SELL")}, {**self.r, "action": "HOLD"})[0], "SELL")
+        self.assertEqual(combine(self.two, {**self.r, "action": "HOLD"}, min_votes=2)[0], "BUY")
 
     def test_missing_stale_or_misaligned_news_abstains(self):
+        # The once-per-day opinion stays valid for its daily bar, including over a weekend.
+        self.assertEqual(combine(self.two, {**self.r, "at": (datetime.now(timezone.utc)-timedelta(days=3)).isoformat()})[0], "BUY")
         for r in (None, {**self.r, "status": "unavailable"}, {**self.r, "bar_at": "other"},
-                  {**self.r, "at": (datetime.now(timezone.utc)-timedelta(hours=2)).isoformat()}):
+                  {**self.r, "at": (datetime.now(timezone.utc)-timedelta(days=5)).isoformat()}):
             self.assertEqual(combine(self.f, r)[0], "BUY")
+            self.assertEqual(combine(self.two, r)[0], "HOLD")
 
     def test_fabricated_citations_invalid_actions_and_nonfinite_confidence(self):
         valid = {"action": "BUY", "confidence": .8, "rationale": "Positive earnings", "source_ids": [1]}

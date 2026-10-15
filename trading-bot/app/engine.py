@@ -13,7 +13,8 @@ from .execution import Executor
 from .decisions import position_context, position_decision
 from .models import train_worker, predict, strategy_signature
 from .feedback import capture_forecast, resolve_outcomes
-from .research import Research, combine
+from .daytrade import bracket_stop
+from .research import Research, ballots, combine
 from .store import utcnow
 from .universe import active_symbols, monitored_symbols, scan, entries_ready
 
@@ -113,37 +114,46 @@ class Engine:
             self.training_started = time.monotonic()
 
     def research_tick(self, forecasts):
+        if self.config.intraday:
+            # Five-minute horizons decide on prediction models and setups only.
+            status = "not used for day trading; prediction models and setups decide"
+            if self.store.get("research_status", {}).get("status") != status:
+                self.store.set("research_status", {"status": status})
+            return
         if self.research_thread and self.research_thread.is_alive():
             return
-        due = []
-        for f in forecasts:
-            last = self.store.get(f"research_attempt:{f['symbol']}", 0)
-            if time.time() - last > (300 if self.config.intraday else 1800):
-                due.append(f)
-        if not due or not self.config.llm_key:
-            if not self.config.llm_key:
-                self.store.set("research_status", {"status": "news disabled; prediction models decide"})
+        if not self.config.llm_key:
+            self.store.set("research_status", {"status": "news disabled; prediction models decide"})
             return
-        due.sort(key=lambda f: (not self.store.get(f"owned:{f['symbol']}", False), f["forecast_signal"] != "BUY", -f["expected_return"]))
-        if self.config.intraday:
-            due = due[:5]
+        if not forecasts:
+            return
+        # One LLM request per completed daily bar covers every stock on the list.
+        latest = max(f["bar_at"] for f in forecasts)
+        current = [f for f in forecasts if f["bar_at"] == latest]
+        batch = self.store.get("research_batch") or {}
+        if batch.get("bar_at") != latest:
+            batch = {"bar_at": latest, "tries": 0, "at": 0, "first_seen": time.time(), "done": False}
+            self.store.set("research_batch", batch)
+        if batch["done"] or batch["tries"] >= 3 or time.time() - batch["at"] < 3600:
+            return
+        # Forecasts refresh one stock at a time; wait briefly so the single request includes them all.
+        if len(current) < len(forecasts) and time.time() - batch["first_seen"] < 600:
+            return
+        batch = {**batch, "tries": batch["tries"] + 1, "at": time.time()}
+        self.store.set("research_batch", batch)
         def work():
-            research = Research(self.config, self.store)
-            for forecast in due:
-                if self.stop.is_set():
-                    break
-                symbol = forecast["symbol"]
-                self.store.set(f"research_attempt:{symbol}", time.time())
-                try:
-                    with self.research_lock if self.research_lock is not None else nullcontext():
-                        if self.stop.is_set():
-                            break
-                        research.analyze(symbol, forecast)
-                except Exception as exc:
-                    # requests exceptions can contain URLs; never log headers or raw payloads.
-                    message = str(exc)[:240] if isinstance(exc, ValueError) else "News/FreeLLM connection failed"
-                    self.store.set(f"research:{symbol}", {"status": "unavailable", "at": utcnow(), "message": message})
-                    self.store.event("research", {"symbol": symbol, "status": "unavailable", "message": message})
+            try:
+                with self.research_lock if self.research_lock is not None else nullcontext():
+                    if self.stop.is_set():
+                        return
+                    Research(self.config, self.store).analyze_all(current)
+                self.store.set("research_batch", {**batch, "done": True, "symbols": [f["symbol"] for f in current]})
+            except Exception as exc:
+                # requests exceptions can contain URLs; never log headers or raw payloads.
+                message = str(exc)[:240] if isinstance(exc, ValueError) else "News/FreeLLM connection failed"
+                for forecast in current:
+                    self.store.set(f"research:{forecast['symbol']}", {"status": "unavailable", "at": utcnow(), "message": message})
+                self.store.event("research", {"status": "unavailable", "message": message, "attempt": batch["tries"]})
             self.store.set("research_status", {"status": "idle", "at": utcnow()})
         self.research_thread = threading.Thread(target=work, name="news-research", daemon=True)
         self.research_thread.start()
@@ -208,7 +218,29 @@ class Engine:
         model_age = (now - pd.Timestamp(meta["data_through"])).total_seconds()
         if not (300 <= age <= 390 if self.config.intraday else 0 <= age <= 7 * 86400) or not 0 <= model_age <= (3 if self.config.intraday else 14) * 86400:
             return "HOLD", "Market data or model is too old for this horizon"
-        return combine(forecast, self.store.get(f"research:{forecast['symbol']}"))
+        return combine(forecast, self.store.get(f"research:{forecast['symbol']}"), min_votes=self.config.min_votes)
+
+    def daytrade_exit(self, symbol, pnl, now):
+        """Cut losers at the bracket stop, lock in gains with a trail, let winners run."""
+        cfg = self.config
+        record = self.store.get(f"daytrade_position:{symbol}") or {}
+        peak = max(float(record.get("peak", 0)), pnl)
+        if peak > record.get("peak", 0):
+            self.store.set(f"daytrade_position:{symbol}", {**record, "peak": peak})
+        started = record.get("started_at")
+        # Unknown holding age after recovery is an exit, never a new timer.
+        if not started:
+            return "Day-trading holding period unknown; exiting"
+        if peak >= cfg.daytrade_trail_trigger and pnl <= peak - cfg.daytrade_trail_gap:
+            return f"Trailing profit stop: {pnl:.2%} after a {peak:.2%} peak"
+        held = (now - pd.Timestamp(started)).total_seconds() / 60
+        if held < cfg.daytrade_hold_minutes:
+            return None
+        prediction = self.store.get(f"prediction:{symbol}")
+        if (pnl > 0 and held < cfg.daytrade_run_minutes and prediction
+                and self.forecast_decision(prediction, now)[0] == "BUY"):
+            return None
+        return "Day-trading holding period ended" + ("; winner extension used up" if pnl > 0 and held >= cfg.daytrade_run_minutes else "")
 
     def queue_session(self, clock, now):
         if self.config.intraday or not self.config.queue_daily_orders or clock["is_open"]:
@@ -318,11 +350,8 @@ class Engine:
                         exit_reason = "Position stop-loss reached"
                     elif flatten:
                         exit_reason = "Day-trading exit before market close"
-                    if self.config.intraday:
-                        started = self.store.get(f"daytrade_position:{symbol}", {}).get("started_at")
-                        # Unknown holding age after recovery is an exit, never a new timer.
-                        if not exit_reason and (not started or (now - pd.Timestamp(started)).total_seconds() >= self.config.daytrade_hold_minutes * 60):
-                            exit_reason = "Day-trading holding period ended or holding age is unknown"
+                    if self.config.intraday and not exit_reason:
+                        exit_reason = self.daytrade_exit(symbol, pnl_fraction, now)
                 if exit_reason and pos and float(pos["qty"]) > 0 and owned:
                     # Keep the exit visible even if another symbol used this snapshot.
                     self.store.set(f"exit_pending:{symbol}", True)
@@ -372,6 +401,8 @@ class Engine:
                         self.store.set(f"exit_pending:{symbol}", True)
                         self.store.set(f"exit_reason:{symbol}", reason)
                     queue_args = {"queued_for_open": True, "reference_price": forecast.get("last_close")} if queued_buy else {}
+                    if self.config.intraday and action == "BUY":
+                        queue_args["stop_fraction"] = bracket_stop(self.config, forecast)
                     status = self.executor.execute(symbol, action, queue_session if queued_buy else day, account, positions, orders,
                                                    loss_breach=loss_breach, **queue_args)
                     if action == "SELL":
@@ -379,6 +410,7 @@ class Engine:
                     reason += "; " + status
                     acted = bool(self.executor.changed)
                 forecast.update({"action": action, "reason": reason, "research": research,
+                                 "votes": ballots(forecast, research),
                                  "position": position, "decision_at": utcnow()})
                 previous = self.store.get(f"forecast:{symbol}", {})
                 if previous.get("action") != action or previous.get("reason") != reason:

@@ -34,6 +34,12 @@ class Config:
     daytrade_stop_loss: float = .01
     daytrade_take_profit: float = .02
     daytrade_close_minutes: int = 10
+    # Winners may outlive the base holding period while their votes stay bullish.
+    daytrade_run_minutes: int = 60
+    daytrade_trail_trigger: float = .006
+    daytrade_trail_gap: float = .004
+    # Of four voters (three models plus LLM news or the day-trading setup).
+    min_votes: int = 3
     api_key: str = ""
     api_secret: str = ""
     paper: bool = True
@@ -96,13 +102,19 @@ class Config:
                   "daytrade_cooldown_minutes": (5, 120), "daytrade_hold_minutes": (5, 60),
                   "daytrade_stop_loss": (.005, .05), "daytrade_take_profit": (.01, .10),
                   "daytrade_close_minutes": (5, 60), "daytrade_capital_share": (.05, .95),
-                  "strategy_fraction": (.05, 1)}
+                  "strategy_fraction": (.05, 1), "min_votes": (2, 4),
+                  "daytrade_run_minutes": (5, 240), "daytrade_trail_trigger": (.001, .05),
+                  "daytrade_trail_gap": (.001, .05)}
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
                 raise ValueError(f"{name} must be between {lo} and {hi}")
         if self.position_fraction > self.gross_fraction:
             raise ValueError("Position limit cannot exceed gross exposure limit")
+        if self.daytrade_run_minutes < self.daytrade_hold_minutes:
+            raise ValueError("DAYTRADE_LET_WINNERS_RUN_MINUTES cannot be shorter than DAYTRADE_MAX_HOLD_MINUTES")
+        if self.daytrade_trail_gap > self.daytrade_trail_trigger:
+            raise ValueError("DAYTRADE_TRAIL_GAP cannot exceed DAYTRADE_TRAIL_TRIGGER; the trail would lock in a loss")
 
     @property
     def configured(self):
@@ -147,6 +159,10 @@ class Config:
             daytrade_stop_loss=float(os.getenv("DAYTRADE_STOP_LOSS", ".01")),
             daytrade_take_profit=float(os.getenv("DAYTRADE_TAKE_PROFIT", ".02")),
             daytrade_close_minutes=int(os.getenv("DAYTRADE_FLATTEN_MINUTES", "10")),
+            daytrade_run_minutes=int(os.getenv("DAYTRADE_LET_WINNERS_RUN_MINUTES", "60")),
+            daytrade_trail_trigger=float(os.getenv("DAYTRADE_TRAIL_TRIGGER", ".006")),
+            daytrade_trail_gap=float(os.getenv("DAYTRADE_TRAIL_GAP", ".004")),
+            min_votes=int(os.getenv("MIN_AGREEING_VOTES", "3")),
             api_key=os.getenv("ALPACA_API_KEY", "").strip(), api_secret=os.getenv("ALPACA_SECRET_KEY", "").strip(),
             paper=flag("ALPACA_PAPER", True), allow_live=flag("ALLOW_LIVE_TRADING"),
             password=os.getenv("DASHBOARD_PASSWORD", ""), host=os.getenv("HOST", "127.0.0.1"),

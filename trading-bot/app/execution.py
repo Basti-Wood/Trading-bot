@@ -54,7 +54,7 @@ class Executor:
         return f"Alpaca order {remote['status']} (acceptance is not a fill){queued}"
 
     def execute(self, symbol, action, session, account, positions, orders, *, loss_breach=False, force_exit=False,
-                queued_for_open=False, reference_price=None):
+                queued_for_open=False, reference_price=None, stop_fraction=None):
         cfg = self.config
         self.changed = False
         if queued_for_open and (cfg.intraday or not cfg.queue_daily_orders or action != "BUY"):
@@ -135,9 +135,11 @@ class Executor:
             if qty < 1:
                 return "Allocation cannot fund one whole share within exposure limits"
             side = "buy"
+            # A caller-supplied stop may only tighten the configured loss limit.
+            stop = min(stop_fraction, cfg.effective_stop) if stop_fraction else cfg.effective_stop
             payload = {"symbol": symbol, "side": side, "qty": str(qty), "type": "limit", "limit_price": f"{limit:.2f}",
                        "time_in_force": "day", "order_class": "bracket", "extended_hours": False,
-                       "stop_loss": {"stop_price": f"{price * (1 - cfg.effective_stop):.2f}"},
+                       "stop_loss": {"stop_price": f"{price * (1 - stop):.2f}"},
                        "take_profit": {"limit_price": f"{price * (1 + cfg.effective_take_profit):.2f}"}}
         # Include account/mode to prevent cross-account journal collisions, without exposing keys.
         scope = hashlib.sha256((self.broker.base + cfg.api_key).encode()).hexdigest()[:8]

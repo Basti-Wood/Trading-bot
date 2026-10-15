@@ -6,7 +6,7 @@ from app.models import strategy_signature
 from app.portfolio import PortfolioEngine
 from app.store import utcnow
 from app.web import create_app
-from test_system import TempCase
+from test_system import TempCase, models
 
 
 class DecisionFixture(TempCase):
@@ -33,7 +33,7 @@ class DecisionFixture(TempCase):
         self.engine.research_tick = Mock()
         self.store.set('entries_enabled', True)
 
-    def prediction(self, action, symbol='SPY', news=None, stale=False):
+    def prediction(self, action, symbol='SPY', news=None, stale=False, votes=None):
         at = '2026-10-15T13:40:00Z' if self.cfg.intraday else '2026-10-14T04:00:00Z'
         if stale:
             at = '2026-09-01T13:40:00Z'
@@ -41,7 +41,7 @@ class DecisionFixture(TempCase):
             'strategy_signature': strategy_signature(self.cfg)})
         self.store.set(f'prediction:{symbol}', {'symbol': symbol, 'model_version': 'v1', 'bar_at': at,
             'eligible': True, 'expected_return': {'BUY': .01, 'SELL': -.01, 'HOLD': 0}[action],
-            'forecast_signal': action, 'trading_mode': self.mode})
+            'forecast_signal': action, 'trading_mode': self.mode, 'models': models(*(votes or [action]))})
         self.store.set(f'research:{symbol}', {'status': 'ready', 'at': utcnow(), 'bar_at': at,
             'action': news or action, 'trading_mode': self.mode})
 
@@ -86,7 +86,7 @@ class PositionDecisionTests(DecisionFixture):
 
     def test_disagreement_keeps_owned_shares(self):
         self.position()
-        self.prediction('SELL', news='BUY')
+        self.prediction('SELL', news='BUY', votes=['SELL', 'SELL', 'HOLD'])
         self.assertEqual(self.decision()['action'], 'HOLD')
         self.broker.submit.assert_not_called()
 

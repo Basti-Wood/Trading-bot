@@ -1,4 +1,4 @@
-from dataclasses import replace
+﻿from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import unittest
@@ -15,7 +15,7 @@ from app.store import utcnow
 from app.web import create_app
 from test_decisions import DecisionFixture
 from test_feedback import session_bars, snapshot
-from test_system import TempCase, bars
+from test_system import TempCase, bars, models
 
 
 class VotingTests(unittest.TestCase):
@@ -33,35 +33,33 @@ class VotingTests(unittest.TestCase):
                 self.assertEqual(result['forecast_signal'], expected)
                 self.assertEqual(result['expected_return'], float(np.median(values)))
 
-    def test_directional_news_vetoes_but_neutral_and_missing_news_abstain(self):
+    def test_llm_is_the_fourth_vote(self):
         for vote in ('BUY', 'SELL'):
-            forecast = {'forecast_signal': vote, 'bar_at': 'bar', 'eligible': True}
             opposite = 'SELL' if vote == 'BUY' else 'BUY'
+            three = {'forecast_signal': vote, 'bar_at': 'bar', 'eligible': True, 'models': models(vote)}
+            two = {**three, 'models': models(vote, vote, 'HOLD')}
             news = {'status': 'ready', 'at': utcnow(), 'bar_at': 'bar'}
-            for action in ('HOLD', vote):
-                self.assertEqual(combine(forecast, {**news, 'action': action})[0], vote)
-            self.assertEqual(combine(forecast, None)[0], vote)
-            self.assertEqual(combine(forecast, {**news, 'action': opposite})[0], 'HOLD')
-            self.assertEqual(combine(forecast, {**news, 'action': opposite, 'at': 'invalid'})[0], vote)
+            for action in ('HOLD', vote, opposite):
+                self.assertEqual(combine(three, {**news, 'action': action})[0], vote)
+            self.assertEqual(combine(three, None)[0], vote)
+            self.assertEqual(combine(two, {**news, 'action': vote})[0], vote)
+            for action in ('HOLD', opposite):
+                self.assertEqual(combine(two, {**news, 'action': action})[0], 'HOLD')
+            self.assertEqual(combine(two, {**news, 'action': vote, 'at': 'invalid'})[0], 'HOLD')
 
     def test_news_cannot_create_entry_without_two_price_votes_or_validation(self):
         news = {'status': 'ready', 'at': utcnow(), 'bar_at': 'bar', 'action': 'BUY'}
-        self.assertEqual(combine({'forecast_signal': 'HOLD', 'bar_at': 'bar', 'eligible': True}, news)[0], 'HOLD')
-        self.assertEqual(combine({'forecast_signal': 'BUY', 'bar_at': 'bar', 'eligible': False}, news)[0], 'HOLD')
+        self.assertEqual(combine({'forecast_signal': 'HOLD', 'bar_at': 'bar', 'eligible': True,
+                                  'models': models('BUY', 'HOLD', 'HOLD')}, news)[0], 'HOLD')
+        self.assertEqual(combine({'forecast_signal': 'BUY', 'bar_at': 'bar', 'eligible': False, 'models': models('BUY')}, news)[0], 'HOLD')
 
-    def test_neutral_llm_does_not_hide_another_llms_confident_bearish_warning(self):
-        forecast = {'forecast_signal': 'BUY', 'bar_at': 'bar', 'eligible': True}
-        news = {'status': 'ready', 'at': utcnow(), 'bar_at': 'bar', 'action': 'HOLD',
-                'opinions': [{'action': 'HOLD'}, {'action': 'SELL'}]}
-        self.assertEqual(combine(forecast, news)[0], 'HOLD')
-
-    def test_weak_or_uncited_bearish_news_abstains(self):
-        forecast = {'forecast_signal': 'BUY', 'bar_at': 'bar', 'eligible': True}
+    def test_weak_or_uncited_bullish_news_cannot_be_the_third_vote(self):
+        forecast = {'forecast_signal': 'BUY', 'bar_at': 'bar', 'eligible': True, 'models': models('BUY', 'BUY', 'HOLD')}
         for confidence, sources in ((.4, [1]), (.9, [])):
-            opinion = Research.validate(json.dumps({'action': 'SELL', 'confidence': confidence,
+            opinion = Research.validate(json.dumps({'action': 'BUY', 'confidence': confidence,
                 'source_ids': sources, 'rationale': 'Uncertain direction'}), [{'id': 1}])
             news = {'status': 'ready', 'at': utcnow(), 'bar_at': 'bar', 'action': opinion['action'], 'opinions': [opinion]}
-            self.assertEqual(combine(forecast, news)[0], 'BUY')
+            self.assertEqual(combine(forecast, news)[0], 'HOLD')
 
 
 class QueuedOrderTests(DecisionFixture):
@@ -129,11 +127,14 @@ class QueuedOrderTests(DecisionFixture):
         self.broker.submit.assert_not_called()
 
     def test_neutral_forecasts_do_not_queue_a_buy(self):
-        self.store.set('prediction:SPY', {**self.forecast, 'forecast_signal': 'HOLD'})
+        self.store.set('prediction:SPY', {**self.forecast, 'forecast_signal': 'HOLD', 'models': models('HOLD')})
         self.assertEqual(self.decision()['action'], 'WAIT')
         self.broker.submit.assert_not_called()
 
-    def test_bearish_news_cancels_queued_bullish_entry(self):
+    def test_bearish_news_cancels_queued_entry_that_needed_its_vote(self):
+        self.forecast['models'] = models('BUY', 'BUY', 'HOLD')
+        self.store.set('prediction:SPY', self.forecast)
+        self.store.set('research:SPY', {'status': 'ready', 'action': 'BUY', 'at': utcnow(), 'bar_at': self.forecast['bar_at']})
         self.pending()
         self.store.set('research:SPY', {'status': 'ready', 'action': 'SELL', 'at': utcnow(), 'bar_at': self.forecast['bar_at']})
         self.assertEqual(self.decision()['action'], 'WAIT')
@@ -142,7 +143,7 @@ class QueuedOrderTests(DecisionFixture):
 
     def test_neutralized_prediction_cancels_queue(self):
         self.pending()
-        self.store.set('prediction:SPY', {**self.forecast, 'forecast_signal': 'HOLD'})
+        self.store.set('prediction:SPY', {**self.forecast, 'forecast_signal': 'HOLD', 'models': models('HOLD')})
         self.decision()
         self.broker.cancel.assert_called_once_with('accepted')
 
