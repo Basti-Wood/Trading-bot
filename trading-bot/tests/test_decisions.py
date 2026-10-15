@@ -9,7 +9,7 @@ from app.web import create_app
 from test_system import TempCase
 
 
-class PositionDecisionTests(TempCase):
+class DecisionFixture(TempCase):
     mode = 'daily'
 
     def setUp(self):
@@ -56,6 +56,8 @@ class PositionDecisionTests(TempCase):
         self.assertFalse(self.store.history('error'))
         return self.store.get('forecast:SPY')
 
+
+class PositionDecisionTests(DecisionFixture):
     def test_neutral_unowned_stock_waits_and_never_buys(self):
         self.prediction('HOLD')
         forecast = self.decision()
@@ -84,7 +86,7 @@ class PositionDecisionTests(TempCase):
 
     def test_disagreement_keeps_owned_shares(self):
         self.position()
-        self.prediction('SELL', news='HOLD')
+        self.prediction('SELL', news='BUY')
         self.assertEqual(self.decision()['action'], 'HOLD')
         self.broker.submit.assert_not_called()
 
@@ -157,14 +159,14 @@ class PositionDecisionTests(TempCase):
         self.assertFalse(forecast['position']['owned'])
         self.broker.submit.assert_not_called()
 
-    def test_missing_news_holds_existing_shares_and_waits_when_flat(self):
+    def test_missing_news_allows_bearish_exit_but_never_shorts(self):
         self.position()
         self.prediction('SELL')
         self.store.set('research:SPY', None)
-        self.assertEqual(self.decision()['action'], 'HOLD')
+        self.assertEqual(self.decision()['action'], 'SELL')
         self.broker.positions.return_value = []
         self.assertEqual(self.decision()['action'], 'WAIT')
-        self.broker.submit.assert_not_called()
+        self.broker.submit.assert_called_once()
 
     def test_api_exposes_actual_position_and_decision_separately(self):
         self.position()

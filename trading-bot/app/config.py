@@ -18,6 +18,7 @@ class Config:
     symbols: tuple = ("SPY", "QQQ", "IWM")
     trading_mode: str = "daily"
     daytrade_capital_share: float = .5
+    queue_daily_orders: bool = True
     # Internal child-strategy settings; the public mode may run both together.
     coordinated: bool = False
     strategy_fraction: float = 1.
@@ -134,6 +135,7 @@ class Config:
             symbols=tuple(s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ,IWM").split(",") if s.strip()),
             trading_mode=os.getenv("TRADING_MODE", "daily"), universe_mode=os.getenv("UNIVERSE_MODE", "market"),
             daytrade_capital_share=float(os.getenv("DAYTRADE_CAPITAL_SHARE", ".5")),
+            queue_daily_orders=flag("QUEUE_DAILY_ORDERS", True),
             scan_candidates=int(os.getenv("SCAN_CANDIDATES", "20")),
             scan_interval_minutes=int(os.getenv("SCAN_INTERVAL_MINUTES", "30")),
             scan_min_price=float(os.getenv("SCAN_MIN_PRICE", "5")),

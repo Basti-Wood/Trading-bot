@@ -96,16 +96,16 @@ class ResearchTests(unittest.TestCase):
         self.f = {"eligible": True, "forecast_signal": "BUY", "bar_at": "bar"}
         self.r = {"status": "ready", "action": "BUY", "bar_at": "bar", "at": utcnow()}
 
-    def test_both_must_agree(self):
+    def test_neutral_news_abstains_and_opposing_news_vetoes(self):
         self.assertEqual(combine(self.f, self.r)[0], "BUY")
-        for action in ("SELL", "HOLD"):
-            self.assertEqual(combine(self.f, {**self.r, "action": action})[0], "HOLD")
+        self.assertEqual(combine(self.f, {**self.r, "action": "HOLD"})[0], "BUY")
+        self.assertEqual(combine(self.f, {**self.r, "action": "SELL"})[0], "HOLD")
         self.assertEqual(combine({**self.f, "eligible": False}, self.r)[0], "HOLD")
 
-    def test_missing_stale_or_misaligned_news_blocks(self):
+    def test_missing_stale_or_misaligned_news_abstains(self):
         for r in (None, {**self.r, "status": "unavailable"}, {**self.r, "bar_at": "other"},
                   {**self.r, "at": (datetime.now(timezone.utc)-timedelta(hours=2)).isoformat()}):
-            self.assertEqual(combine(self.f, r)[0], "HOLD")
+            self.assertEqual(combine(self.f, r)[0], "BUY")
 
     def test_fabricated_citations_invalid_actions_and_nonfinite_confidence(self):
         valid = {"action": "BUY", "confidence": .8, "rationale": "Positive earnings", "source_ids": [1]}
@@ -210,6 +210,7 @@ class ExecutionTests(TempCase):
 class BrokerTests(unittest.TestCase):
     def test_paginated_bars_exclude_unfinished_day(self):
         broker=Alpaca(Config(api_key="k",api_secret="s"))
+        broker.calendar = Mock(return_value=[{'date': '2026-10-13', 'close': '16:00'}, {'date': '2026-10-14', 'close': '16:00'}])
         row=lambda day: {"t":f"2026-10-{day}T04:00:00Z", "o":100,"h":101,"l":99,"c":100,"v":1000}
         broker.request=Mock(side_effect=[{"bars":[row("12")],"next_page_token":"next"},{"bars":[row("13"),row("14")]}])
         result=broker.bars("SPY",datetime(2026,10,14,15,tzinfo=timezone.utc))

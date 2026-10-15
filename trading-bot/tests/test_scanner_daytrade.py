@@ -156,8 +156,8 @@ class IntradayModelTests(TempCase):
         forecast = {'trading_mode': 'daytrade', 'eligible': True, 'forecast_signal': 'BUY', 'bar_at': 'new'}
         research = {'trading_mode': 'daytrade', 'status': 'ready', 'action': 'BUY', 'bar_at': 'old', 'at': utcnow()}
         self.assertEqual(combine(forecast, research)[0], 'BUY')
-        self.assertEqual(combine(forecast, {**research, 'trading_mode': 'daily'})[0], 'HOLD')
-        self.assertEqual(combine(forecast, {**research, 'at': (pd.Timestamp.now(tz='UTC')-pd.Timedelta(minutes=11)).isoformat()})[0], 'HOLD')
+        self.assertEqual(combine(forecast, {**research, 'trading_mode': 'daily'})[0], 'BUY')
+        self.assertEqual(combine(forecast, {**research, 'at': (pd.Timestamp.now(tz='UTC')-pd.Timedelta(minutes=11)).isoformat()})[0], 'BUY')
 
 
 class DaytradeExecutionTests(TempCase):
@@ -286,9 +286,10 @@ class DaytradeEngineTests(TempCase):
         self.store.set('model:SPY', {'version': 'v1', 'strategy_signature': strategy_signature(engine.config)})
         broker = Mock()
         broker.bars.side_effect = BrokerError('temporary outage')
-        with patch('app.engine.Alpaca', return_value=broker), patch('app.engine.time.time', side_effect=[1000, 1000, 1061, 1061]):
+        with patch('app.engine.Alpaca', return_value=broker), patch('app.engine.time.time', return_value=1000) as clock:
             engine.forecast_tick(['SPY'], '2026-11-27')
             engine.forecast_thread.join(timeout=5)
+            clock.return_value = 1061
             engine.forecast_tick(['SPY'], '2026-11-27')
             engine.forecast_thread.join(timeout=5)
         self.assertEqual(broker.bars.call_count, 2)

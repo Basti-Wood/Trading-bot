@@ -78,7 +78,7 @@ class PortfolioEngine:
         if not self.config.configured:
             for engine in self.engines:
                 engine.cycle()
-            self.store.set("portfolio_engine", {"status": "setup", "message": "Configure Alpaca and FreeLLM", "at": utcnow()})
+            self.store.set("portfolio_engine", {"status": "setup", "message": "Configure Alpaca", "at": utcnow()})
             return
         reconciled = self.engines[0].executor.reconcile()
         account, clock = self.broker.account(), self.broker.clock()

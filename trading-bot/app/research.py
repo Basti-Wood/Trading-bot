@@ -99,7 +99,7 @@ class Research:
     def analyze(self, symbol, forecast):
         sources, warnings = self.news(symbol)
         if not sources:
-            raise ValueError("No recent verified news sources; new buys are blocked")
+            raise ValueError("No recent verified news sources; news abstains")
         opinions = []
         for model in self.models():
             self.store.set("research_status", {"status": "running", "symbol": symbol, "model": model, "at": utcnow()})
@@ -117,7 +117,7 @@ class Research:
             if not isinstance(content, str) or len(content) > 10000:
                 raise ValueError("Invalid FreeLLM response")
             opinions.append({"requested_model": model, "model": plain(reply.get("model") or model, 120), **self.validate(content.strip(), sources)})
-        actions = {p["action"] for p in opinions}
+        actions = {p["action"] for p in opinions if p["action"] in {"BUY", "SELL"}}
         action = next(iter(actions)) if len(actions) == 1 else "HOLD"
         result = {"symbol": symbol, "status": "ready", "at": utcnow(), "bar_at": forecast["bar_at"],
                   "action": action, "opinions": opinions, "sources": sources, "warnings": warnings,
@@ -128,17 +128,30 @@ class Research:
 
 
 def combine(forecast, research, now=None):
+    """Two price votes qualify; confident opposing news vetoes, neutral abstains."""
     now = now or datetime.now(timezone.utc)
+    signal = forecast["forecast_signal"]
+    if signal not in {"BUY", "SELL"}:
+        return "HOLD", "Fewer than two prediction models agree on a direction; neutral votes abstain"
+    if signal == "BUY" and not forecast["eligible"]:
+        return "HOLD", "Two models are bullish, but the forecasting ensemble has not passed validation"
+    reason = "At least two prediction models vote " + signal
     if not research or research.get("status") != "ready":
-        return "HOLD", "Waiting for a valid news-based LLM opinion"
-    at = datetime.fromisoformat(research["at"])
+        return signal, reason + "; unavailable news abstains"
+    try:
+        at = datetime.fromisoformat(research["at"])
+        age = (now - at).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return signal, reason + "; invalid news timestamp abstains"
     intraday = forecast.get("trading_mode") == "daytrade"
     aligned = research.get("trading_mode") == "daytrade" if intraday else research.get("bar_at") == forecast["bar_at"]
-    if not 0 <= (now - at).total_seconds() <= (600 if intraday else 3600) or not aligned:
-        return "HOLD", "News opinion is stale or uses a different market snapshot"
-    signal = forecast["forecast_signal"]
-    if signal == research["action"] and signal in {"BUY", "SELL"}:
-        if signal == "BUY" and not forecast["eligible"]:
-            return "HOLD", "Models agree, but the forecasting ensemble has not passed validation"
-        return signal, "Forecast ensemble and news models agree; risk checks still apply"
-    return "HOLD", "No directional agreement: forecasts and news disagree or evidence is neutral"
+    if not 0 <= age <= (600 if intraday else 3600) or not aligned:
+        return signal, reason + "; stale or misaligned news abstains"
+    news = {p.get("action") for p in research.get("opinions", [])}
+    news.add(research.get("action"))
+    opposite = "SELL" if signal == "BUY" else "BUY"
+    if opposite in news:
+        return "HOLD", reason + "; confident opposing news vetoes this trade"
+    if signal not in news:
+        return signal, reason + "; neutral news abstains"
+    return signal, reason + "; news agrees"

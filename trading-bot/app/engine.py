@@ -122,7 +122,7 @@ class Engine:
                 due.append(f)
         if not due or not self.config.llm_key:
             if not self.config.llm_key:
-                self.store.set("research_status", {"status": "waiting for FREELLM_API_KEY"})
+                self.store.set("research_status", {"status": "news disabled; prediction models decide"})
             return
         due.sort(key=lambda f: (not self.store.get(f"owned:{f['symbol']}", False), f["forecast_signal"] != "BUY", -f["expected_return"]))
         if self.config.intraday:
@@ -167,7 +167,8 @@ class Engine:
     def forecast_tick(self, symbols, day):
         if self.forecast_thread and self.forecast_thread.is_alive():
             return
-        slot = int(time.time() // 300) if self.config.intraday else day
+        # Refresh daily inputs after session close as well as before the open.
+        slot = int(time.time() // (300 if self.config.intraday else 1800))
         # Bound the in-memory cache even as discovery rotates through new stocks.
         self.cached = {s: v for s, v in self.cached.items() if s in symbols}
         self.forecast_attempts = {s: v for s, v in self.forecast_attempts.items() if s in symbols}
@@ -199,9 +200,30 @@ class Engine:
         self.forecast_thread = threading.Thread(target=work, name="forecasts", daemon=True)
         self.forecast_thread.start()
 
+    def forecast_decision(self, forecast, now):
+        meta = self.store.get(f"model:{forecast['symbol']}")
+        if not meta or meta.get("strategy_signature") != strategy_signature(self.config) or forecast["model_version"] != meta["version"]:
+            return "HOLD", "Settings or model changed; awaiting a current forecast"
+        age = (now - pd.Timestamp(forecast["bar_at"])).total_seconds()
+        model_age = (now - pd.Timestamp(meta["data_through"])).total_seconds()
+        if not (300 <= age <= 390 if self.config.intraday else 0 <= age <= 7 * 86400) or not 0 <= model_age <= (3 if self.config.intraday else 14) * 86400:
+            return "HOLD", "Market data or model is too old for this horizon"
+        return combine(forecast, self.store.get(f"research:{forecast['symbol']}"))
+
+    def queue_session(self, clock, now):
+        if self.config.intraday or not self.config.queue_daily_orders or clock["is_open"]:
+            return None
+        try:
+            opening = pd.Timestamp(clock["next_open"])
+            if opening.tzinfo is not None and 0 < (opening - now).total_seconds() <= 7 * 86400:
+                return opening.tz_convert("America/New_York").date().isoformat()
+        except (KeyError, TypeError, ValueError):
+            pass
+        return None
+
     def cycle(self, snapshot=None, phase="all", allow_action=True):
         if not self.config.configured:
-            self.store.set("engine", {"status": "setup", "message": "Add Alpaca and FreeLLM credentials to .env", "at": utcnow()})
+            self.store.set("engine", {"status": "setup", "message": "Add Alpaca credentials to .env", "at": utcnow()})
             return False
         if snapshot is None:
             account, clock = self.broker.account(), self.broker.clock()
@@ -225,6 +247,7 @@ class Engine:
             self.store.set("equity_sample", time.time())
         now = pd.Timestamp(clock["timestamp"])
         local = now.tz_convert("America/New_York")
+        queue_session = self.queue_session(clock, now)
         entry_window = local.hour == 9 and 35 <= local.minute <= 59
         flatten = False
         if self.config.intraday:
@@ -243,11 +266,25 @@ class Engine:
                     continue
                 if self.config.coordinated and not self.store.owns_order(order):
                     continue
+                record = self.store.order(order.get("client_order_id", "")) or {}
+                queued = record.get("queued_for_open", False) and not self.config.intraday
+                keep_queued, invalid_queue = False, False
+                if queued:
+                    target = record.get("session")
+                    keep_queued = (self.config.queue_daily_orders and
+                                   (queue_session is not None and target == queue_session
+                                    or clock["is_open"] and target == day and local.hour == 9))
+                    prediction = self.store.get(f"prediction:{order['symbol']}")
+                    invalid_queue = (not prediction or prediction.get("target_session") != target
+                                     or self.forecast_decision(prediction, now)[0] != "BUY"
+                                     or order["symbol"] not in active_symbols(self.config, self.store)
+                                     or not entries_ready(self.config, self.store))
                 expired = False
                 if self.config.intraday:
                     submitted = order.get("submitted_at") or order.get("created_at")
                     expired = not submitted or (now - pd.Timestamp(submitted)).total_seconds() > 60
-                if not self.store.get("entries_enabled", False) or loss_breach or not entry_window or expired:
+                if (not self.store.get("entries_enabled", False) or loss_breach
+                        or not (keep_queued if queued else entry_window) or expired or invalid_queue):
                     self.broker.cancel(order["id"])
                     acted = True
             unresolved = self.store.unresolved_orders()
@@ -309,36 +346,34 @@ class Engine:
         for forecast in forecasts:
             symbol = forecast["symbol"]
             try:
-                meta = self.store.get(f"model:{symbol}")
                 research = self.store.get(f"research:{symbol}")
-                action, reason = combine(forecast, research)
+                action, reason = self.forecast_decision(forecast, now)
                 position = position_context(self.config, self.store, symbol, positions)
-                age = (now - pd.Timestamp(forecast["bar_at"])).total_seconds()
-                model_age = (now - pd.Timestamp(meta["data_through"])).total_seconds() if meta else float("inf")
-                if not meta or meta.get("strategy_signature") != strategy_signature(self.config) or forecast["model_version"] != meta["version"]:
-                    action, reason = "HOLD", "Settings or model changed; awaiting a current forecast"
-                elif not (300 <= age <= 390 if self.config.intraday else 0 <= age <= 7 * 86400) or not 0 <= model_age <= (3 if self.config.intraday else 14) * 86400:
-                    action, reason = "HOLD", "Market data or model is too old for this horizon"
                 action, reason = position_decision(action, reason, position)
+                queued_buy = action == "BUY" and queue_session is not None
                 exiting = position["owned"] and self.store.get(f"exit_pending:{symbol}", False)
                 if exiting:
                     action = "SELL"
                     reason = (self.store.get(f"exit_reason:{symbol}") or "Completing the previously requested exit") + "; " + (self.store.get(f"exit_status:{symbol}") or "Exit pending")
                     if not clock["is_open"]:
                         reason = "Market closed; exit pending. " + reason
-                elif not clock["is_open"]:
+                elif not clock["is_open"] and not queued_buy:
                     reason = "Market closed; " + reason
                 elif not reconciled:
                     reason = "Unresolved order outcome; new decisions blocked"
                 elif action == "BUY" and (symbol not in candidates or not entries_ready(self.config, self.store)):
                     reason = "Waiting for a complete, fresh market scan and candidate selection"
-                elif action == "BUY" and not entry_window:
+                elif queued_buy and forecast.get("target_session") != queue_session:
+                    reason = "Waiting for a completed daily forecast targeting the next market session"
+                elif action == "BUY" and not entry_window and not queued_buy:
                     reason = "Outside the strategy entry window"
                 elif not acted and action in {"BUY", "SELL"}:
                     if action == "SELL":
                         self.store.set(f"exit_pending:{symbol}", True)
                         self.store.set(f"exit_reason:{symbol}", reason)
-                    status = self.executor.execute(symbol, action, day, account, positions, orders, loss_breach=loss_breach)
+                    queue_args = {"queued_for_open": True, "reference_price": forecast.get("last_close")} if queued_buy else {}
+                    status = self.executor.execute(symbol, action, queue_session if queued_buy else day, account, positions, orders,
+                                                   loss_breach=loss_breach, **queue_args)
                     if action == "SELL":
                         self.store.set(f"exit_status:{symbol}", status)
                     reason += "; " + status

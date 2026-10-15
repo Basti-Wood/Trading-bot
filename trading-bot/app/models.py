@@ -24,7 +24,7 @@ MODEL_NAMES = {"ridge": "Ridge regression", "extra_trees": "Extra Trees", "hist_
 
 
 def strategy_signature(config):
-    settings = {"schema": 2, "feature_schema": FEATURE_SCHEMA, "features": FEATURES,
+    settings = {"schema": 3, "ensemble": "two_of_three_median", "feature_schema": FEATURE_SCHEMA, "features": FEATURES,
                 "threshold": config.threshold, "cost_bps": config.cost_bps,
                 "stop_loss": config.effective_stop, "take_profit": config.effective_take_profit, "feed": config.feed,
                 "feedback_weight": config.feedback_weight, "validation_bars": config.validation_bars}
@@ -134,7 +134,7 @@ def train_symbol(config, store, symbol, bars):
         store.event("training", {"symbol": symbol, "model": MODEL_NAMES[name],
             "message": f"Walk-forward and holdout evaluated; {feedback['train_rows']} resolved local examples used in fitting",
             **reports[name]["holdout"]})
-    consensus = np.mean(predictions, axis=0)
+    consensus = np.median(predictions, axis=0)
     agreement = (np.asarray(predictions) > config.threshold).sum(axis=0) >= 2
     metrics = evaluate(holdout, np.where(agreement, consensus, 0), config)
     wf_return = np.mean([np.mean([f["net_return"] for f in report["walk_forward"]]) for report in reports.values()])
@@ -146,7 +146,7 @@ def train_symbol(config, store, symbol, bars):
             eligible = False
         else:
             ps = np.asarray([m.predict(holdout[FEATURES]) for m in old["models"].values()])
-            incumbent_metrics = evaluate(holdout, np.where((ps > config.threshold).sum(axis=0) >= 2, ps.mean(axis=0), 0), config)
+            incumbent_metrics = evaluate(holdout, np.where((ps > config.threshold).sum(axis=0) >= 2, np.median(ps, axis=0), 0), config)
             eligible = eligible and metrics["net_return"] > incumbent_metrics["net_return"] + .001
     version = uuid.uuid4().hex[:12]
     file_prefix = f"daytrade-{symbol}" if config.intraday else symbol
@@ -210,14 +210,16 @@ def predict(config, meta, bars):
                             "signal": "BUY" if value > config.threshold else "SELL" if value < -config.threshold else "HOLD",
                             "drivers": sorted(impacts, key=lambda d: abs(d["impact"]), reverse=True)[:3],
                             "validation": meta["reports"][name]["holdout"]})
-    avg = float(np.mean([p["expected_return"] for p in outputs]))
+    consensus = float(np.median([p["expected_return"] for p in outputs]))
     buys = sum(p["signal"] == "BUY" for p in outputs)
     sells = sum(p["signal"] == "SELL" for p in outputs)
-    signal = "BUY" if buys >= 2 and avg > config.threshold else "SELL" if sells >= 2 and avg < -config.threshold else "HOLD"
+    signal = "BUY" if buys >= 2 else "SELL" if sells >= 2 else "HOLD"
     return {"symbol": meta["symbol"], "at": utcnow(), "bar_at": row.index[-1].isoformat(),
             "features": {name: float(row[name].iloc[0]) for name in FEATURES},
             "model_version": meta["version"], "eligible": meta["eligible"], "models": outputs,
-            "forecast_signal": signal, "expected_return": avg, "agreement": max(buys, sells, 3 - buys - sells),
+            "forecast_signal": signal, "expected_return": consensus, "agreement": max(buys, sells, 3 - buys - sells),
+            "ensemble_method": "median", "target_session": bars.attrs.get("target_session"),
+            "input_complete_at": bars.attrs.get("input_complete_at"),
             "last_close": float(bars.close.iloc[-1]), "threshold": config.threshold,
             "horizon": "next 15 minutes from completed five-minute close" if config.intraday else "next session open to the following session open",
             "trading_mode": config.trading_mode}

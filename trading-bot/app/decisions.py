@@ -29,12 +29,12 @@ def position_decision(signal, reason, position):
         return "WAIT", f"Position belongs to {owner}; this strategy leaves it unchanged"
     if position["owned"]:
         if signal == "SELL":
-            return "SELL", "Forecast ensemble and news models expect a decline; sell regardless of current profit or loss"
+            return "SELL", reason + "; sell regardless of current profit or loss"
         if signal == "BUY":
-            return "HOLD", "Bullish agreement; keep the existing shares without adding to the position"
+            return "HOLD", reason + "; keep the existing shares without adding to the position"
         return "HOLD", "Keep the existing shares; " + reason
     if signal == "BUY":
         return "BUY", reason
     if signal == "SELL":
-        return "WAIT", "Bearish outlook, but no shares are owned; no sale or short position requested"
+        return "WAIT", reason + "; no shares owned, so no sale or short position requested"
     return "WAIT", "No shares owned; " + reason

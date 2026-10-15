@@ -26,11 +26,12 @@ class Executor:
                 blocked = True
         return not blocked
 
-    def send(self, payload, session=None):
+    def send(self, payload, session=None, queued_for_open=False):
         cid = payload["client_order_id"]
         record = {"symbol": payload["symbol"], "side": payload["side"], "qty": payload["qty"],
                   "status": "pending_submission", "mode": "paper" if self.config.paper else "live", "session": session,
-                  "strategy": self.config.trading_mode}
+                  "strategy": self.config.trading_mode, "queued_for_open": queued_for_open,
+                  "limit_price": payload.get("limit_price")}
         if not self.store.reserve_order(cid, record):
             return "An order was already attempted for this symbol and side today"
         self.changed = True
@@ -49,11 +50,15 @@ class Executor:
             return f"Order {status}; {exc}"
         self.store.update_order(cid, {**record, "status": remote["status"], "broker_id": remote["id"],
                                      "filled_qty": remote.get("filled_qty"), "filled_avg_price": remote.get("filled_avg_price")})
-        return f"Alpaca order {remote['status']} (acceptance is not a fill)"
+        queued = f"; queued for regular session {session}" if queued_for_open else ""
+        return f"Alpaca order {remote['status']} (acceptance is not a fill){queued}"
 
-    def execute(self, symbol, action, session, account, positions, orders, *, loss_breach=False, force_exit=False):
+    def execute(self, symbol, action, session, account, positions, orders, *, loss_breach=False, force_exit=False,
+                queued_for_open=False, reference_price=None):
         cfg = self.config
         self.changed = False
+        if queued_for_open and (cfg.intraday or not cfg.queue_daily_orders or action != "BUY"):
+            return "Only daily buy orders can be queued for the next regular session"
         if not cfg.paper and not cfg.allow_live:
             return "Live mode is not enabled"
         if account.get("trading_blocked") or account.get("account_blocked") or account.get("status") != "ACTIVE":
@@ -107,7 +112,9 @@ class Executor:
             asset = self.broker.asset(symbol)
             if not asset.get("tradable") or asset.get("status") != "active":
                 return "Asset is not tradable"
-            price = self.broker.quote(symbol)[1] if cfg.intraday else self.broker.latest_price(symbol)
+            price = reference_price if queued_for_open else self.broker.quote(symbol)[1] if cfg.intraday else self.broker.latest_price(symbol)
+            if not isinstance(price, (int, float)) or not math.isfinite(price) or not 0 < price < 1000000:
+                return "Invalid reference price; entry blocked"
             capital = min(cfg.capital, float(account["equity"]))
             strategy_capital = capital * cfg.strategy_fraction
             gross = sum(abs(float(p["market_value"])) for p in positions)
@@ -129,7 +136,7 @@ class Executor:
                 return "Allocation cannot fund one whole share within exposure limits"
             side = "buy"
             payload = {"symbol": symbol, "side": side, "qty": str(qty), "type": "limit", "limit_price": f"{limit:.2f}",
-                       "time_in_force": "day", "order_class": "bracket",
+                       "time_in_force": "day", "order_class": "bracket", "extended_hours": False,
                        "stop_loss": {"stop_price": f"{price * (1 - cfg.effective_stop):.2f}"},
                        "take_profit": {"limit_price": f"{price * (1 + cfg.effective_take_profit):.2f}"}}
         # Include account/mode to prevent cross-account journal collisions, without exposing keys.
@@ -154,5 +161,5 @@ class Executor:
                     break
             else:
                 return "Exit retry limit reached; inspect this position and its protection in Alpaca"
-        result = self.send(payload, session)
+        result = self.send(payload, session, queued_for_open=queued_for_open)
         return result

@@ -16,6 +16,7 @@ class Alpaca:
         self.config = config
         self.base = "https://paper-api.alpaca.markets" if config.paper else "https://api.alpaca.markets"
         self.session = requests.Session()
+        self._daily_calendar = {}
         self.session.headers.update({"APCA-API-KEY-ID": config.api_key, "APCA-API-SECRET-KEY": config.api_secret})
 
     def request(self, method, path, *, data=False, **kwargs):
@@ -81,8 +82,13 @@ class Alpaca:
         now = now or datetime.now(timezone.utc)
         if self.config.intraday:
             return self.intraday_bars(symbol, now)
-        # Exclude today's unfinished daily bar, including after-hours revisions.
+        # Session completion comes from the exchange calendar, including half-days.
         local_day = now.astimezone(__import__('zoneinfo').ZoneInfo("America/New_York")).date()
+        if local_day not in self._daily_calendar:
+            self._daily_calendar = {local_day: self.calendar(local_day - timedelta(days=14), local_day + timedelta(days=14))}
+        sessions = sorted(self._daily_calendar[local_day], key=lambda s: s["date"])
+        completed = {s["date"]: pd.Timestamp(f"{s['date']} {s['close']}", tz="America/New_York") + pd.Timedelta(minutes=16)
+                     for s in sessions}
         params = {"timeframe": "1Day", "start": (now - timedelta(days=self.config.history_days)).isoformat(),
                   "end": (now - timedelta(minutes=16)).isoformat(), "adjustment": "all",
                   "feed": self.config.feed, "limit": 10000, "sort": "asc"}
@@ -105,8 +111,15 @@ class Alpaca:
         frame["timestamp"] = pd.to_datetime(frame.timestamp, utc=True)
         frame = frame.set_index("timestamp").sort_index()
         frame = frame[~frame.index.duplicated(keep="last")]
-        frame = frame[frame.index.tz_convert("America/New_York").date < local_day]
+        dates = frame.index.tz_convert("America/New_York").date
+        frame = frame[[d < local_day or (d == local_day and str(d) in completed and pd.Timestamp(now) >= completed[str(d)]) for d in dates]]
         frame = frame[["open", "high", "low", "close", "volume"]].astype(float).tail(self.config.max_bars)
+        if frame.empty:
+            raise BrokerError(f"No completed daily bars for {symbol}")
+        last_day = str(frame.index[-1].tz_convert("America/New_York").date())
+        next_session = next((s["date"] for s in sessions if s["date"] > last_day), None)
+        frame.attrs["target_session"] = next_session
+        frame.attrs["input_complete_at"] = completed[last_day].isoformat() if last_day in completed else None
         valid = (frame[["open", "high", "low", "close"]] > 0).all(axis=1) & (frame.volume >= 0)
         if not valid.all() or frame.isna().any().any():
             raise BrokerError(f"Invalid OHLCV data for {symbol}")

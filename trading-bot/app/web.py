@@ -102,6 +102,7 @@ def create_app(config, store):
                        "training_memory_mb": cfg.training_memory_mb, "cpu_threads": 2, "gpu_memory_mb": 0},
             settings={"capital": cfg.capital, "strategy_capital": cfg.capital * cfg.strategy_fraction, "position_fraction": cfg.position_fraction, "gross_fraction": cfg.gross_fraction,
                 "daily_loss": cfg.daily_loss, "stop_loss": cfg.effective_stop, "feed": cfg.feed,
+                "queue_daily_orders": cfg.queue_daily_orders,
                 "retrain_hours": cfg.retrain_hours, "validation_bars": 390 if cfg.intraday else cfg.validation_bars,
                 "universe_mode": cfg.universe_mode, "scan_candidates": cfg.scan_candidates,
                 "poll_seconds": config.poll_seconds, "daytrade_max_positions": cfg.daytrade_max_positions,
@@ -123,8 +124,8 @@ def create_app(config, store):
             for _, state in targets:
                 state.set("entries_enabled", False)
         elif action == "resume":
-            if not config.configured or not config.llm_key:
-                return jsonify(error="Configure Alpaca and FreeLLM keys first"), 409
+            if not config.configured:
+                return jsonify(error="Configure Alpaca keys first"), 409
             if not store.get("account"):
                 return jsonify(error="Wait for a successful Alpaca account connection"), 409
             if store.get("account", {}).get("loss_halt"):
