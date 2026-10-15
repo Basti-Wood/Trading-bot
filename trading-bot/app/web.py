@@ -6,6 +6,7 @@ from .store import utcnow
 from .feedback import summary_key
 from .universe import active_symbols
 from .portfolio import strategy_contexts
+from .decisions import position_context
 
 
 def create_app(config, store):
@@ -62,6 +63,17 @@ def create_app(config, store):
         account = state_store.get("account")
         if account and config.trading_mode == "both":
             account = {**account, "positions": [{**p, "strategy": store.owner(p["symbol"]) or "external"} for p in account.get("positions", [])]}
+        symbols = []
+        for symbol in dict.fromkeys([*active_symbols(cfg, state_store), *state_store.get("monitor_symbols", [])]):
+            position = position_context(cfg, state_store, symbol, account.get("positions", [])) if account else None
+            forecast = state_store.get(f"forecast:{symbol}")
+            if forecast and "decision_at" not in forecast:
+                # Old cached HOLDs did not distinguish a neutral outlook from ownership.
+                forecast = {**forecast, "action": "WAIT", "reason": "Waiting for a fresh decision with current position data"}
+            symbols.append({"symbol": symbol, "position": position, "forecast": forecast,
+                            "model": state_store.get(f"model:{symbol}"), "candidate": state_store.get(f"candidate:{symbol}"),
+                            "research": state_store.get(f"research:{symbol}"),
+                            "feedback": state_store.get(summary_key(cfg, symbol), {"captured": 0, "pending": 0, "resolved": 0, "excluded": 0, "scores": {}, "latest": []})})
         process = psutil.Process()
         rss = process.memory_info().rss
         for child in process.children(recursive=True):
@@ -83,10 +95,7 @@ def create_app(config, store):
             entries_enabled=state_store.get("entries_enabled", False), engine=state_store.get("engine", {"status": "starting"}),
             account=account, training=state_store.get("training", {"status": "waiting for data"}),
             research_status=state_store.get("research_status", {"status": "waiting"}),
-            symbols=[{"symbol": s, "forecast": state_store.get(f"forecast:{s}"), "model": state_store.get(f"model:{s}"),
-                      "candidate": state_store.get(f"candidate:{s}"), "research": state_store.get(f"research:{s}"),
-                      "feedback": state_store.get(summary_key(cfg, s), {"captured": 0, "pending": 0, "resolved": 0, "excluded": 0, "scores": {}, "latest": []})}
-                     for s in dict.fromkeys([*active_symbols(cfg, state_store), *state_store.get("monitor_symbols", [])])],
+            symbols=symbols,
             orders=store.orders(50), events=state_store.history("decision", 30), errors=state_store.history("error", 10),
             training_history=state_store.history("training", 25), equity=store.history("equity", 100),
             resources={"process_memory_mb": round(rss / 1024**2, 1), "host_cpu_percent": psutil.cpu_percent(),

@@ -4,3 +4,4 @@
 #scanner{margin:24px 0 35px}.symbol-tabs{flex-wrap:wrap;max-width:75%;max-height:140px;overflow:auto}
 
 #parallel-strategies{margin-bottom:28px}.strategy-actions{display:flex;flex-wrap:wrap;gap:10px}.strategy-actions [aria-pressed="true"]{border-color:var(--green)}
+.verdict{flex-wrap:wrap}.holding-context{flex-basis:100%;border-top:1px solid var(--line);padding-top:12px}

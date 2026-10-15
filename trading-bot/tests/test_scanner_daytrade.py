@@ -277,7 +277,7 @@ class DaytradeEngineTests(TempCase):
         self.store.set('research:SPY', {'status': 'ready', 'action': 'BUY', 'at': utcnow(), 'trading_mode': 'daytrade'})
         engine.cycle()
         engine.executor.execute.assert_not_called()
-        self.assertEqual(self.store.get('forecast:SPY')['action'], 'HOLD')
+        self.assertEqual(self.store.get('forecast:SPY')['action'], 'WAIT')
 
     def test_forecast_request_failure_retries_without_waiting_for_next_day(self):
         engine = self.engine(mode='daily')

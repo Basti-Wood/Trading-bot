@@ -10,6 +10,7 @@ import pandas as pd
 
 from .broker import Alpaca
 from .execution import Executor
+from .decisions import position_context, position_decision
 from .models import train_worker, predict, strategy_signature
 from .feedback import capture_forecast, resolve_outcomes
 from .research import Research, combine
@@ -217,7 +218,7 @@ class Engine:
             self.store.set("entries_enabled", False)
         loss_breach = loss_breach or self.store.get("loss_halt_day") == day
         self.store.set("account", {"equity": equity, "cash": float(account["cash"]), "buying_power": float(account["buying_power"]),
-            "daily_pnl": equity - prior, "positions": [{k: p.get(k) for k in ("symbol", "qty", "market_value", "unrealized_pl", "avg_entry_price")} for p in positions],
+            "daily_pnl": equity - prior, "positions": [{k: p.get(k) for k in ("symbol", "qty", "market_value", "unrealized_pl", "unrealized_plpc", "avg_entry_price")} for p in positions],
             "market_open": clock["is_open"], "loss_halt": loss_breach, "at": utcnow()})
         if time.time() - self.store.get("equity_sample", 0) >= 900:
             self.store.event("equity", {"equity": equity, "daily_pnl": equity - prior})
@@ -267,21 +268,33 @@ class Engine:
                         self.store.set(f"flat_since:{symbol}", time.time())
                     self.store.set(f"owned:{symbol}", False)
                     self.store.set(f"exit_pending:{symbol}", False)
+                    self.store.set(f"exit_reason:{symbol}", None)
+                    self.store.set(f"exit_status:{symbol}", None)
                 elif self.config.coordinated:
                     self.store.set(f"flat_observed:{symbol}", None)
-                force_exit = bool(self.store.get(f"exit_pending:{symbol}", False))
-                if pos and owned:
+                exit_reason = (self.store.get(f"exit_reason:{symbol}") or "Completing the previously requested exit") if self.store.get(f"exit_pending:{symbol}", False) else None
+                if pos and float(pos["qty"]) > 0 and owned:
                     pnl_fraction = float(pos.get("unrealized_plpc") or 0)
-                    force_exit |= pnl_fraction <= -self.config.effective_stop or loss_breach or flatten
+                    if loss_breach:
+                        exit_reason = "Account daily-loss limit reached"
+                    elif pnl_fraction <= -self.config.effective_stop:
+                        exit_reason = "Position stop-loss reached"
+                    elif flatten:
+                        exit_reason = "Day-trading exit before market close"
                     if self.config.intraday:
                         started = self.store.get(f"daytrade_position:{symbol}", {}).get("started_at")
                         # Unknown holding age after recovery is an exit, never a new timer.
-                        force_exit |= not started or (now - pd.Timestamp(started)).total_seconds() >= self.config.daytrade_hold_minutes * 60
-                if force_exit and pos and owned and clock["is_open"] and not acted:
+                        if not exit_reason and (not started or (now - pd.Timestamp(started)).total_seconds() >= self.config.daytrade_hold_minutes * 60):
+                            exit_reason = "Day-trading holding period ended or holding age is unknown"
+                if exit_reason and pos and float(pos["qty"]) > 0 and owned:
+                    # Keep the exit visible even if another symbol used this snapshot.
                     self.store.set(f"exit_pending:{symbol}", True)
-                    reason = self.executor.execute(symbol, "SELL", day, account, positions, orders, loss_breach=loss_breach, force_exit=True)
-                    self.store.event("decision", {"symbol": symbol, "action": "SELL", "reason": reason, "risk_exit": True})
-                    acted = bool(self.executor.changed)
+                    self.store.set(f"exit_reason:{symbol}", exit_reason)
+                    if clock["is_open"] and not acted:
+                        status = self.executor.execute(symbol, "SELL", day, account, positions, orders, loss_breach=loss_breach, force_exit=True)
+                        self.store.set(f"exit_status:{symbol}", status)
+                        self.store.event("decision", {"symbol": symbol, "action": "SELL", "reason": exit_reason + "; " + status, "risk_exit": True})
+                        acted = bool(self.executor.changed)
         if phase == "risk":
             return acted
         forecasts = []
@@ -299,12 +312,20 @@ class Engine:
                 meta = self.store.get(f"model:{symbol}")
                 research = self.store.get(f"research:{symbol}")
                 action, reason = combine(forecast, research)
+                position = position_context(self.config, self.store, symbol, positions)
                 age = (now - pd.Timestamp(forecast["bar_at"])).total_seconds()
-                model_age = (now - pd.Timestamp(meta["data_through"])).total_seconds()
-                if meta.get("strategy_signature") != strategy_signature(self.config) or forecast["model_version"] != meta["version"]:
+                model_age = (now - pd.Timestamp(meta["data_through"])).total_seconds() if meta else float("inf")
+                if not meta or meta.get("strategy_signature") != strategy_signature(self.config) or forecast["model_version"] != meta["version"]:
                     action, reason = "HOLD", "Settings or model changed; awaiting a current forecast"
                 elif not (300 <= age <= 390 if self.config.intraday else 0 <= age <= 7 * 86400) or not 0 <= model_age <= (3 if self.config.intraday else 14) * 86400:
                     action, reason = "HOLD", "Market data or model is too old for this horizon"
+                action, reason = position_decision(action, reason, position)
+                exiting = position["owned"] and self.store.get(f"exit_pending:{symbol}", False)
+                if exiting:
+                    action = "SELL"
+                    reason = (self.store.get(f"exit_reason:{symbol}") or "Completing the previously requested exit") + "; " + (self.store.get(f"exit_status:{symbol}") or "Exit pending")
+                    if not clock["is_open"]:
+                        reason = "Market closed; exit pending. " + reason
                 elif not clock["is_open"]:
                     reason = "Market closed; " + reason
                 elif not reconciled:
@@ -314,12 +335,16 @@ class Engine:
                 elif action == "BUY" and not entry_window:
                     reason = "Outside the strategy entry window"
                 elif not acted and action in {"BUY", "SELL"}:
-                    pos = next((p for p in positions if p["symbol"] == symbol), None)
-                    if action == "SELL" and pos and self.store.get(f"owned:{symbol}", False):
+                    if action == "SELL":
                         self.store.set(f"exit_pending:{symbol}", True)
-                    reason = self.executor.execute(symbol, action, day, account, positions, orders, loss_breach=loss_breach)
+                        self.store.set(f"exit_reason:{symbol}", reason)
+                    status = self.executor.execute(symbol, action, day, account, positions, orders, loss_breach=loss_breach)
+                    if action == "SELL":
+                        self.store.set(f"exit_status:{symbol}", status)
+                    reason += "; " + status
                     acted = bool(self.executor.changed)
-                forecast.update({"action": action, "reason": reason, "research": research})
+                forecast.update({"action": action, "reason": reason, "research": research,
+                                 "position": position, "decision_at": utcnow()})
                 previous = self.store.get(f"forecast:{symbol}", {})
                 if previous.get("action") != action or previous.get("reason") != reason:
                     self.store.event("decision", {"symbol": symbol, "action": action, "reason": reason})
