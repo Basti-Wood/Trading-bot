@@ -68,7 +68,7 @@ function render(s) {
   $('side-mode').textContent=`${s.mode.toUpperCase()} TRADING`; $('mode-label').textContent=s.mode.toUpperCase();
   $('equity').textContent=money(s.account?.equity); $('pnl').textContent=money(s.account?.daily_pnl);
   $('pnl').className=(s.account?.daily_pnl||0)<0?'sell':'buy';
-  $('capital').textContent=money(s.settings.capital); $('allocation').textContent=`${Math.round(s.settings.gross_fraction*100)}% maximum gross exposure`;
+  $('capital').textContent=money(s.settings.capital); $('allocation').textContent=`${Math.round(s.settings.capital_fraction*100)}% of equity${s.settings.capital_cap?` (cap ${money(s.settings.capital_cap)})`:''} · ${Math.round(s.settings.position_fraction*100)}% per position · ${Math.round(s.settings.gross_fraction*100)}% max gross`;
   $('entry-state').textContent=parallel?`${strategies.filter(x=>x.entries_enabled).length} / 2 enabled`:s.entries_enabled?'Enabled':'Paused';
   $('toggle').textContent=parallel?(s.any_entries_enabled?'Pause both':'Enable both'):(s.entries_enabled?'Pause entries':`Enable ${s.mode} entries`); $('toggle').disabled=!s.configured;
   $('train').disabled=!s.configured||['running','starting'].includes(s.training.status);

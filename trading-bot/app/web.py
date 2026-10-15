@@ -61,6 +61,7 @@ def create_app(config, store):
             return jsonify(error="Unknown strategy"), 400
         cfg, state_store = contexts[selected]
         account = state_store.get("account")
+        equity = float((account or {}).get("equity") or 0)
         if account and config.trading_mode == "both":
             account = {**account, "positions": [{**p, "strategy": store.owner(p["symbol"]) or "external"} for p in account.get("positions", [])]}
         symbols = []
@@ -85,7 +86,7 @@ def create_app(config, store):
             portfolio_mode=config.trading_mode,
             portfolio_engine=store.get("portfolio_engine"),
             strategies=[{"id": c.trading_mode, "entries_enabled": st.get("entries_enabled", False),
-                         "capital_fraction": c.strategy_fraction, "capital_ceiling": c.capital * c.strategy_fraction,
+                         "capital_fraction": c.strategy_fraction, "capital_ceiling": c.sizing_capital(equity) * c.strategy_fraction,
                          "engine": st.get("engine", {"status": "starting"}),
                          "training": st.get("training", {"status": "waiting"})} for c, st in contexts.values()],
             any_entries_enabled=any(st.get("entries_enabled", False) for _, st in contexts.values()),
@@ -100,7 +101,9 @@ def create_app(config, store):
             training_history=state_store.history("training", 25), equity=store.history("equity", 100),
             resources={"process_memory_mb": round(rss / 1024**2, 1), "host_cpu_percent": psutil.cpu_percent(),
                        "training_memory_mb": cfg.training_memory_mb, "cpu_threads": 2, "gpu_memory_mb": 0},
-            settings={"capital": cfg.capital, "strategy_capital": cfg.capital * cfg.strategy_fraction, "position_fraction": cfg.position_fraction, "gross_fraction": cfg.gross_fraction,
+            settings={"capital": cfg.sizing_capital(equity), "capital_fraction": cfg.capital_fraction, "capital_cap": cfg.capital,
+                "strategy_capital": cfg.sizing_capital(equity) * cfg.strategy_fraction, "position_fraction": cfg.position_fraction, "gross_fraction": cfg.gross_fraction,
+                "daytrade_strategies": cfg.daytrade_strategies,
                 "daily_loss": cfg.daily_loss, "stop_loss": cfg.effective_stop, "feed": cfg.feed,
                 "queue_daily_orders": cfg.queue_daily_orders,
                 "retrain_hours": cfg.retrain_hours, "validation_bars": 390 if cfg.intraday else cfg.validation_bars,

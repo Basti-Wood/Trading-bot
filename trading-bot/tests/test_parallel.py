@@ -11,7 +11,7 @@ from app.portfolio import PortfolioEngine, strategy_contexts
 from app.store import Store, StrategyStore, store_for_config, utcnow
 from app.web import create_app
 from test_system import TempCase
-from test_system import bars, models
+from test_system import bars, book, models
 from test_scanner_daytrade import intraday_bars
 
 
@@ -38,6 +38,7 @@ class ParallelTests(TempCase):
             engine.scan_tick = Mock()
             engine.forecast_tick = Mock()
             engine.research_tick = Mock()
+            engine.playbook_tick = Mock()
             engine.store.set('entries_enabled', True)
 
     def signal(self, engine, symbol, action='BUY'):
@@ -47,6 +48,8 @@ class ParallelTests(TempCase):
         engine.store.set(f'prediction:{symbol}', {'symbol': symbol, 'model_version': 'v1', 'bar_at': at,
             'eligible': True, 'expected_return': .01, 'forecast_signal': action, 'trading_mode': engine.config.trading_mode,
             'models': models(action)})
+        if engine.config.intraday:
+            engine.store.set(f'playbook:{symbol}', book(action == 'BUY'))
         engine.store.set(f'research:{symbol}', {'status': 'ready', 'at': utcnow(), 'bar_at': at,
                          'action': action, 'trading_mode': engine.config.trading_mode})
 

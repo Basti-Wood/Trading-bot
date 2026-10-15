@@ -15,7 +15,6 @@ from sklearn.model_selection import TimeSeriesSplit
 from threadpoolctl import threadpool_limits
 
 from .broker import Alpaca
-from .daytrade import setup
 from .features import FEATURES, FEATURE_SCHEMA, features
 from .feedback import replay_dataset, resolve_outcomes
 from .store import store_for_config, utcnow
@@ -215,15 +214,7 @@ def predict(config, meta, bars):
     buys = sum(p["signal"] == "BUY" for p in outputs)
     sells = sum(p["signal"] == "SELL" for p in outputs)
     signal = "BUY" if buys >= 2 else "SELL" if sells >= 2 else "HOLD"
-    extra = {}
-    if config.intraday:
-        try:
-            extra["setup"] = setup(bars)
-            if not all(np.isfinite(v) for v in extra["setup"].values() if isinstance(v, float)):
-                raise ValueError
-        except (ValueError, IndexError, KeyError):
-            extra["setup"] = {"signal": "HOLD", "note": "Not enough session bars for day-trading setups"}
-    return {**extra, "symbol": meta["symbol"], "at": utcnow(), "bar_at": row.index[-1].isoformat(),
+    return {"symbol": meta["symbol"], "at": utcnow(), "bar_at": row.index[-1].isoformat(),
             "features": {name: float(row[name].iloc[0]) for name in FEATURES},
             "model_version": meta["version"], "eligible": meta["eligible"], "models": outputs,
             "forecast_signal": signal, "expected_return": consensus, "agreement": max(buys, sells, 3 - buys - sells),

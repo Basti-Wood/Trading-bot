@@ -26,7 +26,7 @@ class Executor:
                 blocked = True
         return not blocked
 
-    def send(self, payload, session=None, queued_for_open=False):
+    def send(self, payload, session=None, queued_for_open=False, plan=None):
         cid = payload["client_order_id"]
         record = {"symbol": payload["symbol"], "side": payload["side"], "qty": payload["qty"],
                   "status": "pending_submission", "mode": "paper" if self.config.paper else "live", "session": session,
@@ -40,7 +40,8 @@ class Executor:
             # must still receive stop/time exits when its position appears.
             self.store.set(f"owned:{payload['symbol']}", True)
         if payload["side"] == "buy" and self.config.intraday:
-            self.store.set(f"daytrade_position:{payload['symbol']}", {"entry_id": cid, "started_at": utcnow()})
+            # The strategy's own stop/target/exit rule travels with the position.
+            self.store.set(f"daytrade_position:{payload['symbol']}", {**(plan or {}), "entry_id": cid, "started_at": utcnow()})
         try:
             remote = self.broker.submit(payload)
         except BrokerError as exc:
@@ -54,7 +55,7 @@ class Executor:
         return f"Alpaca order {remote['status']} (acceptance is not a fill){queued}"
 
     def execute(self, symbol, action, session, account, positions, orders, *, loss_breach=False, force_exit=False,
-                queued_for_open=False, reference_price=None, stop_fraction=None):
+                queued_for_open=False, reference_price=None, stop_fraction=None, target_fraction=None, plan=None):
         cfg = self.config
         self.changed = False
         if queued_for_open and (cfg.intraday or not cfg.queue_daily_orders or action != "BUY"):
@@ -115,7 +116,7 @@ class Executor:
             price = reference_price if queued_for_open else self.broker.quote(symbol)[1] if cfg.intraday else self.broker.latest_price(symbol)
             if not isinstance(price, (int, float)) or not math.isfinite(price) or not 0 < price < 1000000:
                 return "Invalid reference price; entry blocked"
-            capital = min(cfg.capital, float(account["equity"]))
+            capital = cfg.sizing_capital(float(account["equity"]))
             strategy_capital = capital * cfg.strategy_fraction
             gross = sum(abs(float(p["market_value"])) for p in positions)
             strategy_gross = sum(abs(float(p["market_value"])) for p in positions if self.store.get(f"owned:{p['symbol']}", False))
@@ -132,15 +133,29 @@ class Executor:
                         budget = min(budget, float(account[field]))
             limit = math.ceil(price * (1.0005 if cfg.intraday else 1.002) * 100) / 100
             qty = math.floor(budget / limit)
-            if qty < 1:
-                return "Allocation cannot fund one whole share within exposure limits"
+            fractional = qty < 1
+            if fractional:
+                # A share pricier than the budget is bought in fractions; Alpaca accepts
+                # fractional day limit orders but not fractional brackets.
+                if queued_for_open:
+                    return "Allocation cannot fund one whole share; a fractional entry waits for the regular session"
+                if not asset.get("fractionable"):
+                    return "Allocation cannot fund one whole share and this stock cannot be bought in fractions"
+                qty = math.floor(budget / limit * 10000) / 10000
+                if qty * limit < 1:
+                    return "Allocation is below Alpaca's $1 minimum order"
             side = "buy"
             # A caller-supplied stop may only tighten the configured loss limit.
             stop = min(stop_fraction, cfg.effective_stop) if stop_fraction else cfg.effective_stop
-            payload = {"symbol": symbol, "side": side, "qty": str(qty), "type": "limit", "limit_price": f"{limit:.2f}",
-                       "time_in_force": "day", "order_class": "bracket", "extended_hours": False,
-                       "stop_loss": {"stop_price": f"{price * (1 - stop):.2f}"},
-                       "take_profit": {"limit_price": f"{price * (1 + cfg.effective_take_profit):.2f}"}}
+            target = target_fraction or cfg.effective_take_profit
+            payload = {"symbol": symbol, "side": side, "qty": format(qty, "f").rstrip("0").rstrip("."), "type": "limit",
+                       "limit_price": f"{limit:.2f}", "time_in_force": "day", "extended_hours": False}
+            # Without broker-side legs, the engine enforces these levels on every poll.
+            guard = {"stop": stop, "target": target} if fractional else None
+            if not fractional:
+                payload.update({"order_class": "bracket",
+                                "stop_loss": {"stop_price": f"{price * (1 - stop):.2f}"},
+                                "take_profit": {"limit_price": f"{price * (1 + target):.2f}"}})
         # Include account/mode to prevent cross-account journal collisions, without exposing keys.
         scope = hashlib.sha256((self.broker.base + cfg.api_key).encode()).hexdigest()[:8]
         base_id = f"ensemble-{scope}-{session}-{symbol}-{side}"
@@ -163,5 +178,9 @@ class Executor:
                     break
             else:
                 return "Exit retry limit reached; inspect this position and its protection in Alpaca"
-        result = self.send(payload, session, queued_for_open=queued_for_open)
+        result = self.send(payload, session, queued_for_open=queued_for_open, plan=plan if side == "buy" else None)
+        if side == "buy" and self.changed:
+            self.store.set(f"unbracketed:{symbol}", guard)
+            if guard:
+                result += "; fractional shares, stop/take-profit managed by the bot"
         return result

@@ -14,8 +14,7 @@ from app.execution import Executor
 from app.features import dataset, features, FEATURES
 from app.feedback import capture_forecast, resolve_outcomes, replay_dataset, summary_key
 from app.models import train_symbol, predict, strategy_signature, evaluate
-from app.daytrade import bracket_stop, setup
-from app.research import combine
+from app.research import ballots, combine
 from app.store import Store, utcnow
 from app.universe import scan, screen, active_symbols, monitored_symbols, entries_ready
 from app.web import create_app
@@ -153,35 +152,11 @@ class IntradayModelTests(TempCase):
         Engine(replace(self.cfg, trading_mode='daily'), self.store)
         with self.assertRaisesRegex(ValueError, 'separate DATA_DIR'): Engine(self.cfg, self.store)
 
-    def test_intraday_votes_use_setup_not_llm(self):
-        forecast = {'trading_mode': 'daytrade', 'eligible': True, 'forecast_signal': 'BUY', 'bar_at': 'new',
-                    'models': models('BUY', 'BUY', 'HOLD'), 'setup': {'signal': 'BUY'}}
-        research = {'trading_mode': 'daily', 'status': 'ready', 'action': 'BUY', 'bar_at': 'new', 'at': utcnow()}
-        self.assertEqual(combine(forecast, None)[0], 'BUY')
-        # Bullish news can never stand in for a missing day-trading setup.
-        self.assertEqual(combine({**forecast, 'setup': {'signal': 'HOLD'}}, research)[0], 'HOLD')
-        self.assertEqual(combine({**forecast, 'models': models('BUY'), 'setup': {'signal': 'SELL'}}, None)[0], 'BUY')
-
-    def test_setup_scores_vwap_trend_breakout_and_volume(self):
-        index = pd.date_range('2026-11-24T14:30:00Z', periods=40, freq='5min')
-        close = pd.Series(np.linspace(100, 101, 40), index=index)
-        frame = pd.DataFrame({'open': close - .02, 'high': close + .05, 'low': close - .05, 'close': close,
-                              'volume': 1000.}, index=index)
-        frame.iloc[-1, frame.columns.get_loc('volume')] = 3000.
-        frame.iloc[-1, frame.columns.get_loc('close')] = 101.3
-        frame.iloc[-1, frame.columns.get_loc('high')] = 101.35
-        result = setup(frame)
-        self.assertEqual(result['bullish_checks'], 4)
-        self.assertEqual(result['signal'], 'HOLD')  # RSI blocks chasing a straight-line rally
-        frame['close'] = 100 + np.sin(np.arange(40) / 2) * .1
-        frame.iloc[-1, frame.columns.get_loc('close')] = frame.high.iloc[:3].max() + .05
-        frame['open'] = frame.close - .01
-        frame['high'] = frame[['open', 'close']].max(axis=1) + .05
-        self.assertEqual(setup(frame)['signal'], 'BUY')
-        stop = bracket_stop(self.cfg, {'setup': {'atr': .001}})
-        self.assertEqual(stop, .003)
-        self.assertEqual(bracket_stop(self.cfg, {'setup': {'atr': .05}}), self.cfg.daytrade_stop_loss)
-        self.assertEqual(bracket_stop(self.cfg, {}), self.cfg.daytrade_stop_loss)
+    def test_daytrade_ballots_use_playbook_not_llm(self):
+        forecast = {'trading_mode': 'daytrade', 'models': models('BUY', 'BUY', 'HOLD'), 'playbook': {'signal': 'BUY'}}
+        votes = ballots(forecast, {'status': 'ready', 'action': 'SELL', 'bar_at': 'x', 'at': utcnow()})
+        self.assertEqual(votes['Day-trading playbook'], 'BUY')
+        self.assertNotIn('LLM news', votes)
 
 
 class DaytradeExecutionTests(TempCase):
@@ -232,7 +207,7 @@ class DaytradeEngineTests(TempCase):
     def engine(self, mode='daytrade', now='2026-11-27T17:51:00Z', close='2026-11-27T18:00:00Z'):
         cfg = replace(self.cfg, trading_mode=mode)
         engine = Engine(cfg, self.store)
-        engine.scan_tick = engine.forecast_tick = engine.research_tick = Mock()
+        engine.scan_tick = engine.forecast_tick = engine.research_tick = engine.playbook_tick = Mock()
         engine.broker = Mock()
         engine.broker.account.return_value = {'equity': '10000', 'last_equity': '10000', 'cash': '10000', 'buying_power': '10000'}
         engine.broker.clock.return_value = {'timestamp': now, 'next_close': close, 'is_open': True}

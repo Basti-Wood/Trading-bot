@@ -42,6 +42,39 @@ class BatchResearchTests(TempCase):
         self.assertIsNone(self.store.get('research:TSLA'))
 
 
+class ChunkedResearchTests(TempCase):
+    def test_requests_go_out_in_small_batches_and_a_failed_batch_only_affects_its_stocks(self):
+        symbols = [f'S{i}' for i in range(7)]
+        research = Research(replace(self.cfg, llm_models=('auto',)), self.store)
+        research.market_news = Mock(return_value={s: [] for s in symbols})
+        research.news = Mock(side_effect=lambda symbol, alpaca, limit, first_id: (
+            [{'id': first_id, 'title': symbol, 'summary': '', 'published_at': 'now', 'url': 'https://x', 'provider': 'p'}], []))
+        good = Mock(ok=True)
+        good.json.return_value = {'model': 'm', 'choices': [{'finish_reason': 'stop', 'message': {'content':
+            '<think>reasoning</think>\nHere you go: {"stocks": [{"symbol": "S5", "action": "BUY", "confidence": 0.9, "rationale": "Upgrade", "source_ids": [6]}]} Thanks'}}]}
+        empty = Mock(ok=True)
+        empty.json.side_effect = ValueError('Expecting value: line 1 column 1 (char 0)')
+        research.http.post = Mock(side_effect=[empty, good])
+        results = research.analyze_all([forecast(s) for s in symbols])
+        self.assertEqual(research.http.post.call_count, 2)
+        sent = [json.loads(c.kwargs['json']['messages'][1]['content'])['stocks'] for c in research.http.post.call_args_list]
+        self.assertEqual([len(s) for s in sent], [5, 2])
+        self.assertEqual(results['S0']['status'], 'unavailable')
+        self.assertIn('non-JSON', results['S0']['message'])
+        self.assertEqual((results['S5']['status'], results['S5']['action']), ('ready', 'BUY'))
+        self.assertEqual((results['S6']['status'], results['S6']['action']), ('ready', 'HOLD'))
+
+    def test_all_batches_failing_raises_for_a_retry(self):
+        research = Research(replace(self.cfg, llm_models=('auto',)), self.store)
+        research.market_news = Mock(return_value={'SPY': []})
+        research.news = Mock(return_value=([{'id': 1, 'title': 't', 'summary': '', 'published_at': 'now', 'url': 'https://x', 'provider': 'p'}], []))
+        cut = Mock(ok=True)
+        cut.json.return_value = {'choices': [{'finish_reason': 'length', 'message': {'content': '{"stocks": [{"symbol": "SPY"'}}]}
+        research.http.post = Mock(return_value=cut)
+        with self.assertRaisesRegex(ValueError, 'cut off'):
+            research.analyze_all([forecast('SPY')])
+
+
 class ResearchScheduleTests(TempCase):
     def engine(self, mode='daily'):
         engine = Engine(replace(self.cfg, trading_mode=mode), self.store)
@@ -125,13 +158,70 @@ class DaytradeExitTests(DecisionFixture):
         self.prediction('BUY')
         self.assertEqual(self.decision()['action'], 'SELL')
 
-    def test_entry_bracket_uses_volatility_stop(self):
-        self.prediction('BUY')
-        prediction = self.store.get('prediction:SPY')
-        self.store.set('prediction:SPY', {**prediction, 'setup': {'signal': 'BUY', 'atr': .002}})
-        self.decision()
+
+class PercentSizingTests(TempCase):
+    def buy(self, equity, symbol, price=100., fractionable=True, **options):
+        from app.execution import Executor
+        broker = Mock(base='paper')
+        broker.asset.return_value = {'tradable': True, 'status': 'active', 'fractionable': fractionable}
+        broker.latest_price.return_value = price
+        broker.submit.return_value = {'id': 'x', 'status': 'filled'}
+        self.broker = broker
+        self.store.set('entries_enabled', True)
+        executor = Executor(replace(self.cfg, **options), self.store, broker)
+        account = {'status': 'ACTIVE', 'equity': str(equity), 'cash': str(equity), 'buying_power': str(equity)}
+        self.status = executor.execute(symbol, 'BUY', '2026-10-15', account, [], [])
+        return float(broker.submit.call_args.args[0]['qty']) if broker.submit.called else 0
+
+    def test_expensive_stock_is_bought_in_fractions_without_bracket(self):
+        # $500 budget, AMD at $580: the old code refused with "cannot fund one whole share".
+        qty = self.buy(10000, 'AMD', price=580., capital=10000, strategy_fraction=.5)
+        self.assertAlmostEqual(qty, .8603)
         payload = self.broker.submit.call_args.args[0]
-        self.assertEqual(payload['stop_loss']['stop_price'], '99.60')
+        self.assertEqual((payload['type'], payload['time_in_force']), ('limit', 'day'))
+        self.assertNotIn('order_class', payload)
+        self.assertIn('fractional shares', self.status)
+        self.assertEqual(self.store.get('unbracketed:AMD'), {'stop': self.cfg.stop_loss, 'target': self.cfg.take_profit})
+        self.assertEqual(self.buy(10000, 'MSFT', price=580., fractionable=False, capital=10000, strategy_fraction=.5), 0)
+        self.assertIn('cannot be bought in fractions', self.status)
+        self.assertEqual(self.buy(5, 'NVDA', price=580.), 0)
+        self.assertIn('$1 minimum', self.status)
+
+    def test_whole_share_entries_keep_brackets(self):
+        self.buy(100000, 'SPY')
+        self.assertEqual(self.broker.submit.call_args.args[0]['order_class'], 'bracket')
+        self.assertIsNone(self.store.get('unbracketed:SPY'))
+
+    def test_position_size_scales_with_account_equity(self):
+        # 10% per position of the equity share; limit price 100.20.
+        self.assertEqual(self.buy(100000, 'AAA'), 99)
+        self.assertEqual(self.buy(2000, 'BBB', capital_fraction=1.), 1)
+        self.assertEqual(self.buy(100000, 'CCC', capital_fraction=.5), 49)
+        self.assertEqual(self.buy(100000, 'DDD', capital=10000), 9)
+
+    def test_sizing_capital(self):
+        self.assertEqual(Config(capital_fraction=.25).sizing_capital(40000), 10000)
+        self.assertEqual(Config(capital=5000).sizing_capital(40000), 5000)
+        for options in ({'capital': 50}, {'capital_fraction': 0}, {'capital_fraction': 1.5}):
+            with self.assertRaises(ValueError):
+                Config(**options)
+
+
+class BotManagedExitTests(DecisionFixture):
+    def test_fractional_position_take_profit_and_stop_enforced_by_engine(self):
+        self.position(pnl='.11')
+        self.store.set('unbracketed:SPY', {'stop': .05, 'target': .10})
+        self.prediction('HOLD')
+        forecast = self.decision()
+        self.assertEqual(forecast['action'], 'SELL')
+        self.assertIn('Take-profit reached', forecast['reason'])
+
+    def test_guard_cleared_when_flat(self):
+        self.store.set('owned:SPY', True)
+        self.store.set('unbracketed:SPY', {'stop': .05, 'target': .10})
+        self.prediction('HOLD')
+        self.decision()
+        self.assertIsNone(self.store.get('unbracketed:SPY'))
 
 
 class VoteConfigTests(TempCase):

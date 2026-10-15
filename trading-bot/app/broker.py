@@ -162,6 +162,36 @@ class Alpaca:
             raise BrokerError(f"Invalid or missing regular-session bars for {symbol}")
         return frame
 
+    def multi_bars(self, symbols, timeframe, start, end=None):
+        """One paginated request for many symbols; returns {symbol: OHLCV frame}."""
+        params = {"symbols": ",".join(symbols), "timeframe": timeframe, "start": start.isoformat(),
+                  "adjustment": "all", "feed": self.config.feed, "limit": 10000, "sort": "asc"}
+        if end is not None:
+            params["end"] = end.isoformat()
+        rows, tokens = {}, set()
+        for _ in range(20):
+            result = self.request("GET", "/v2/stocks/bars", data=True, params=params)
+            for symbol, items in (result.get("bars") or {}).items():
+                rows.setdefault(symbol, []).extend(items)
+            token = result.get("next_page_token")
+            if not token:
+                break
+            if token in tokens:
+                raise BrokerError("Repeated market data pagination token")
+            tokens.add(token)
+            params["page_token"] = token
+        else:
+            raise BrokerError("Market data pagination limit exceeded")
+        frames = {}
+        for symbol, items in rows.items():
+            frame = pd.DataFrame(items).rename(columns={"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
+            frame["timestamp"] = pd.to_datetime(frame.timestamp, utc=True)
+            frame = frame.set_index("timestamp").sort_index()
+            frame = frame[~frame.index.duplicated(keep="last")][["open", "high", "low", "close", "volume"]].astype(float)
+            if (frame[["open", "high", "low", "close"]] > 0).all().all() and not frame.isna().any().any():
+                frames[symbol] = frame
+        return frames
+
     def latest_price(self, symbol):
         result = self.request("GET", f"/v2/stocks/{quote(symbol, safe='')}/trades/latest", data=True, params={"feed": self.config.feed})
         trade = result["trade"]

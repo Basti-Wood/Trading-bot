@@ -13,7 +13,7 @@ from .execution import Executor
 from .decisions import position_context, position_decision
 from .models import train_worker, predict, strategy_signature
 from .feedback import capture_forecast, resolve_outcomes
-from .daytrade import bracket_stop
+from .daytrade import TREND_EXITS, baseline, best, bracket, exit_signal, fresh, playbook, session_open
 from .research import Research, ballots, combine
 from .store import utcnow
 from .universe import active_symbols, monitored_symbols, scan, entries_ready
@@ -36,6 +36,8 @@ class Engine:
         self.scan_thread = None
         self.forecast_thread = None
         self.last_scan = 0
+        self.playbook_thread = None
+        self.last_playbook = None
         previous_mode = store.get("trading_mode", "daily")
         if not config.coordinated and store.get("parallel_enabled", False):
             raise ValueError("This journal contains parallel strategies; keep TRADING_MODE=both to monitor both")
@@ -210,18 +212,82 @@ class Engine:
         self.forecast_thread = threading.Thread(target=work, name="forecasts", daemon=True)
         self.forecast_thread.start()
 
-    def forecast_decision(self, forecast, now):
+    def stale_forecast(self, forecast, now):
         meta = self.store.get(f"model:{forecast['symbol']}")
-        if not meta or meta.get("strategy_signature") != strategy_signature(self.config) or forecast["model_version"] != meta["version"]:
-            return "HOLD", "Settings or model changed; awaiting a current forecast"
+        if not meta or meta.get("strategy_signature") != strategy_signature(self.config) or forecast.get("model_version") != meta["version"]:
+            return "Settings or model changed; awaiting a current forecast"
         age = (now - pd.Timestamp(forecast["bar_at"])).total_seconds()
         model_age = (now - pd.Timestamp(meta["data_through"])).total_seconds()
         if not (300 <= age <= 390 if self.config.intraday else 0 <= age <= 7 * 86400) or not 0 <= model_age <= (3 if self.config.intraday else 14) * 86400:
-            return "HOLD", "Market data or model is too old for this horizon"
+            return "Market data or model is too old for this horizon"
+        return None
+
+    def forecast_decision(self, forecast, now):
+        if self.config.intraday:
+            return self.daytrade_decision(forecast, now)
+        stale = self.stale_forecast(forecast, now)
+        if stale:
+            return "HOLD", stale
         return combine(forecast, self.store.get(f"research:{forecast['symbol']}"), min_votes=self.config.min_votes)
 
-    def daytrade_exit(self, symbol, pnl, now):
-        """Cut losers at the bracket stop, lock in gains with a trail, let winners run."""
+    def daytrade_decision(self, forecast, now):
+        """Rule-based setups enter; prediction models only veto entries or call exits."""
+        votes = [] if self.stale_forecast(forecast, now) else [m.get("signal") for m in forecast.get("models", [])]
+        buys, sells = votes.count("BUY"), votes.count("SELL")
+        if votes and sells >= min(3, self.config.min_votes):
+            return "SELL", f"{sells} of 3 prediction models are bearish"
+        book = forecast.get("playbook")
+        if not book or not fresh(book, now):
+            return "HOLD", "Waiting for fresh one-minute bars for the day-trading playbook"
+        if not book["signals"]:
+            return "HOLD", "No day-trading setup is firing" + (f" ({book['note']})" if book.get("note") else "")
+        names = " + ".join(s["name"] for s in book["signals"])
+        if sells >= 2:
+            return "HOLD", f"{names} fired, but {sells} prediction models are bearish (veto)"
+        models = f"models {buys} bullish / {sells} bearish" if votes else "prediction models abstain"
+        return "BUY", f"{names} fired: {best(book)['reason']}; {models}"
+
+    def playbook_tick(self, symbols, now, is_open):
+        """Fetch one-minute bars for every symbol in one request and evaluate the playbook."""
+        if not self.config.intraday or not is_open or self.playbook_thread and self.playbook_thread.is_alive():
+            return
+        slot = now.floor("30s")
+        if self.last_playbook == slot or not symbols:
+            return
+        self.last_playbook = slot
+        def work():
+            try:
+                broker = Alpaca(self.config)
+                today = now.tz_convert("America/New_York").date()
+                opening = session_open(today)
+                missing = [s for s in symbols if (self.store.get(f"playbook_base:{s}") or {}).get("day") != str(today)]
+                if missing:
+                    # Once per day: daily ATR/previous close and 14 sessions of opening volume and noise.
+                    daily = broker.multi_bars(missing, "1Day", now - pd.Timedelta(days=40))
+                    five = broker.multi_bars(missing, "5Min", now - pd.Timedelta(days=25), end=opening)
+                    for symbol in missing:
+                        try:
+                            base = baseline(daily.get(symbol), five.get(symbol), today)
+                        except ValueError as exc:
+                            base = {"day": str(today), "error": str(exc)[:200]}
+                        self.store.set(f"playbook_base:{symbol}", base)
+                minute = broker.multi_bars(symbols, "1Min", opening)
+                for symbol in symbols:
+                    frame = minute.get(symbol)
+                    if frame is not None:
+                        frame = frame[frame.index + pd.Timedelta(minutes=1) <= now]
+                    try:
+                        book = playbook(frame, self.store.get(f"playbook_base:{symbol}"), now, self.config)
+                    except (ValueError, KeyError, IndexError, ZeroDivisionError) as exc:
+                        book = {"signal": "HOLD", "signals": [], "at": now.isoformat(), "bar_at": None, "note": str(exc)[:200]}
+                    self.store.set(f"playbook:{symbol}", book)
+            except Exception as exc:
+                self.store.event("error", {"message": "Day-trading playbook data failed: " + str(exc)[:200]})
+        self.playbook_thread = threading.Thread(target=work, name="daytrade-playbook", daemon=True)
+        self.playbook_thread.start()
+
+    def daytrade_exit(self, symbol, pos, pnl, now):
+        """Each setup's own exit; positions without a setup keep the time-based rules."""
         cfg = self.config
         record = self.store.get(f"daytrade_position:{symbol}") or {}
         peak = max(float(record.get("peak", 0)), pnl)
@@ -231,14 +297,29 @@ class Engine:
         # Unknown holding age after recovery is an exit, never a new timer.
         if not started:
             return "Day-trading holding period unknown; exiting"
+        held = (now - pd.Timestamp(started)).total_seconds() / 60
+        if record.get("exit"):
+            try:
+                price = float(pos.get("current_price") or 0) or float(pos["avg_entry_price"]) * (1 + pnl)
+            except (KeyError, TypeError, ValueError):
+                price = None
+            book = self.store.get(f"playbook:{symbol}") or {}
+            reason = exit_signal(record, price, book.get("indicators", {}) if fresh(book, now) else {})
+            if reason or record["exit"] in TREND_EXITS:
+                # Trend setups ride until their trail, stop or the pre-close flatten.
+                return reason
+            if peak >= cfg.daytrade_trail_trigger and pnl <= peak - cfg.daytrade_trail_gap:
+                return f"Trailing profit stop: {pnl:.2%} after a {peak:.2%} peak"
+            if held >= cfg.daytrade_run_minutes:
+                return f"{record.get('name', 'Setup')} time stop after {cfg.daytrade_run_minutes} minutes"
+            return None
         if peak >= cfg.daytrade_trail_trigger and pnl <= peak - cfg.daytrade_trail_gap:
             return f"Trailing profit stop: {pnl:.2%} after a {peak:.2%} peak"
-        held = (now - pd.Timestamp(started)).total_seconds() / 60
         if held < cfg.daytrade_hold_minutes:
             return None
-        prediction = self.store.get(f"prediction:{symbol}")
-        if (pnl > 0 and held < cfg.daytrade_run_minutes and prediction
-                and self.forecast_decision(prediction, now)[0] == "BUY"):
+        current = {**(self.store.get(f"prediction:{symbol}") or {"symbol": symbol}),
+                   "playbook": self.store.get(f"playbook:{symbol}")}
+        if pnl > 0 and held < cfg.daytrade_run_minutes and self.daytrade_decision(current, now)[0] == "BUY":
             return None
         return "Day-trading holding period ended" + ("; winner extension used up" if pnl > 0 and held >= cfg.daytrade_run_minutes else "")
 
@@ -287,8 +368,9 @@ class Engine:
             valid_close = close is not None and close.tzinfo is not None and close.tz_convert("America/New_York").date() == local.date()
             remaining = (close - now).total_seconds() / 60 if valid_close else 0
             flatten = bool(clock["is_open"] and (not valid_close or remaining <= self.config.daytrade_close_minutes))
-            entry_window = (clock["is_open"] and (local.hour, local.minute) >= (9, 40)
-                            and remaining > self.config.daytrade_close_minutes + self.config.daytrade_hold_minutes)
+            # The opening-range breakout needs the first five minutes only.
+            entry_window = (clock["is_open"] and (local.hour, local.minute) >= (9, 35)
+                            and remaining > self.config.daytrade_close_minutes + 5)
         acted = not allow_action
         symbols = monitored_symbols(self.config, self.store, positions, orders)
         self.store.set("monitor_symbols", symbols)
@@ -339,6 +421,8 @@ class Engine:
                     self.store.set(f"exit_pending:{symbol}", False)
                     self.store.set(f"exit_reason:{symbol}", None)
                     self.store.set(f"exit_status:{symbol}", None)
+                    if owned:
+                        self.store.set(f"unbracketed:{symbol}", None)
                 elif self.config.coordinated:
                     self.store.set(f"flat_observed:{symbol}", None)
                 exit_reason = (self.store.get(f"exit_reason:{symbol}") or "Completing the previously requested exit") if self.store.get(f"exit_pending:{symbol}", False) else None
@@ -350,8 +434,15 @@ class Engine:
                         exit_reason = "Position stop-loss reached"
                     elif flatten:
                         exit_reason = "Day-trading exit before market close"
+                    guard = self.store.get(f"unbracketed:{symbol}")
+                    if guard and not exit_reason:
+                        # Fractional entries carry no broker bracket; enforce its levels here.
+                        if pnl_fraction <= -guard["stop"]:
+                            exit_reason = "Stop-loss reached (bot-managed for fractional shares)"
+                        elif not self.config.intraday and pnl_fraction >= guard["target"]:
+                            exit_reason = "Take-profit reached (bot-managed for fractional shares)"
                     if self.config.intraday and not exit_reason:
-                        exit_reason = self.daytrade_exit(symbol, pnl_fraction, now)
+                        exit_reason = self.daytrade_exit(symbol, pos, pnl_fraction, now)
                 if exit_reason and pos and float(pos["qty"]) > 0 and owned:
                     # Keep the exit visible even if another symbol used this snapshot.
                     self.store.set(f"exit_pending:{symbol}", True)
@@ -366,11 +457,20 @@ class Engine:
         forecasts = []
         for symbol in symbols:
             prediction = self.store.get(f"prediction:{symbol}")
-            if prediction:
+            if self.config.intraday:
+                # Day trading needs no trained model: the playbook alone can qualify an entry.
+                book = self.store.get(f"playbook:{symbol}")
+                if prediction or book:
+                    item = dict(prediction or {"symbol": symbol, "models": [], "expected_return": 0., "forecast_signal": "HOLD",
+                                               "trading_mode": self.config.trading_mode, "eligible": False})
+                    item["playbook"] = book
+                    item["rank"] = len((book or {}).get("signals") or []) if book and fresh(book, now) else 0
+                    forecasts.append(item)
+            elif prediction:
                 forecasts.append(dict(prediction))
-        # Consider sales first, then the highest predicted returns. A held stock,
-        # exhausted allocation or duplicate intent must not starve other candidates.
-        forecasts.sort(key=lambda f: (f["forecast_signal"] != "SELL", -f["expected_return"], f["symbol"]))
+        # Consider sales first, then the strongest setups or highest predicted returns. A held
+        # stock, exhausted allocation or duplicate intent must not starve other candidates.
+        forecasts.sort(key=lambda f: (f["forecast_signal"] != "SELL", -f.get("rank", 0), -f["expected_return"], f["symbol"]))
         candidates = set(active_symbols(self.config, self.store))
         for forecast in forecasts:
             symbol = forecast["symbol"]
@@ -402,7 +502,9 @@ class Engine:
                         self.store.set(f"exit_reason:{symbol}", reason)
                     queue_args = {"queued_for_open": True, "reference_price": forecast.get("last_close")} if queued_buy else {}
                     if self.config.intraday and action == "BUY":
-                        queue_args["stop_fraction"] = bracket_stop(self.config, forecast)
+                        plan = best(forecast["playbook"])
+                        stop_fraction, target_fraction = bracket(self.config, plan)
+                        queue_args.update(stop_fraction=stop_fraction, target_fraction=target_fraction, plan=plan)
                     status = self.executor.execute(symbol, action, queue_session if queued_buy else day, account, positions, orders,
                                                    loss_breach=loss_breach, **queue_args)
                     if action == "SELL":
@@ -420,6 +522,7 @@ class Engine:
                 self.store.event("error", {"symbol": symbol, "message": str(exc)[:240]})
         # Network-heavy scanning, forecasting and LLM calls cannot stall risk polling.
         self.scan_tick()
+        self.playbook_tick(symbols, now, clock["is_open"])
         self.forecast_tick(symbols, day)
         self.research_tick(forecasts)
         self.store.set("engine", {"status": "running", "message": f"Monitoring {len(symbols)} symbols in {self.config.trading_mode} mode", "at": utcnow()})

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+﻿from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
@@ -29,7 +29,7 @@ class Config:
     scan_min_dollar_volume: float = 1000000
     daytrade_max_positions: int = 3
     daytrade_max_entries: int = 3
-    daytrade_cooldown_minutes: int = 15
+    daytrade_cooldown_minutes: int = 5
     daytrade_hold_minutes: int = 15
     daytrade_stop_loss: float = .01
     daytrade_take_profit: float = .02
@@ -40,6 +40,8 @@ class Config:
     daytrade_trail_gap: float = .004
     # Of four voters (three models plus LLM news or the day-trading setup).
     min_votes: int = 3
+    # In a 20-session replay only the two published setups had a positive gross edge.
+    daytrade_strategies: tuple = ("orb", "noise_breakout")
     api_key: str = ""
     api_secret: str = ""
     paper: bool = True
@@ -53,7 +55,9 @@ class Config:
     retrain_hours: int = 24
     training_timeout: int = 900
     training_memory_mb: int = 4096
-    capital: float = 10000
+    # Sizing follows the account: this share of current equity, optionally capped in dollars (0 = no cap).
+    capital_fraction: float = 1.
+    capital: float = 0
     position_fraction: float = .10
     gross_fraction: float = .30
     daily_loss: float = .02
@@ -88,7 +92,11 @@ class Config:
             raise ValueError("Live trading requires ALLOW_LIVE_TRADING=true as well as ALPACA_PAPER=false")
         if self.host not in {"127.0.0.1", "localhost", "::1"} and not self.password:
             raise ValueError("DASHBOARD_PASSWORD is required for a non-loopback host")
-        bounds = {"capital": (100, 1000000), "position_fraction": (.01, .20),
+        if not math.isfinite(self.capital) or self.capital != 0 and not 100 <= self.capital <= 10000000:
+            raise ValueError("MAX_CAPITAL_USD must be 0 (no cap) or between 100 and 10000000")
+        if not set(self.daytrade_strategies) <= {"orb", "noise_breakout", "vwap_pullback", "vwap_reversion"}:
+            raise ValueError("DAYTRADE_STRATEGIES may contain orb, noise_breakout, vwap_pullback, vwap_reversion")
+        bounds = {"capital_fraction": (.01, 1), "position_fraction": (.01, .20),
                   "gross_fraction": (.01, .80), "daily_loss": (.001, .10),
                   "stop_loss": (.005, .10), "take_profit": (.01, .30),
                   "cost_bps": (1, 100), "edge_bps": (0, 100),
@@ -115,6 +123,11 @@ class Config:
             raise ValueError("DAYTRADE_LET_WINNERS_RUN_MINUTES cannot be shorter than DAYTRADE_MAX_HOLD_MINUTES")
         if self.daytrade_trail_gap > self.daytrade_trail_trigger:
             raise ValueError("DAYTRADE_TRAIL_GAP cannot exceed DAYTRADE_TRAIL_TRIGGER; the trail would lock in a loss")
+
+    def sizing_capital(self, equity):
+        """The capital this bot may use at the current account equity."""
+        base = max(0., equity) * self.capital_fraction
+        return min(base, self.capital) if self.capital else base
 
     @property
     def configured(self):
@@ -154,7 +167,7 @@ class Config:
             scan_min_dollar_volume=float(os.getenv("SCAN_MIN_DOLLAR_VOLUME", "1000000")),
             daytrade_max_positions=int(os.getenv("DAYTRADE_MAX_POSITIONS", "3")),
             daytrade_max_entries=int(os.getenv("DAYTRADE_MAX_ENTRIES_PER_SYMBOL", "3")),
-            daytrade_cooldown_minutes=int(os.getenv("DAYTRADE_COOLDOWN_MINUTES", "15")),
+            daytrade_cooldown_minutes=int(os.getenv("DAYTRADE_COOLDOWN_MINUTES", "5")),
             daytrade_hold_minutes=int(os.getenv("DAYTRADE_MAX_HOLD_MINUTES", "15")),
             daytrade_stop_loss=float(os.getenv("DAYTRADE_STOP_LOSS", ".01")),
             daytrade_take_profit=float(os.getenv("DAYTRADE_TAKE_PROFIT", ".02")),
@@ -163,6 +176,7 @@ class Config:
             daytrade_trail_trigger=float(os.getenv("DAYTRADE_TRAIL_TRIGGER", ".006")),
             daytrade_trail_gap=float(os.getenv("DAYTRADE_TRAIL_GAP", ".004")),
             min_votes=int(os.getenv("MIN_AGREEING_VOTES", "3")),
+            daytrade_strategies=tuple(s.strip() for s in os.getenv("DAYTRADE_STRATEGIES", "orb,noise_breakout").split(",") if s.strip()),
             api_key=os.getenv("ALPACA_API_KEY", "").strip(), api_secret=os.getenv("ALPACA_SECRET_KEY", "").strip(),
             paper=flag("ALPACA_PAPER", True), allow_live=flag("ALLOW_LIVE_TRADING"),
             password=os.getenv("DASHBOARD_PASSWORD", ""), host=os.getenv("HOST", "127.0.0.1"),
@@ -173,7 +187,8 @@ class Config:
             training_memory_mb=int(os.getenv("TRAINING_MEMORY_MB", "4096")),
             feedback_weight=float(os.getenv("FEEDBACK_SAMPLE_WEIGHT", "2")),
             validation_bars=int(os.getenv("VALIDATION_BARS", "30")),
-            capital=float(os.getenv("MAX_CAPITAL_USD", "10000")),
+            capital=float(os.getenv("MAX_CAPITAL_USD", "0")),
+            capital_fraction=float(os.getenv("CAPITAL_FRACTION", "1")),
             position_fraction=float(os.getenv("MAX_POSITION_FRACTION", ".10")),
             gross_fraction=float(os.getenv("MAX_GROSS_FRACTION", ".30")),
             daily_loss=float(os.getenv("MAX_DAILY_LOSS", ".02")),

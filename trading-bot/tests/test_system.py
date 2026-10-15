@@ -34,6 +34,14 @@ def models(*signals):
     return [{"id": f"m{i}", "name": f"Model {i}", "signal": s} for i, s in enumerate(signals)]
 
 
+def book(fired=True, bar_at="2026-10-15T13:44:00Z", strategy="vwap_pullback", stop=99.5, target=101., exit="target"):
+    """A stored day-trading playbook result whose last one-minute bar closed at 13:45."""
+    signals = [{"strategy": strategy, "name": "Test setup", "entry": 100., "stop": stop, "target": target,
+                "exit": exit, "reason": "test"}] if fired else []
+    return {"signal": "BUY" if fired else "HOLD", "signals": signals, "bar_at": bar_at,
+            "indicators": {"close": 100., "vwap": 99.8, "noise_upper": 99.7}}
+
+
 class TempCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

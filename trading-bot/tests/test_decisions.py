@@ -6,7 +6,7 @@ from app.models import strategy_signature
 from app.portfolio import PortfolioEngine
 from app.store import utcnow
 from app.web import create_app
-from test_system import TempCase, models
+from test_system import TempCase, book, models
 
 
 class DecisionFixture(TempCase):
@@ -31,6 +31,7 @@ class DecisionFixture(TempCase):
         self.engine.scan_tick = Mock()
         self.engine.forecast_tick = Mock()
         self.engine.research_tick = Mock()
+        self.engine.playbook_tick = Mock()
         self.store.set('entries_enabled', True)
 
     def prediction(self, action, symbol='SPY', news=None, stale=False, votes=None):
@@ -42,6 +43,8 @@ class DecisionFixture(TempCase):
         self.store.set(f'prediction:{symbol}', {'symbol': symbol, 'model_version': 'v1', 'bar_at': at,
             'eligible': True, 'expected_return': {'BUY': .01, 'SELL': -.01, 'HOLD': 0}[action],
             'forecast_signal': action, 'trading_mode': self.mode, 'models': models(*(votes or [action]))})
+        if self.cfg.intraday:
+            self.store.set(f'playbook:{symbol}', book(action == 'BUY'))
         self.store.set(f'research:{symbol}', {'status': 'ready', 'at': utcnow(), 'bar_at': at,
             'action': news or action, 'trading_mode': self.mode})
 
