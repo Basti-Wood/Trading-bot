@@ -10,6 +10,7 @@ def main():
     from app.config import Config
     from app.store import Store
     from app.engine import Engine
+    from app.portfolio import PortfolioEngine
     from app.web import create_app
     from app.lock import InstanceLock
     from waitress import serve
@@ -17,10 +18,10 @@ def main():
     store = Store(config.data_dir)
     lock = InstanceLock(config.data_dir / "engine.lock")
     atexit.register(lock.close)
-    engine = Engine(config, store)
+    engine = PortfolioEngine(config, store) if config.trading_mode == "both" else Engine(config, store)
     atexit.register(engine.shutdown)
     engine.start()
-    print(f"Trading dashboard: http://{config.host}:{config.port} | {'PAPER' if config.paper else 'LIVE'} | entries paused", flush=True)
+    print(f"Trading dashboard: http://{config.host}:{config.port} | {'PAPER' if config.paper else 'LIVE'} | {config.trading_mode} strategies | entries paused", flush=True)
     try:
         serve(create_app(config, store), host=config.host, port=config.port, threads=4)
     finally:

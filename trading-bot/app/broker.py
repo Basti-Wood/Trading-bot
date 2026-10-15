@@ -49,6 +49,25 @@ class Alpaca:
     def asset(self, symbol):
         return self.request("GET", f"/v2/assets/{quote(symbol, safe='')}")
 
+    def assets(self):
+        return self.request("GET", "/v2/assets", params={"status": "active", "asset_class": "us_equity"})
+
+    def snapshots(self, symbols):
+        return self.request("GET", "/v2/stocks/snapshots", data=True,
+                            params={"symbols": ",".join(symbols), "feed": self.config.feed})
+
+    def calendar(self, start, end):
+        return self.request("GET", "/v2/calendar", params={"start": str(start), "end": str(end)})
+
+    def quote(self, symbol):
+        result = self.request("GET", f"/v2/stocks/{quote(symbol, safe='')}/quotes/latest", data=True,
+                              params={"feed": self.config.feed})["quote"]
+        age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(result["t"])).total_seconds()
+        bid, ask = float(result["bp"]), float(result["ap"])
+        if not -10 <= age <= 60 or not 0 < bid <= ask < 1000000 or (ask - bid) / ask > .003:
+            raise BrokerError(f"Stale, crossed or wide quote for {symbol}")
+        return bid, ask
+
     def order(self, client_id):
         return self.request("GET", "/v2/orders:by_client_order_id", params={"client_order_id": client_id})
 
@@ -60,6 +79,8 @@ class Alpaca:
 
     def bars(self, symbol, now=None):
         now = now or datetime.now(timezone.utc)
+        if self.config.intraday:
+            return self.intraday_bars(symbol, now)
         # Exclude today's unfinished daily bar, including after-hours revisions.
         local_day = now.astimezone(__import__('zoneinfo').ZoneInfo("America/New_York")).date()
         params = {"timeframe": "1Day", "start": (now - timedelta(days=self.config.history_days)).isoformat(),
@@ -89,6 +110,43 @@ class Alpaca:
         valid = (frame[["open", "high", "low", "close"]] > 0).all(axis=1) & (frame.volume >= 0)
         if not valid.all() or frame.isna().any().any():
             raise BrokerError(f"Invalid OHLCV data for {symbol}")
+        return frame
+
+    def intraday_bars(self, symbol, now):
+        start = now - timedelta(days=60)
+        params = {"timeframe": "5Min", "start": start.isoformat(), "end": now.isoformat(),
+                  "adjustment": "all", "feed": self.config.feed, "limit": 10000, "sort": "desc"}
+        rows, tokens = [], set()
+        for _ in range(10):
+            result = self.request("GET", f"/v2/stocks/{quote(symbol, safe='')}/bars", data=True, params=params)
+            rows.extend(result.get("bars") or [])
+            token = result.get("next_page_token")
+            if not token:
+                break
+            if token in tokens:
+                raise BrokerError("Repeated market data pagination token")
+            tokens.add(token)
+            params["page_token"] = token
+        else:
+            raise BrokerError("Intraday pagination limit exceeded")
+        if not rows:
+            raise BrokerError(f"No five-minute bars for {symbol}")
+        frame = pd.DataFrame(rows).rename(columns={"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
+        frame["timestamp"] = pd.to_datetime(frame.timestamp, utc=True)
+        frame = frame.set_index("timestamp").sort_index()
+        frame = frame[~frame.index.duplicated(keep="last")]
+        # Calendar filtering includes half-days; extended-hours bars never enter fitting.
+        sessions = self.calendar(start.date(), now.date())
+        local = frame.index.tz_convert("America/New_York")
+        keep = pd.Series(False, index=frame.index)
+        for session in sessions:
+            opening = pd.Timestamp(f"{session['date']} {session['open']}", tz="America/New_York")
+            closing = pd.Timestamp(f"{session['date']} {session['close']}", tz="America/New_York")
+            keep |= (local >= opening) & (local + pd.Timedelta(minutes=5) <= closing)
+        keep &= frame.index + pd.Timedelta(minutes=5) <= pd.Timestamp(now)
+        frame = frame.loc[keep, ["open", "high", "low", "close", "volume"]].astype(float).tail(self.config.max_bars)
+        if frame.empty or not (frame[["open", "high", "low", "close"]] > 0).all().all() or not (frame.volume >= 0).all() or frame.isna().any().any():
+            raise BrokerError(f"Invalid or missing regular-session bars for {symbol}")
         return frame
 
     def latest_price(self, symbol):

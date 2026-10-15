@@ -59,10 +59,48 @@ class Store:
             rows = db.execute("SELECT at,body FROM journal WHERE kind=? ORDER BY id DESC LIMIT ?", (kind, limit)).fetchall()
         return [{"at": at, **json.loads(body)} for at, body in rows]
 
-    def reserve_order(self, client_id, body):
+    def reserve_order(self, client_id, body, strategy=None):
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if strategy and body["side"] == "buy":
+                owner = self._owner(db, body["symbol"])
+                if owner and owner != strategy:
+                    return False
             result = db.execute("INSERT OR IGNORE INTO orders VALUES (?,?,?)", (client_id, utcnow(), json.dumps(body)))
+            if result.rowcount and strategy and body["side"] == "buy":
+                db.execute("INSERT OR REPLACE INTO state VALUES (?,?)", (f"position_owner:{body['symbol']}", json.dumps(strategy)))
         return result.rowcount == 1
+
+    @staticmethod
+    def _owner(db, symbol):
+        row = db.execute("SELECT value FROM state WHERE key=?", (f"position_owner:{symbol}",)).fetchone()
+        if row:
+            return json.loads(row[0])
+        # Existing daily holdings retain their owner when parallel mode is added.
+        legacy = db.execute("SELECT value FROM state WHERE key=?", (f"owned:{symbol}",)).fetchone()
+        return "daily" if legacy and json.loads(legacy[0]) else None
+
+    def owner(self, symbol):
+        with self.db() as db:
+            return self._owner(db, symbol)
+
+    def owned_symbols(self, strategy):
+        with self.db() as db:
+            rows = db.execute("SELECT key FROM state WHERE key LIKE 'position_owner:%' OR key LIKE 'owned:%'").fetchall()
+            symbols = {row[0].split(":", 1)[1] for row in rows}
+            return sorted(s for s in symbols if self._owner(db, s) == strategy)
+
+    def set_owned(self, symbol, strategy, owned):
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = self._owner(db, symbol)
+            if current and current != strategy:
+                if owned:
+                    raise ValueError("Symbol belongs to the other strategy")
+                return
+            db.execute("INSERT OR REPLACE INTO state VALUES (?,?)", (f"position_owner:{symbol}", json.dumps(strategy if owned else None)))
+            if strategy == "daily":
+                db.execute("INSERT OR REPLACE INTO state VALUES (?,?)", (f"owned:{symbol}", json.dumps(owned)))
 
     def update_order(self, client_id, body):
         with self.db() as db:
@@ -81,6 +119,11 @@ class Store:
     def unresolved_orders(self):
         with self.db() as db:
             rows = db.execute("SELECT client_id,at,body FROM orders WHERE json_extract(body,'$.status') NOT IN ('filled','canceled','expired','rejected','replaced','done_for_day')").fetchall()
+        return [{"client_id": cid, "at": at, **json.loads(body)} for cid, at, body in rows]
+
+    def session_entries(self, symbol, session):
+        with self.db() as db:
+            rows = db.execute("SELECT client_id,at,body FROM orders WHERE json_extract(body,'$.symbol')=? AND json_extract(body,'$.session')=? AND json_extract(body,'$.side')='buy' ORDER BY at", (symbol, session)).fetchall()
         return [{"client_id": cid, "at": at, **json.loads(body)} for cid, at, body in rows]
 
     def capture_experience(self, record):
@@ -122,3 +165,55 @@ class Store:
             result = db.execute("""UPDATE experience SET status=?,outcome=?,resolved_at=?
                 WHERE id=? AND status='pending'""", (status, json.dumps(outcome, allow_nan=False), utcnow(), record_id))
         return result.rowcount == 1
+
+
+class StrategyStore:
+    """Strategy-local state over one account journal and ownership registry."""
+    SHARED = {"account", "account_scope", "loss_halt_day", "equity_sample", "universe", "scan_status"}
+
+    def __init__(self, root, strategy):
+        self.root, self.strategy = root, strategy
+        self.prefix = "" if strategy == "daily" else "daytrade:"
+
+    def __getattr__(self, name):
+        return getattr(self.root, name)
+
+    def key(self, key):
+        return key if key in self.SHARED else self.prefix + key
+
+    def get(self, key, default=None):
+        if key.startswith("owned:"):
+            return self.root.owner(key[6:]) == self.strategy
+        return self.root.get(self.key(key), default)
+
+    def set(self, key, value):
+        if key.startswith("owned:"):
+            self.root.set_owned(key[6:], self.strategy, value)
+        else:
+            self.root.set(self.key(key), value)
+
+    def event(self, kind, body):
+        self.root.event(kind, {**body, "strategy": self.strategy})
+
+    def history(self, kind, limit=100):
+        with self.root.db() as db:
+            rows = db.execute("SELECT at,body FROM journal WHERE kind=? AND COALESCE(json_extract(body,'$.strategy'),'daily')=? ORDER BY id DESC LIMIT ?", (kind, self.strategy, limit)).fetchall()
+        return [{"at": at, **json.loads(body)} for at, body in rows]
+
+    def reserve_order(self, client_id, body):
+        return self.root.reserve_order(client_id, {**body, "strategy": self.strategy}, strategy=self.strategy)
+
+    def session_entries(self, symbol, session):
+        return [o for o in self.root.session_entries(symbol, session) if o.get("strategy", "daily") == self.strategy]
+
+    def owns_order(self, order):
+        record = self.root.order(order.get("client_order_id", ""))
+        return bool(record and record.get("strategy", "daily") == self.strategy)
+
+    def owned_symbols(self):
+        return self.root.owned_symbols(self.strategy)
+
+
+def store_for_config(config):
+    root = Store(config.data_dir)
+    return StrategyStore(root, config.trading_mode) if config.coordinated else root

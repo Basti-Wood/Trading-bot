@@ -16,6 +16,23 @@ def flag(name, default=False):
 class Config:
     data_dir: Path = Path("data")
     symbols: tuple = ("SPY", "QQQ", "IWM")
+    trading_mode: str = "daily"
+    daytrade_capital_share: float = .5
+    # Internal child-strategy settings; the public mode may run both together.
+    coordinated: bool = False
+    strategy_fraction: float = 1.
+    universe_mode: str = "market"
+    scan_candidates: int = 20
+    scan_interval_minutes: int = 30
+    scan_min_price: float = 5
+    scan_min_dollar_volume: float = 1000000
+    daytrade_max_positions: int = 3
+    daytrade_max_entries: int = 3
+    daytrade_cooldown_minutes: int = 15
+    daytrade_hold_minutes: int = 15
+    daytrade_stop_loss: float = .01
+    daytrade_take_profit: float = .02
+    daytrade_close_minutes: int = 10
     api_key: str = ""
     api_secret: str = ""
     paper: bool = True
@@ -48,8 +65,12 @@ class Config:
     origins: tuple = ("https://trade.bastiwood.com",)
 
     def __post_init__(self):
-        if not self.symbols or len(self.symbols) > 8 or len(set(self.symbols)) != len(self.symbols):
-            raise ValueError("Configure 1 to 8 unique US equity/ETF symbols")
+        if not self.symbols or len(self.symbols) > 50 or len(set(self.symbols)) != len(self.symbols):
+            raise ValueError("Configure 1 to 50 unique US equity/ETF symbols")
+        if self.trading_mode not in {"daily", "daytrade", "both"} or self.universe_mode not in {"watchlist", "market"}:
+            raise ValueError("TRADING_MODE must be daily/daytrade/both; UNIVERSE_MODE must be watchlist/market")
+        if self.trading_mode in {"daytrade", "both"} and not self.paper:
+            raise ValueError("The daytrade strategy is currently paper-only")
         if any(not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", s) for s in self.symbols):
             raise ValueError("Only US equity/ETF symbols are supported")
         if self.feed not in {"iex", "sip"}:
@@ -67,7 +88,14 @@ class Config:
                   "training_memory_mb": (256, 4096), "training_timeout": (10, 1800),
                   "history_days": (400, 3000), "max_bars": (300, 2000),
                   "retrain_hours": (12, 168), "port": (1, 65535), "feedback_weight": (1, 3),
-                  "validation_bars": (20, 120)}
+                  "validation_bars": (20, 120), "scan_candidates": (1, 50),
+                  "scan_interval_minutes": (15, 1440), "scan_min_price": (1, 10000),
+                  "scan_min_dollar_volume": (100000, 10000000000),
+                  "daytrade_max_positions": (1, 10), "daytrade_max_entries": (1, 20),
+                  "daytrade_cooldown_minutes": (5, 120), "daytrade_hold_minutes": (5, 60),
+                  "daytrade_stop_loss": (.005, .05), "daytrade_take_profit": (.01, .10),
+                  "daytrade_close_minutes": (5, 60), "daytrade_capital_share": (.05, .95),
+                  "strategy_fraction": (.05, 1)}
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
@@ -83,11 +111,40 @@ class Config:
     def threshold(self):
         return (2 * self.cost_bps + self.edge_bps) / 10000
 
+    @property
+    def intraday(self):
+        return self.trading_mode == "daytrade"
+
+    @property
+    def effective_stop(self):
+        return self.daytrade_stop_loss if self.intraday else self.stop_loss
+
+    @property
+    def effective_take_profit(self):
+        return self.daytrade_take_profit if self.intraday else self.take_profit
+
+    @property
+    def poll_seconds(self):
+        return 60 if self.trading_mode == "daily" else 15
+
     @classmethod
     def from_env(cls):
         return cls(
-            data_dir=Path(os.getenv("DATA_DIR", "data")),
+            data_dir=Path(os.getenv("DATA_DIR", "data-daytrade" if os.getenv("TRADING_MODE") == "daytrade" else "data")),
             symbols=tuple(s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ,IWM").split(",") if s.strip()),
+            trading_mode=os.getenv("TRADING_MODE", "daily"), universe_mode=os.getenv("UNIVERSE_MODE", "market"),
+            daytrade_capital_share=float(os.getenv("DAYTRADE_CAPITAL_SHARE", ".5")),
+            scan_candidates=int(os.getenv("SCAN_CANDIDATES", "20")),
+            scan_interval_minutes=int(os.getenv("SCAN_INTERVAL_MINUTES", "30")),
+            scan_min_price=float(os.getenv("SCAN_MIN_PRICE", "5")),
+            scan_min_dollar_volume=float(os.getenv("SCAN_MIN_DOLLAR_VOLUME", "1000000")),
+            daytrade_max_positions=int(os.getenv("DAYTRADE_MAX_POSITIONS", "3")),
+            daytrade_max_entries=int(os.getenv("DAYTRADE_MAX_ENTRIES_PER_SYMBOL", "3")),
+            daytrade_cooldown_minutes=int(os.getenv("DAYTRADE_COOLDOWN_MINUTES", "15")),
+            daytrade_hold_minutes=int(os.getenv("DAYTRADE_MAX_HOLD_MINUTES", "15")),
+            daytrade_stop_loss=float(os.getenv("DAYTRADE_STOP_LOSS", ".01")),
+            daytrade_take_profit=float(os.getenv("DAYTRADE_TAKE_PROFIT", ".02")),
+            daytrade_close_minutes=int(os.getenv("DAYTRADE_FLATTEN_MINUTES", "10")),
             api_key=os.getenv("ALPACA_API_KEY", "").strip(), api_secret=os.getenv("ALPACA_SECRET_KEY", "").strip(),
             paper=flag("ALPACA_PAPER", True), allow_live=flag("ALLOW_LIVE_TRADING"),
             password=os.getenv("DASHBOARD_PASSWORD", ""), host=os.getenv("HOST", "127.0.0.1"),

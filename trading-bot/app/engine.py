@@ -4,6 +4,7 @@ import multiprocessing as mp
 import threading
 import time
 from zoneinfo import ZoneInfo
+from contextlib import nullcontext
 import psutil
 import pandas as pd
 
@@ -13,6 +14,7 @@ from .models import train_worker, predict, strategy_signature
 from .feedback import capture_forecast, resolve_outcomes
 from .research import Research, combine
 from .store import utcnow
+from .universe import active_symbols, monitored_symbols, scan, entries_ready
 
 
 class Engine:
@@ -24,9 +26,20 @@ class Engine:
         self.trainer = None
         self.training_started = 0
         self.research_thread = None
+        self.research_lock = None
         self.thread = None
         self.monitor = None
         self.cached = {}
+        self.forecast_attempts = {}
+        self.scan_thread = None
+        self.forecast_thread = None
+        self.last_scan = 0
+        previous_mode = store.get("trading_mode", "daily")
+        if not config.coordinated and store.get("parallel_enabled", False):
+            raise ValueError("This journal contains parallel strategies; keep TRADING_MODE=both to monitor both")
+        if not config.coordinated and previous_mode != config.trading_mode and (store.get("account_scope") or store.orders(1)):
+            raise ValueError("Strategy changed: use a separate DATA_DIR for daily and daytrade modes")
+        store.set("trading_mode", config.trading_mode)
         scope = hashlib.sha256((self.broker.base + config.api_key).encode()).hexdigest()
         previous_scope = store.get("account_scope")
         if previous_scope and previous_scope != scope:
@@ -60,7 +73,7 @@ class Engine:
                 self.store.set("training", {"status": "failed", "message": str(exc)[:240], "at": utcnow()})
             self.stop.wait(2)
 
-    def training_tick(self):
+    def training_tick(self, allow_start=True):
         if self.trainer:
             if self.trainer.is_alive():
                 try:
@@ -76,18 +89,25 @@ class Engine:
             if self.trainer.exitcode and self.store.get("training", {}).get("status") == "running":
                 self.store.set("training", {"status": "worker failed", "at": utcnow()})
             self.trainer = None
+        if not allow_start:
+            return
         last = self.store.get("last_training_attempt", 0)
         requested = self.store.get("train_requested", False)
         # Daily scheduled retraining happens outside regular market hours.
         local = datetime.now(ZoneInfo("America/New_York"))
         off_hours = local.weekday() >= 5 or not (9 <= local.hour < 17)
-        due = time.time() - last > self.config.retrain_hours * 3600
-        first = any(not self.store.get(f"model:{s}") or self.store.get(f"model:{s}").get("strategy_signature") != strategy_signature(self.config) for s in self.config.symbols)
-        if self.config.configured and (requested or due and (off_hours or first)) and time.time() - last > 60:
+        due = time.time() - self.store.get("last_full_training", 0) > self.config.retrain_hours * 3600
+        symbols = self.store.get("monitor_symbols", active_symbols(self.config, self.store))
+        missing = [s for s in symbols if (not self.store.get(f"model:{s}") or self.store.get(f"model:{s}").get("strategy_signature") != strategy_signature(self.config))
+                   and time.time() - self.store.get(f"training_attempt:{s}", 0) > 3600]
+        if self.config.configured and symbols and (requested or missing or due and off_hours) and time.time() - last > 60:
             self.store.set("train_requested", False)
             self.store.set("last_training_attempt", time.time())
             self.store.set("training", {"status": "starting", "at": utcnow()})
-            self.trainer = mp.get_context("spawn").Process(target=train_worker, args=(self.config,), daemon=True)
+            targets = symbols if requested or due and off_hours else missing
+            if requested or due and off_hours:
+                self.store.set("last_full_training", time.time())
+            self.trainer = mp.get_context("spawn").Process(target=train_worker, args=(self.config, targets), daemon=True)
             self.trainer.start()
             self.training_started = time.monotonic()
 
@@ -97,12 +117,15 @@ class Engine:
         due = []
         for f in forecasts:
             last = self.store.get(f"research_attempt:{f['symbol']}", 0)
-            if time.time() - last > 1800:
+            if time.time() - last > (300 if self.config.intraday else 1800):
                 due.append(f)
         if not due or not self.config.llm_key:
             if not self.config.llm_key:
                 self.store.set("research_status", {"status": "waiting for FREELLM_API_KEY"})
             return
+        due.sort(key=lambda f: (not self.store.get(f"owned:{f['symbol']}", False), f["forecast_signal"] != "BUY", -f["expected_return"]))
+        if self.config.intraday:
+            due = due[:5]
         def work():
             research = Research(self.config, self.store)
             for forecast in due:
@@ -111,7 +134,10 @@ class Engine:
                 symbol = forecast["symbol"]
                 self.store.set(f"research_attempt:{symbol}", time.time())
                 try:
-                    research.analyze(symbol, forecast)
+                    with self.research_lock if self.research_lock is not None else nullcontext():
+                        if self.stop.is_set():
+                            break
+                        research.analyze(symbol, forecast)
                 except Exception as exc:
                     # requests exceptions can contain URLs; never log headers or raw payloads.
                     message = str(exc)[:240] if isinstance(exc, ValueError) else "News/FreeLLM connection failed"
@@ -121,13 +147,67 @@ class Engine:
         self.research_thread = threading.Thread(target=work, name="news-research", daemon=True)
         self.research_thread.start()
 
-    def cycle(self):
+    def scan_tick(self):
+        if self.config.coordinated and self.config.intraday:
+            return
+        if self.config.universe_mode != "market" or self.scan_thread and self.scan_thread.is_alive():
+            return
+        if time.time() - self.last_scan < self.config.scan_interval_minutes * 60:
+            return
+        self.last_scan = time.time()
+        def work():
+            try:
+                scan(self.config, self.store, Alpaca(self.config), self.stop)
+            except Exception:
+                self.store.set("scan_status", {"status": "unavailable", "message": "Market scan failed; will retry", "at": utcnow()})
+        self.scan_thread = threading.Thread(target=work, name="market-scanner", daemon=True)
+        self.scan_thread.start()
+
+    def forecast_tick(self, symbols, day):
+        if self.forecast_thread and self.forecast_thread.is_alive():
+            return
+        slot = int(time.time() // 300) if self.config.intraday else day
+        # Bound the in-memory cache even as discovery rotates through new stocks.
+        self.cached = {s: v for s, v in self.cached.items() if s in symbols}
+        self.forecast_attempts = {s: v for s, v in self.forecast_attempts.items() if s in symbols}
+        def work():
+            broker = Alpaca(self.config)
+            for symbol in symbols:
+                if self.stop.is_set():
+                    return
+                meta = self.store.get(f"model:{symbol}")
+                if not meta or meta.get("strategy_signature") != strategy_signature(self.config):
+                    continue
+                key = (slot, meta["version"])
+                if self.cached.get(symbol) == key:
+                    continue
+                if time.time() - self.forecast_attempts.get(symbol, 0) < (30 if self.config.intraday else 60):
+                    continue
+                self.forecast_attempts[symbol] = time.time()
+                try:
+                    bars = broker.bars(symbol)
+                    resolve_outcomes(self.config, self.store, symbol, bars)
+                    forecast = predict(self.config, meta, bars)
+                    capture_forecast(self.config, self.store, forecast)
+                    self.store.set(f"prediction:{symbol}", forecast)
+                    expected = pd.Timestamp.now(tz="UTC").floor("5min") - pd.Timedelta(minutes=5)
+                    if not self.config.intraday or pd.Timestamp(forecast["bar_at"]) == expected:
+                        self.cached[symbol] = key
+                except Exception as exc:
+                    self.store.event("error", {"symbol": symbol, "message": str(exc)[:240]})
+        self.forecast_thread = threading.Thread(target=work, name="forecasts", daemon=True)
+        self.forecast_thread.start()
+
+    def cycle(self, snapshot=None, phase="all", allow_action=True):
         if not self.config.configured:
             self.store.set("engine", {"status": "setup", "message": "Add Alpaca and FreeLLM credentials to .env", "at": utcnow()})
-            return
-        account, clock = self.broker.account(), self.broker.clock()
-        positions, orders = self.broker.positions(), self.broker.open_orders()
-        reconciled = self.executor.reconcile()
+            return False
+        if snapshot is None:
+            account, clock = self.broker.account(), self.broker.clock()
+            positions, orders = self.broker.positions(), self.broker.open_orders()
+            reconciled = self.executor.reconcile()
+        else:
+            account, clock, positions, orders, reconciled = snapshot
         equity = float(account["equity"])
         prior = float(account.get("last_equity") or equity)
         loss_breach = prior > 0 and equity <= prior * (1 - self.config.daily_loss)
@@ -142,74 +222,117 @@ class Engine:
         if time.time() - self.store.get("equity_sample", 0) >= 900:
             self.store.event("equity", {"equity": equity, "daily_pnl": equity - prior})
             self.store.set("equity_sample", time.time())
-        local = pd.Timestamp(clock["timestamp"]).tz_convert("America/New_York")
+        now = pd.Timestamp(clock["timestamp"])
+        local = now.tz_convert("America/New_York")
         entry_window = local.hour == 9 and 35 <= local.minute <= 59
-        # Pausing entries or leaving the entry window cancels this bot's unfilled buys.
-        if not self.store.get("entries_enabled", False) or loss_breach or not entry_window:
+        flatten = False
+        if self.config.intraday:
+            close = pd.Timestamp(clock["next_close"]) if clock.get("next_close") else None
+            valid_close = close is not None and close.tzinfo is not None and close.tz_convert("America/New_York").date() == local.date()
+            remaining = (close - now).total_seconds() / 60 if valid_close else 0
+            flatten = bool(clock["is_open"] and (not valid_close or remaining <= self.config.daytrade_close_minutes))
+            entry_window = (clock["is_open"] and (local.hour, local.minute) >= (9, 40)
+                            and remaining > self.config.daytrade_close_minutes + self.config.daytrade_hold_minutes)
+        acted = not allow_action
+        symbols = monitored_symbols(self.config, self.store, positions, orders)
+        self.store.set("monitor_symbols", symbols)
+        if phase != "decisions":
             for order in orders:
-                if order["side"] == "buy" and order.get("client_order_id", "").startswith("ensemble-"):
+                if acted or order["side"] != "buy" or not order.get("client_order_id", "").startswith("ensemble-"):
+                    continue
+                if self.config.coordinated and not self.store.owns_order(order):
+                    continue
+                expired = False
+                if self.config.intraday:
+                    submitted = order.get("submitted_at") or order.get("created_at")
+                    expired = not submitted or (now - pd.Timestamp(submitted)).total_seconds() > 60
+                if not self.store.get("entries_enabled", False) or loss_breach or not entry_window or expired:
                     self.broker.cancel(order["id"])
+                    acted = True
+            unresolved = self.store.unresolved_orders()
+            # Risk exits run before predictions and news, including rotated-out holdings.
+            for symbol in symbols:
+                pos = next((p for p in positions if p["symbol"] == symbol), None)
+                pending = any(o["symbol"] == symbol for o in [*orders, *unresolved])
+                owned = self.store.get(f"owned:{symbol}", False)
+                if not pos and not pending:
+                    if owned and self.config.coordinated:
+                        observed = self.store.get(f"flat_observed:{symbol}")
+                        if observed is None:
+                            self.store.set(f"flat_observed:{symbol}", time.time())
+                            continue
+                        if time.time() - observed < 15:
+                            continue
+                    if owned and self.config.intraday:
+                        self.store.set(f"flat_since:{symbol}", time.time())
+                    self.store.set(f"owned:{symbol}", False)
+                    self.store.set(f"exit_pending:{symbol}", False)
+                elif self.config.coordinated:
+                    self.store.set(f"flat_observed:{symbol}", None)
+                force_exit = bool(self.store.get(f"exit_pending:{symbol}", False))
+                if pos and owned:
+                    pnl_fraction = float(pos.get("unrealized_plpc") or 0)
+                    force_exit |= pnl_fraction <= -self.config.effective_stop or loss_breach or flatten
+                    if self.config.intraday:
+                        started = self.store.get(f"daytrade_position:{symbol}", {}).get("started_at")
+                        # Unknown holding age after recovery is an exit, never a new timer.
+                        force_exit |= not started or (now - pd.Timestamp(started)).total_seconds() >= self.config.daytrade_hold_minutes * 60
+                if force_exit and pos and owned and clock["is_open"] and not acted:
+                    self.store.set(f"exit_pending:{symbol}", True)
+                    reason = self.executor.execute(symbol, "SELL", day, account, positions, orders, loss_breach=loss_breach, force_exit=True)
+                    self.store.event("decision", {"symbol": symbol, "action": "SELL", "reason": reason, "risk_exit": True})
+                    acted = bool(self.executor.changed)
+        if phase == "risk":
+            return acted
         forecasts = []
-        # One order-changing action per cycle; refresh all broker state before another.
-        acted = False
-        for symbol in self.config.symbols:
-            pos = next((p for p in positions if p["symbol"] == symbol), None)
-            if not pos and not any(o["symbol"] == symbol for o in orders):
-                self.store.set(f"owned:{symbol}", False)
-            force_exit = bool(self.store.get(f"exit_pending:{symbol}", False))
-            if pos and self.store.get(f"owned:{symbol}", False):
-                pnl_fraction = float(pos.get("unrealized_plpc") or 0)
-                force_exit = force_exit or pnl_fraction <= -self.config.stop_loss or loss_breach
-            if force_exit and not pos:
-                self.store.set(f"exit_pending:{symbol}", False)
-                force_exit = False
-            if force_exit and clock["is_open"] and not acted:
-                self.store.set(f"exit_pending:{symbol}", True)
-                reason = self.executor.execute(symbol, "SELL", day, account, positions, orders, loss_breach=loss_breach, force_exit=True)
-                self.store.event("decision", {"symbol": symbol, "action": "SELL", "reason": reason, "risk_exit": True})
-                acted = True
-            meta = self.store.get(f"model:{symbol}")
-            if not meta:
-                continue
+        for symbol in symbols:
+            prediction = self.store.get(f"prediction:{symbol}")
+            if prediction:
+                forecasts.append(dict(prediction))
+        # Consider sales first, then the highest predicted returns. A held stock,
+        # exhausted allocation or duplicate intent must not starve other candidates.
+        forecasts.sort(key=lambda f: (f["forecast_signal"] != "SELL", -f["expected_return"], f["symbol"]))
+        candidates = set(active_symbols(self.config, self.store))
+        for forecast in forecasts:
+            symbol = forecast["symbol"]
             try:
-                cached = self.cached.get(symbol)
-                if not cached or cached["day"] != day or cached["version"] != meta["version"]:
-                    bars = self.broker.bars(symbol)
-                    resolve_outcomes(self.config, self.store, symbol, bars)
-                    cached = {"day": day, "version": meta["version"], "bars": bars, "forecast": predict(self.config, meta, bars)}
-                    capture_forecast(self.config, self.store, cached["forecast"])
-                    self.cached[symbol] = cached
-                forecast = dict(cached["forecast"])
+                meta = self.store.get(f"model:{symbol}")
                 research = self.store.get(f"research:{symbol}")
                 action, reason = combine(forecast, research)
-                # Seven calendar days allows long weekends while refusing stale feeds/models.
-                age = (pd.Timestamp.now(tz="UTC") - cached["bars"].index[-1]).total_seconds()
-                model_age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(meta["data_through"])).days
-                if meta.get("strategy_signature") != strategy_signature(self.config):
-                    action, reason = "HOLD", "Settings changed; retraining is required before using this model"
-                elif age > 7 * 86400 or model_age > 14:
-                    action, reason = "HOLD", "Market data or model is too old"
+                age = (now - pd.Timestamp(forecast["bar_at"])).total_seconds()
+                model_age = (now - pd.Timestamp(meta["data_through"])).total_seconds()
+                if meta.get("strategy_signature") != strategy_signature(self.config) or forecast["model_version"] != meta["version"]:
+                    action, reason = "HOLD", "Settings or model changed; awaiting a current forecast"
+                elif not (300 <= age <= 390 if self.config.intraday else 0 <= age <= 7 * 86400) or not 0 <= model_age <= (3 if self.config.intraday else 14) * 86400:
+                    action, reason = "HOLD", "Market data or model is too old for this horizon"
                 elif not clock["is_open"]:
                     reason = "Market closed; " + reason
                 elif not reconciled:
                     reason = "Unresolved order outcome; new decisions blocked"
-                elif not acted and action in {"BUY", "SELL"} and (action == "SELL" or entry_window):
+                elif action == "BUY" and (symbol not in candidates or not entries_ready(self.config, self.store)):
+                    reason = "Waiting for a complete, fresh market scan and candidate selection"
+                elif action == "BUY" and not entry_window:
+                    reason = "Outside the strategy entry window"
+                elif not acted and action in {"BUY", "SELL"}:
+                    pos = next((p for p in positions if p["symbol"] == symbol), None)
                     if action == "SELL" and pos and self.store.get(f"owned:{symbol}", False):
                         self.store.set(f"exit_pending:{symbol}", True)
                     reason = self.executor.execute(symbol, action, day, account, positions, orders, loss_breach=loss_breach)
-                    acted = True
-                elif action == "BUY" and not entry_window:
-                    reason = "Buy window is 09:35-09:59 New York time"
+                    acted = bool(self.executor.changed)
                 forecast.update({"action": action, "reason": reason, "research": research})
-                forecasts.append(forecast)
                 previous = self.store.get(f"forecast:{symbol}", {})
                 if previous.get("action") != action or previous.get("reason") != reason:
                     self.store.event("decision", {"symbol": symbol, "action": action, "reason": reason})
                 self.store.set(f"forecast:{symbol}", forecast)
             except Exception as exc:
                 self.store.event("error", {"symbol": symbol, "message": str(exc)[:240]})
+        # Network-heavy scanning, forecasting and LLM calls cannot stall risk polling.
+        self.scan_tick()
+        self.forecast_tick(symbols, day)
         self.research_tick(forecasts)
-        self.store.set("engine", {"status": "running", "message": "Monitoring market, models and risk limits", "at": utcnow()})
+        self.store.set("engine", {"status": "running", "message": f"Monitoring {len(symbols)} symbols in {self.config.trading_mode} mode", "at": utcnow()})
+
+        return acted
 
     def run(self):
         next_cycle = 0
@@ -217,8 +340,8 @@ class Engine:
             try:
                 if time.monotonic() >= next_cycle:
                     self.cycle()
-                    next_cycle = time.monotonic() + 60
+                    next_cycle = time.monotonic() + self.config.poll_seconds
             except Exception as exc:
                 self.store.set("engine", {"status": "error", "message": str(exc)[:240], "at": utcnow()})
-                next_cycle = time.monotonic() + 60
+                next_cycle = time.monotonic() + self.config.poll_seconds
             self.stop.wait(2)

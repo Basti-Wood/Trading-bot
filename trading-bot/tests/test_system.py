@@ -32,7 +32,7 @@ class TempCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.cfg = Config(data_dir=Path(self.temp.name), api_key="test-key", api_secret="test-secret", llm_key="llm-key", symbols=("SPY",))
+        self.cfg = Config(data_dir=Path(self.temp.name), api_key="test-key", api_secret="test-secret", llm_key="llm-key", symbols=("SPY",), universe_mode="watchlist")
         self.store = Store(self.cfg.data_dir)
 
 

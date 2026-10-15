@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 import hashlib
 import math
+import time
 from .broker import BrokerError
 from .store import utcnow
 
@@ -11,6 +12,7 @@ TERMINAL = {"filled", "canceled", "expired", "rejected", "replaced", "done_for_d
 class Executor:
     def __init__(self, config, store, broker):
         self.config, self.store, self.broker = config, store, broker
+        self.changed = False
 
     def reconcile(self):
         blocked = False
@@ -24,12 +26,20 @@ class Executor:
                 blocked = True
         return not blocked
 
-    def send(self, payload):
+    def send(self, payload, session=None):
         cid = payload["client_order_id"]
         record = {"symbol": payload["symbol"], "side": payload["side"], "qty": payload["qty"],
-                  "status": "pending_submission", "mode": "paper" if self.config.paper else "live"}
+                  "status": "pending_submission", "mode": "paper" if self.config.paper else "live", "session": session,
+                  "strategy": self.config.trading_mode}
         if not self.store.reserve_order(cid, record):
             return "An order was already attempted for this symbol and side today"
+        self.changed = True
+        if payload["side"] == "buy":
+            # Persist ownership before POST: an accepted order followed by a crash
+            # must still receive stop/time exits when its position appears.
+            self.store.set(f"owned:{payload['symbol']}", True)
+        if payload["side"] == "buy" and self.config.intraday:
+            self.store.set(f"daytrade_position:{payload['symbol']}", {"entry_id": cid, "started_at": utcnow()})
         try:
             remote = self.broker.submit(payload)
         except BrokerError as exc:
@@ -43,6 +53,7 @@ class Executor:
 
     def execute(self, symbol, action, session, account, positions, orders, *, loss_breach=False, force_exit=False):
         cfg = self.config
+        self.changed = False
         if not cfg.paper and not cfg.allow_live:
             return "Live mode is not enabled"
         if account.get("trading_blocked") or account.get("account_blocked") or account.get("status") != "ACTIVE":
@@ -53,6 +64,10 @@ class Executor:
             return "Existing short position requires manual review; bot is long-only"
         symbol_orders = [o for o in orders if o["symbol"] == symbol]
         owned = self.store.get(f"owned:{symbol}", False)
+        if cfg.coordinated:
+            owner = self.store.owner(symbol)
+            if owner and owner != cfg.trading_mode:
+                return f"Symbol is owned by the {owner} strategy"
         closing = qty > 0 and owned and (action == "SELL" or loss_breach or force_exit)
         if qty > 0 and not owned:
             return "Existing position was not opened by this bot; leaving it under account control"
@@ -60,8 +75,9 @@ class Executor:
             if symbol_orders:
                 # Cancel bracket exits first, then wait for broker confirmation on the next cycle.
                 for order in symbol_orders:
-                    if order.get("type") in {"stop", "stop_limit", "limit"}:
+                    if order.get("type") in {"stop", "stop_limit", "limit"} and order.get("status") != "pending_cancel":
                         self.broker.cancel(order["id"])
+                        self.changed = True
                 return "Waiting for existing exit orders to cancel before closing"
             side = "sell"
             payload = {"symbol": symbol, "side": side, "qty": format(qty, ".9f").rstrip("0").rstrip("."),
@@ -75,29 +91,57 @@ class Executor:
                 return "Entries are paused"
             if qty > 0 or symbol_orders:
                 return "Position or pending order already exists"
+            if cfg.coordinated and owned:
+                return "Waiting for confirmed flat position before releasing strategy ownership"
+            if any(o["side"] == "buy" for o in self.store.unresolved_orders()):
+                return "An entry outcome is unresolved; waiting for reconciliation"
+            if cfg.intraday:
+                counted = [p for p in positions if not cfg.coordinated or self.store.get(f"owned:{p['symbol']}", False)]
+                if len([p for p in counted if float(p["qty"]) != 0]) >= cfg.daytrade_max_positions:
+                    return "Day-trading position limit reached"
+                if len(self.store.session_entries(symbol, session)) >= cfg.daytrade_max_entries:
+                    return "Day-trading entry limit reached for this symbol today"
+                flat_since = self.store.get(f"flat_since:{symbol}", 0)
+                if time.time() - flat_since < cfg.daytrade_cooldown_minutes * 60:
+                    return "Waiting for the day-trading cooldown after the last position closed"
             asset = self.broker.asset(symbol)
             if not asset.get("tradable") or asset.get("status") != "active":
                 return "Asset is not tradable"
-            price = self.broker.latest_price(symbol)
+            price = self.broker.quote(symbol)[1] if cfg.intraday else self.broker.latest_price(symbol)
             capital = min(cfg.capital, float(account["equity"]))
+            strategy_capital = capital * cfg.strategy_fraction
             gross = sum(abs(float(p["market_value"])) for p in positions)
+            strategy_gross = sum(abs(float(p["market_value"])) for p in positions if self.store.get(f"owned:{p['symbol']}", False))
             # If any entry is pending, wait for a fresh account snapshot before allocating again.
             if any(o["side"] == "buy" for o in orders):
                 return "Pending buy order; waiting for updated exposure"
-            budget = min(capital * cfg.position_fraction, capital * cfg.gross_fraction - gross,
+            budget = min(strategy_capital * cfg.position_fraction, capital * cfg.gross_fraction - gross,
+                         strategy_capital * cfg.gross_fraction - strategy_gross,
                          float(account["cash"]), float(account["buying_power"]))
-            limit = math.ceil(price * 1.002 * 100) / 100
+            if cfg.intraday:
+                # Broker-reported capacity, when supplied, can only lower our cash cap.
+                for field in ("daytrading_buying_power", "non_marginable_buying_power"):
+                    if account.get(field) is not None:
+                        budget = min(budget, float(account[field]))
+            limit = math.ceil(price * (1.0005 if cfg.intraday else 1.002) * 100) / 100
             qty = math.floor(budget / limit)
             if qty < 1:
                 return "Allocation cannot fund one whole share within exposure limits"
             side = "buy"
             payload = {"symbol": symbol, "side": side, "qty": str(qty), "type": "limit", "limit_price": f"{limit:.2f}",
                        "time_in_force": "day", "order_class": "bracket",
-                       "stop_loss": {"stop_price": f"{price * (1 - cfg.stop_loss):.2f}"},
-                       "take_profit": {"limit_price": f"{price * (1 + cfg.take_profit):.2f}"}}
+                       "stop_loss": {"stop_price": f"{price * (1 - cfg.effective_stop):.2f}"},
+                       "take_profit": {"limit_price": f"{price * (1 + cfg.effective_take_profit):.2f}"}}
         # Include account/mode to prevent cross-account journal collisions, without exposing keys.
         scope = hashlib.sha256((self.broker.base + cfg.api_key).encode()).hexdigest()[:8]
         base_id = f"ensemble-{scope}-{session}-{symbol}-{side}"
+        if cfg.intraday:
+            if side == "buy":
+                suffix = str(len(self.store.session_entries(symbol, session)) + 1)
+            else:
+                entry_id = self.store.get(f"daytrade_position:{symbol}", {}).get("entry_id", symbol)
+                suffix = hashlib.sha256(entry_id.encode()).hexdigest()[:6]
+            base_id = f"ensemble-{scope}-{session.replace('-', '')}-{symbol}-{side[0]}{suffix}"
         payload["client_order_id"] = base_id
         if side == "sell":
             # Fresh broker position quantities permit a bounded retry only after a
@@ -110,7 +154,5 @@ class Executor:
                     break
             else:
                 return "Exit retry limit reached; inspect this position and its protection in Alpaca"
-        result = self.send(payload)
-        if side == "buy":
-            self.store.set(f"owned:{symbol}", True)
+        result = self.send(payload, session)
         return result

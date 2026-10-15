@@ -5,6 +5,8 @@ import json
 import uuid
 import joblib
 import numpy as np
+import pandas as pd
+import time
 from sklearn.ensemble import ExtraTreesRegressor, HistGradientBoostingRegressor
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
@@ -15,7 +17,8 @@ from threadpoolctl import threadpool_limits
 from .broker import Alpaca
 from .features import FEATURES, FEATURE_SCHEMA, features
 from .feedback import replay_dataset, resolve_outcomes
-from .store import Store, utcnow
+from .store import store_for_config, utcnow
+from .universe import active_symbols
 
 MODEL_NAMES = {"ridge": "Ridge regression", "extra_trees": "Extra Trees", "hist_gradient": "Histogram gradient boosting"}
 
@@ -23,8 +26,10 @@ MODEL_NAMES = {"ridge": "Ridge regression", "extra_trees": "Extra Trees", "hist_
 def strategy_signature(config):
     settings = {"schema": 2, "feature_schema": FEATURE_SCHEMA, "features": FEATURES,
                 "threshold": config.threshold, "cost_bps": config.cost_bps,
-                "stop_loss": config.stop_loss, "take_profit": config.take_profit, "feed": config.feed,
+                "stop_loss": config.effective_stop, "take_profit": config.effective_take_profit, "feed": config.feed,
                 "feedback_weight": config.feedback_weight, "validation_bars": config.validation_bars}
+    if config.intraday:
+        settings.update(mode="daytrade", bar_minutes=5, horizon_bars=3, intraday_schema=1)
     return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -48,20 +53,33 @@ def fit_model(name, frame):
 
 
 def evaluate(frame, predictions, config):
+    if config.intraday:
+        # Evaluate non-overlapping opportunities; never compound simultaneous bets.
+        selected, until = [], None
+        for i, (at, row) in enumerate(frame.iterrows()):
+            if until is None or at + pd.Timedelta(minutes=5) >= until:
+                selected.append(i)
+                until = row.label_end
+        predictions = np.asarray(predictions)[selected]
+        frame = frame.iloc[selected]
     active = np.asarray(predictions) > config.threshold
     gross = frame.target.to_numpy().copy()
     # Conservative same-bar ambiguity: the stop wins if both stop and target were touched.
-    take = frame.high_next.to_numpy() >= frame.entry.to_numpy() * (1 + config.take_profit)
-    stop = frame.low_next.to_numpy() <= frame.entry.to_numpy() * (1 - config.stop_loss)
-    gross[take] = config.take_profit
-    gross[stop] = -config.stop_loss
+    take = frame.high_next.to_numpy() >= frame.entry.to_numpy() * (1 + config.effective_take_profit)
+    stop = frame.low_next.to_numpy() <= frame.entry.to_numpy() * (1 - config.effective_stop)
+    gross[take] = config.effective_take_profit
+    gross[stop] = -config.effective_stop
     net = np.where(active, gross - 2 * config.cost_bps / 10000, 0.)
     curve = np.r_[1., np.cumprod(1 + net)]
     dd = 1 - curve / np.maximum.accumulate(curve)
-    std = float(np.std(net))
+    risk_returns = net
+    if config.intraday:
+        risk_returns = pd.Series(1 + net, index=frame.index).groupby(frame.index.tz_convert("America/New_York").date).prod().to_numpy() - 1
+    std = float(np.std(risk_returns))
     return {"net_return": float(curve[-1] - 1), "max_drawdown": float(dd.max()),
-            "sharpe": float(np.mean(net) / std * np.sqrt(252)) if std > 1e-12 else 0.,
-            "active_days": int(active.sum()), "observations": len(frame),
+            "sharpe": float(np.mean(risk_returns) / std * np.sqrt(252)) if std > 1e-12 else 0.,
+            "active_days": len(set(frame.index[active].tz_convert("America/New_York").date)) if config.intraday else int(active.sum()),
+            "active_trades": int(active.sum()), "observations": len(frame),
             "benchmark_return": float(np.prod(1 + frame.target.to_numpy()) * (1 - 2 * config.cost_bps / 10000) - 1),
             "mae": float(np.mean(np.abs(np.asarray(predictions) - frame.target.to_numpy()))),
             "start": frame.index[0].isoformat(), "end": frame.index[-1].isoformat()}
@@ -81,8 +99,11 @@ def train_symbol(config, store, symbol, bars):
     resolve_outcomes(config, store, symbol, bars)
     frame, feedback_revision = replay_dataset(config, store, symbol, bars)
     if len(frame) < 300:
-        raise ValueError(f"{symbol}: need at least 350 complete daily bars; received {len(bars)}")
-    split = len(frame) - config.validation_bars
+        raise ValueError(f"{symbol}: need at least 350 complete bars; received {len(bars)}")
+    holdout_size = 390 if config.intraday else config.validation_bars
+    if len(frame) < holdout_size + 250:
+        raise ValueError(f"{symbol}: insufficient bars for training and separate holdout")
+    split = len(frame) - holdout_size
     holdout = frame.iloc[split:]
     train = frame.iloc[:split]
     train = train[train.label_end < holdout.index[0]]
@@ -102,7 +123,7 @@ def train_symbol(config, store, symbol, bars):
     for name in MODEL_NAMES:
         store.set("training", {"status": "running", "symbol": symbol, "model": MODEL_NAMES[name], "at": utcnow()})
         folds = []
-        for tr, val in TimeSeriesSplit(n_splits=3, gap=2).split(train):
+        for tr, val in TimeSeriesSplit(n_splits=3, gap=4 if config.intraday else 2).split(train):
             model = fit_model(name, train.iloc[tr])
             folds.append(evaluate(train.iloc[val], model.predict(train.iloc[val][FEATURES]), config))
         model = fit_model(name, train)
@@ -128,7 +149,8 @@ def train_symbol(config, store, symbol, bars):
             incumbent_metrics = evaluate(holdout, np.where((ps > config.threshold).sum(axis=0) >= 2, ps.mean(axis=0), 0), config)
             eligible = eligible and metrics["net_return"] > incumbent_metrics["net_return"] + .001
     version = uuid.uuid4().hex[:12]
-    meta = {"version": version, "file": f"{symbol}-{version}.joblib", "symbol": symbol,
+    file_prefix = f"daytrade-{symbol}" if config.intraday else symbol
+    meta = {"version": version, "file": f"{file_prefix}-{version}.joblib", "symbol": symbol,
             "created_at": utcnow(), "data_through": bars.index[-1].isoformat(),
             "trained_through": train.label_end.max().isoformat(), "metrics": metrics,
             "reports": reports, "eligible": bool(eligible), "incumbent": incumbent_metrics,
@@ -143,19 +165,20 @@ def train_symbol(config, store, symbol, bars):
         os.replace(str(target) + ".tmp", target)
         store.set(key, meta)
         # Keep at most three versions per symbol, including the active model.
-        for obsolete in sorted(path.glob(f"{symbol}-*.joblib"), key=lambda p: p.stat().st_mtime, reverse=True)[3:]:
+        for obsolete in sorted(path.glob(f"{file_prefix}-*.joblib"), key=lambda p: p.stat().st_mtime, reverse=True)[3:]:
             obsolete.unlink(missing_ok=True)
     store.event("training", {"symbol": symbol, "message": "Promoted validated candidate" if eligible else "Candidate failed promotion gate; retained incumbent or research model", "metrics": metrics, "feedback": feedback})
 
 
-def train_worker(config):
-    store = Store(config.data_dir)
+def train_worker(config, symbols=None):
+    store = store_for_config(config)
     try:
         broker = Alpaca(config)
         failures = []
         with threadpool_limits(limits=2):
-            for symbol in config.symbols:
+            for symbol in (symbols if symbols is not None else active_symbols(config, store)):
                 try:
+                    store.set(f"training_attempt:{symbol}", time.time())
                     train_symbol(config, store, symbol, broker.bars(symbol))
                 except Exception as exc:
                     failures.append(symbol)
@@ -196,4 +219,5 @@ def predict(config, meta, bars):
             "model_version": meta["version"], "eligible": meta["eligible"], "models": outputs,
             "forecast_signal": signal, "expected_return": avg, "agreement": max(buys, sells, 3 - buys - sells),
             "last_close": float(bars.close.iloc[-1]), "threshold": config.threshold,
-            "horizon": "next session open to the following session open"}
+            "horizon": "next 15 minutes from completed five-minute close" if config.intraday else "next session open to the following session open",
+            "trading_mode": config.trading_mode}

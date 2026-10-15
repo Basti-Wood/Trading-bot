@@ -215,9 +215,11 @@ class FeedbackIntegrationTests(TempCase):
         engine.research_tick = Mock()
         self.store.set("model:SPY", {"version":"recorded-v1", "data_through":b.index[-1].isoformat(),
                                      "strategy_signature":strategy_signature(self.cfg)})
-        with patch("app.engine.predict", return_value=forecast):
+        with patch("app.engine.predict", return_value=forecast), patch("app.engine.Alpaca", return_value=engine.broker):
             engine.cycle()
+            engine.forecast_thread.join(timeout=5)
             engine.cycle()
+            engine.forecast_thread.join(timeout=5)
         self.assertFalse(self.store.get("entries_enabled"))
         self.assertEqual(len(self.store.experience("SPY", "iex", FEATURE_SCHEMA)), 1)
         engine.executor.execute.assert_not_called()

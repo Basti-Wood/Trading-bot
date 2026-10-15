@@ -4,9 +4,12 @@ import psutil
 from flask import Flask, jsonify, request, send_from_directory
 from .store import utcnow
 from .feedback import summary_key
+from .universe import active_symbols
+from .portfolio import strategy_contexts
 
 
 def create_app(config, store):
+    contexts = {cfg.trading_mode: (cfg, state) for cfg, state in strategy_contexts(config, store)}
     app = Flask(__name__, static_folder=None)
     root = Path(__file__).resolve().parent.parent / "dashboard"
     app.config["MAX_CONTENT_LENGTH"] = 4096
@@ -52,6 +55,13 @@ def create_app(config, store):
 
     @app.get("/api/state")
     def state():
+        selected = request.args.get("strategy", next(iter(contexts)))
+        if selected not in contexts:
+            return jsonify(error="Unknown strategy"), 400
+        cfg, state_store = contexts[selected]
+        account = state_store.get("account")
+        if account and config.trading_mode == "both":
+            account = {**account, "positions": [{**p, "strategy": store.owner(p["symbol"]) or "external"} for p in account.get("positions", [])]}
         process = psutil.Process()
         rss = process.memory_info().rss
         for child in process.children(recursive=True):
@@ -60,22 +70,35 @@ def create_app(config, store):
             except psutil.NoSuchProcess:
                 pass
         return jsonify(
-            at=utcnow(), mode="paper" if config.paper else "live", configured=config.configured,
-            entries_enabled=store.get("entries_enabled", False), engine=store.get("engine", {"status": "starting"}),
-            account=store.get("account"), training=store.get("training", {"status": "waiting for data"}),
-            research_status=store.get("research_status", {"status": "waiting"}),
-            symbols=[{"symbol": s, "forecast": store.get(f"forecast:{s}"), "model": store.get(f"model:{s}"),
-                      "candidate": store.get(f"candidate:{s}"), "research": store.get(f"research:{s}"),
-                      "feedback": store.get(summary_key(config, s), {"captured": 0, "pending": 0, "resolved": 0, "excluded": 0, "scores": {}, "latest": []})} for s in config.symbols],
-            orders=store.orders(50), events=store.history("decision", 30), errors=store.history("error", 10),
-            training_history=store.history("training", 25), equity=store.history("equity", 100),
+            portfolio_mode=config.trading_mode,
+            portfolio_engine=store.get("portfolio_engine"),
+            strategies=[{"id": c.trading_mode, "entries_enabled": st.get("entries_enabled", False),
+                         "capital_fraction": c.strategy_fraction, "capital_ceiling": c.capital * c.strategy_fraction,
+                         "engine": st.get("engine", {"status": "starting"}),
+                         "training": st.get("training", {"status": "waiting"})} for c, st in contexts.values()],
+            any_entries_enabled=any(st.get("entries_enabled", False) for _, st in contexts.values()),
+            at=utcnow(), mode="paper" if cfg.paper else "live", trading_mode=cfg.trading_mode, configured=cfg.configured,
+            universe=state_store.get("universe", {"symbols": active_symbols(cfg, state_store), "candidates": []}),
+            scan_status=state_store.get("scan_status", {"status": "waiting" if cfg.universe_mode == "market" else "watchlist"}),
+            entries_enabled=state_store.get("entries_enabled", False), engine=state_store.get("engine", {"status": "starting"}),
+            account=account, training=state_store.get("training", {"status": "waiting for data"}),
+            research_status=state_store.get("research_status", {"status": "waiting"}),
+            symbols=[{"symbol": s, "forecast": state_store.get(f"forecast:{s}"), "model": state_store.get(f"model:{s}"),
+                      "candidate": state_store.get(f"candidate:{s}"), "research": state_store.get(f"research:{s}"),
+                      "feedback": state_store.get(summary_key(cfg, s), {"captured": 0, "pending": 0, "resolved": 0, "excluded": 0, "scores": {}, "latest": []})}
+                     for s in dict.fromkeys([*active_symbols(cfg, state_store), *state_store.get("monitor_symbols", [])])],
+            orders=store.orders(50), events=state_store.history("decision", 30), errors=state_store.history("error", 10),
+            training_history=state_store.history("training", 25), equity=store.history("equity", 100),
             resources={"process_memory_mb": round(rss / 1024**2, 1), "host_cpu_percent": psutil.cpu_percent(),
-                       "training_memory_mb": config.training_memory_mb, "cpu_threads": 2, "gpu_memory_mb": 0},
-            settings={"capital": config.capital, "position_fraction": config.position_fraction, "gross_fraction": config.gross_fraction,
-                "daily_loss": config.daily_loss, "stop_loss": config.stop_loss, "feed": config.feed,
-                "retrain_hours": config.retrain_hours, "validation_bars": config.validation_bars,
-                "cost_bps": config.cost_bps, "llm_url": config.llm_url,
-                "llm_models": config.llm_models, "llm_configured": bool(config.llm_key), "web_search": bool(config.brave_key)})
+                       "training_memory_mb": cfg.training_memory_mb, "cpu_threads": 2, "gpu_memory_mb": 0},
+            settings={"capital": cfg.capital, "strategy_capital": cfg.capital * cfg.strategy_fraction, "position_fraction": cfg.position_fraction, "gross_fraction": cfg.gross_fraction,
+                "daily_loss": cfg.daily_loss, "stop_loss": cfg.effective_stop, "feed": cfg.feed,
+                "retrain_hours": cfg.retrain_hours, "validation_bars": 390 if cfg.intraday else cfg.validation_bars,
+                "universe_mode": cfg.universe_mode, "scan_candidates": cfg.scan_candidates,
+                "poll_seconds": config.poll_seconds, "daytrade_max_positions": cfg.daytrade_max_positions,
+                "daytrade_hold_minutes": cfg.daytrade_hold_minutes, "daytrade_close_minutes": cfg.daytrade_close_minutes,
+                "cost_bps": cfg.cost_bps, "llm_url": cfg.llm_url,
+                "llm_models": cfg.llm_models, "llm_configured": bool(cfg.llm_key), "web_search": bool(cfg.brave_key)})
 
     @app.post("/api/control")
     def control():
@@ -83,8 +106,13 @@ def create_app(config, store):
         if not isinstance(body, dict):
             return jsonify(error="Expected a JSON object"), 400
         action = body.get("action")
+        selected = body.get("strategy", "all")
+        if not isinstance(selected, str) or selected not in {"all", *contexts}:
+            return jsonify(error="Unknown strategy"), 400
+        targets = list(contexts.values()) if selected == "all" else [contexts[selected]]
         if action == "pause":
-            store.set("entries_enabled", False)
+            for _, state in targets:
+                state.set("entries_enabled", False)
         elif action == "resume":
             if not config.configured or not config.llm_key:
                 return jsonify(error="Configure Alpaca and FreeLLM keys first"), 409
@@ -92,14 +120,16 @@ def create_app(config, store):
                 return jsonify(error="Wait for a successful Alpaca account connection"), 409
             if store.get("account", {}).get("loss_halt"):
                 return jsonify(error="Daily loss halt is active"), 409
-            store.set("entries_enabled", True)
+            for _, state in targets:
+                state.set("entries_enabled", True)
         elif action == "train":
             if not config.configured:
                 return jsonify(error="Alpaca credentials are required for training data"), 409
-            store.set("train_requested", True)
+            for _, state in targets:
+                state.set("train_requested", True)
         else:
             return jsonify(error="Unknown action"), 400
-        store.event("control", {"action": action})
+        store.event("control", {"action": action, "strategy": selected})
         return jsonify(ok=True)
 
     return app

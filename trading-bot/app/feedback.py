@@ -12,7 +12,11 @@ from .store import utcnow
 
 
 def summary_key(config, symbol):
-    return f"feedback:{config.feed}:{FEATURE_SCHEMA}:{symbol}"
+    return f"feedback:{config.feed}:{schema(config)}:{symbol}"
+
+
+def schema(config):
+    return 2 if config.intraday else FEATURE_SCHEMA
 
 
 def capture_forecast(config, store, forecast):
@@ -26,10 +30,12 @@ def capture_forecast(config, store, forecast):
     if captured.tzinfo is None or bar_at.tzinfo is None:
         raise ValueError("Learning snapshots require timezone-aware timestamps")
     # A forecast needs a completed input session, not an in-progress daily bar.
-    if captured.tz_convert("America/New_York").date() <= bar_at.tz_convert("America/New_York").date():
+    if config.intraday and captured < bar_at + pd.Timedelta(minutes=5):
+        raise ValueError("Forecast input bar is not complete")
+    if not config.intraday and captured.tz_convert("America/New_York").date() <= bar_at.tz_convert("America/New_York").date():
         raise ValueError("Forecast input session is not complete")
     inserted = store.capture_experience({
-        "symbol": forecast["symbol"], "feed": config.feed, "feature_schema": FEATURE_SCHEMA,
+        "symbol": forecast["symbol"], "feed": config.feed, "feature_schema": schema(config),
         "bar_at": bar_at.tz_convert("UTC").isoformat(), "captured_at": captured.tz_convert("UTC").isoformat(),
         "model_version": forecast["model_version"], "features": values, "predictions": predictions})
     if inserted:
@@ -40,10 +46,12 @@ def capture_forecast(config, store, forecast):
 def resolve_outcomes(config, store, symbol, bars, now=None):
     """Resolve only complete target horizons, without replacing recorded inputs."""
     now = pd.Timestamp(now or utcnow())
+    if config.intraday:
+        return resolve_intraday(config, store, symbol, bars, now)
     local_today = now.tz_convert("America/New_York").date()
     completed = bars[bars.index.tz_convert("America/New_York").date < local_today]
     changed = 0
-    for record in store.experience(symbol, config.feed, FEATURE_SCHEMA, status="pending"):
+    for record in store.experience(symbol, config.feed, schema(config), status="pending"):
         at = pd.Timestamp(record["bar_at"])
         if at not in completed.index:
             if len(completed) and at < completed.index[0]:
@@ -73,8 +81,32 @@ def resolve_outcomes(config, store, symbol, bars, now=None):
     return changed
 
 
+def resolve_intraday(config, store, symbol, bars, now):
+    completed = bars[bars.index + pd.Timedelta(minutes=5) <= now]
+    frame = dataset(completed, intraday=True)
+    changed = 0
+    for record in store.experience(symbol, config.feed, schema(config), status="pending"):
+        at = pd.Timestamp(record["bar_at"])
+        if at not in frame.index:
+            if len(completed) and completed.index[-1] >= at + pd.Timedelta(minutes=20):
+                changed += store.resolve_experience(record["id"], "excluded", {"reason": "Missing contiguous same-session horizon"})
+            continue
+        row = frame.loc[at]
+        # Accept only forecasts observed promptly after input close; future returns
+        # remain diagnostic close-to-close labels, not actual execution prices.
+        delay = (pd.Timestamp(record["captured_at"]) - (at + pd.Timedelta(minutes=5))).total_seconds()
+        if not 0 <= delay <= 90:
+            changed += store.resolve_experience(record["id"], "excluded", {"reason": "Forecast arrived too late for its intraday horizon"})
+            continue
+        changed += store.resolve_experience(record["id"], "resolved", {
+            **{k: float(row[k]) for k in ("target", "entry", "low_next", "high_next")},
+            "label_end": row.label_end.isoformat(), "source": "Alpaca completed five-minute bars", "feed": config.feed})
+    update_summary(config, store, symbol)
+    return changed
+
+
 def update_summary(config, store, symbol):
-    records = store.experience(symbol, config.feed, FEATURE_SCHEMA)
+    records = store.experience(symbol, config.feed, schema(config))
     resolved = [r for r in records if r["status"] == "resolved"]
     scores = {}
     for record in resolved:
@@ -102,11 +134,11 @@ def replay_dataset(config, store, symbol, bars):
     Predictions are used only for forward scorekeeping; labels are market returns.
     Chronological splitting happens later, so recent outcomes remain out of fitting.
     """
-    frame = dataset(bars)
+    frame = dataset(bars, intraday=config.intraday)
     frame["sample_weight"] = 1.
     frame["is_feedback"] = False
     replayed = []
-    for record in store.experience(symbol, config.feed, FEATURE_SCHEMA, status="resolved"):
+    for record in store.experience(symbol, config.feed, schema(config), status="resolved"):
         at = pd.Timestamp(record["bar_at"])
         if at not in frame.index:
             continue
