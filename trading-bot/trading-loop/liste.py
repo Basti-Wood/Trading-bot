@@ -1,7 +1,8 @@
-"""Die Aktienliste der anderen Bots plus deine eigenen Aktien.
+"""Die Aktienliste der anderen Bots plus deine eigenen Aktien, und die Coin-Liste der Krypto-Bots.
 
 Gelesen aus der Datenbank des Trading-Bots (nur lesen, nichts wird geändert). Strategien mit
-SYMBOL = "LISTE" werden im Stresstest auf genau dieser Liste getestet und im Bot darauf gehandelt.
+SYMBOL = "LISTE" werden im Stresstest auf genau dieser Liste getestet und im Bot darauf gehandelt,
+Strategien mit SYMBOL = "KRYPTO" auf den Coins, die die Sicherheitsregeln des Bots bestehen.
 
   python liste.py
 """
@@ -14,7 +15,7 @@ from pathlib import Path
 
 ORDNER = Path(__file__).resolve().parent
 BOT_DB = Path(os.getenv("TRADING_BOT_DB", ORDNER.parent / "data" / "bot.sqlite3"))
-BOTS = {"daily", "daytrade", "loop"}
+BOTS = {"daily", "daytrade", "loop", "crypto", "crypto_loop"}
 AKTIE = re.compile(r"[A-Z][A-Z0-9.\-]{0,9}")
 
 
@@ -30,11 +31,29 @@ def _besitzer(con, symbol):
     return "daily" if _lesen(con, f"owned:{symbol}") else None
 
 
-def symbole():
-    """(Liste, eigene Aktien, Stand des Scans). Bricht mit einer verständlichen Meldung ab, wenn nichts da ist."""
+def _verbinden():
     if not BOT_DB.is_file():
         raise SystemExit(f"Datenbank des Trading-Bots nicht gefunden ({BOT_DB}). Ist der Bot schon einmal gelaufen?")
-    con = sqlite3.connect(f"{BOT_DB.as_uri()}?mode=ro", uri=True, timeout=10)
+    return sqlite3.connect(f"{BOT_DB.as_uri()}?mode=ro", uri=True, timeout=10)
+
+
+def krypto():
+    """(Coins, [], Stand der Prüfung): die Coins, die die Sicherheitsregeln der Krypto-Bots bestehen."""
+    con = _verbinden()
+    try:
+        stand = _lesen(con, "crypto_universe") or {}
+    finally:
+        con.close()
+    coins = [s for s in stand.get("symbols") or [] if re.fullmatch(r"[A-Z0-9]{2,15}/USD", s)]
+    if not coins:
+        raise SystemExit("Die Coin-Liste der Krypto-Bots ist leer. Starte den Trading-Bot mit CRYPTO_ENABLED=true; "
+                         "er prüft die Coins stündlich.")
+    return coins, [], stand.get("at")
+
+
+def symbole():
+    """(Liste, eigene Aktien, Stand des Scans). Bricht mit einer verständlichen Meldung ab, wenn nichts da ist."""
+    con = _verbinden()
     try:
         universum = _lesen(con, "universe") or {}
         auswahl = universum.get("symbols") or []
@@ -52,8 +71,16 @@ def symbole():
     return liste, [s for s in eigene if s in liste], universum.get("at")
 
 
+def _zeit(stand):
+    return dt.datetime.fromisoformat(stand).astimezone().strftime("%d.%m.%Y %H:%M") if stand else "unbekannt"
+
+
 if __name__ == "__main__":
     liste, eigene, stand = symbole()
-    zeit = dt.datetime.fromisoformat(stand).astimezone().strftime("%d.%m.%Y %H:%M") if stand else "unbekannt"
-    print(f"{len(liste)} Aktien (Scan vom {zeit}):")
+    print(f"{len(liste)} Aktien (Scan vom {_zeit(stand)}):")
     print(", ".join(f"{s} (deine)" if s in eigene else s for s in liste))
+    try:
+        coins, _, stand = krypto()
+        print(f"{len(coins)} Coins (Sicherheitsprüfung vom {_zeit(stand)}): {', '.join(coins)}")
+    except SystemExit as hinweis:
+        print(hinweis)

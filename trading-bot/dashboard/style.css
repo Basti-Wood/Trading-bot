@@ -11,3 +11,4 @@
 .loop-version{border-top:1px solid var(--line);padding-top:16px;margin-top:12px}.loop-version .table-wrap{padding:0}.loop-version .section-title{margin-bottom:8px}
 @media(max-width:1150px){.trader-grid{grid-template-columns:1fr 1fr}}@media(max-width:540px){.trader-grid{grid-template-columns:1fr}.holding{grid-template-columns:1fr}}
 .verdict{flex-wrap:wrap}.holding-context{flex-basis:100%;border-top:1px solid var(--line);padding-top:12px}
+[hidden]{display:none!important}

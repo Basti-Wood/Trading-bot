@@ -14,7 +14,7 @@ from .decisions import position_context, position_decision
 from .models import train_worker, predict, strategy_signature
 from .feedback import capture_forecast, resolve_outcomes
 from .daytrade import TREND_EXITS, baseline, best, bracket, exit_signal, fresh, playbook, session_open
-from . import loop
+from . import crypto, loop
 from .research import Research, ballots, combine
 from .store import utcnow
 from .universe import active_symbols, monitored_symbols, scan, entries_ready, watched_symbols
@@ -125,9 +125,10 @@ class Engine:
             self.training_started = time.monotonic()
 
     def research_tick(self, forecasts):
-        if self.config.intraday or self.config.loop:
-            # Five-minute horizons decide on prediction models and setups only.
+        if self.config.intraday or self.config.loop or self.config.crypto:
+            # Five-minute horizons decide on prediction models and setups only; stock news says nothing about coins.
             status = ("not used by the trading-loop; tested strategy rules decide" if self.config.loop
+                      else "not used for crypto; the three prediction models decide" if self.config.crypto
                       else "not used for day trading; prediction models and setups decide")
             if self.store.get("research_status", {}).get("status") != status:
                 self.store.set("research_status", {"status": status})
@@ -171,6 +172,8 @@ class Engine:
         self.research_thread.start()
 
     def scan_tick(self):
+        if self.config.trading_mode == "crypto":
+            return self.crypto_scan_tick()
         if self.config.coordinated and self.config.trading_mode != "daily" or self.config.loop:
             return
         if self.config.universe_mode != "market" or self.scan_thread and self.scan_thread.is_alive():
@@ -185,6 +188,33 @@ class Engine:
                 self.store.set("scan_status", {"status": "unavailable", "message": "Market scan failed; will retry", "at": utcnow()})
         self.scan_thread = threading.Thread(target=work, name="market-scanner", daemon=True)
         self.scan_thread.start()
+
+    def crypto_scan_tick(self):
+        """Hourly safety check of every Alpaca coin; the crypto trading-loop reads the same list."""
+        if self.scan_thread and self.scan_thread.is_alive() or time.time() - self.last_scan < crypto.SCAN_SECONDS:
+            return
+        self.last_scan = time.time()
+        self.scan_thread = threading.Thread(target=crypto.scan, args=(self.config, self.store, Alpaca(self.config), self.stop),
+                                            name="crypto-scanner", daemon=True)
+        self.scan_thread.start()
+
+    def protect_crypto(self, positions, orders, session):
+        """Alpaca has no stop legs for crypto: once coins arrive, rest a stop-limit sell at the broker."""
+        for position in positions:
+            symbol = position["symbol"]
+            if (not crypto.is_crypto(symbol) or float(position.get("qty") or 0) <= 0 or not self.store.get(f"owned:{symbol}", False)
+                    or self.store.get(f"exit_pending:{symbol}", False)):
+                continue
+            try:
+                status = self.executor.protect(symbol, position, orders, self.stop_limit(), session)
+            except Exception as exc:
+                status = f"Stop-Order nicht möglich ({str(exc)[:160]}); der Bot überwacht den Stop selbst"
+            if status and status != self.store.get(f"protect_status:{symbol}"):
+                self.store.set(f"protect_status:{symbol}", status)
+                self.store.event("decision", {"symbol": symbol, "action": "HOLD", "reason": status})
+            if self.executor.changed:
+                return True
+        return False
 
     def forecast_tick(self, symbols, day):
         if self.config.loop:
@@ -352,7 +382,11 @@ class Engine:
         stale = self.stale_forecast(forecast, now)
         if stale:
             return "HOLD", stale
-        return combine(forecast, self.store.get(f"research:{forecast['symbol']}"), min_votes=self.config.min_votes)
+        signal, reason = combine(forecast, self.store.get(f"research:{forecast['symbol']}"), min_votes=self.config.min_votes)
+        # The forecast covers the UTC day after its candle, like the stock bots' next session.
+        if self.config.crypto and signal == "BUY" and forecast.get("target_session") not in self.sessions:
+            return "HOLD", "Kaufsignal gilt nicht für den aktuellen Krypto-Tag (UTC)"
+        return signal, reason
 
     def daytrade_decision(self, forecast, now):
         """Rule-based setups enter; prediction models only veto entries or call exits."""
@@ -484,9 +518,12 @@ class Engine:
             self.store.set("equity_sample", time.time())
         now = pd.Timestamp(clock["timestamp"])
         local = now.tz_convert("America/New_York")
+        if self.config.crypto:
+            # Coins trade around the clock; days, order sessions and entries follow the UTC daily candle.
+            clock, day = {**clock, "is_open": True}, crypto.session(now)
         queue_session = self.queue_session(clock, now)
         self.sessions = {s for s in (day if clock["is_open"] else None, queue_session) if s}
-        entry_window = local.hour == 9 and 35 <= local.minute <= 59
+        entry_window = crypto.entry_window(now) if self.config.crypto else local.hour == 9 and 35 <= local.minute <= 59
         flatten = False
         if self.config.intraday:
             close = pd.Timestamp(clock["next_close"]) if clock.get("next_close") else None
@@ -584,6 +621,8 @@ class Engine:
                         self.store.set(f"exit_status:{symbol}", status)
                         self.store.event("decision", {"symbol": symbol, "action": "SELL", "reason": exit_reason + "; " + status, "risk_exit": True})
                         acted = bool(self.executor.changed)
+            if self.config.crypto and not acted:
+                acted = self.protect_crypto(positions, orders, day)
         if phase == "risk":
             return acted
         forecasts = []

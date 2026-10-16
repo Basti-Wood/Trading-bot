@@ -1,4 +1,4 @@
-"""Run the daily, intraday and trading-loop strategies under one account/order coordinator.
+"""Run the daily, intraday, trading-loop and crypto strategies under one account/order coordinator.
 
 The user's own (manual) trades share the account but sit outside the bots' budget.
 """
@@ -11,7 +11,7 @@ from .allocation import bot_share
 from .engine import Engine
 from .store import StrategyStore, utcnow
 
-STRATEGIES = ("daily", "daytrade", "loop")
+STRATEGIES = ("daily", "daytrade", "loop", "crypto", "crypto_loop")
 
 
 def strategy_contexts(config, store):
@@ -19,11 +19,16 @@ def strategy_contexts(config, store):
         return [(config, store)]
     contexts = []
     for mode in STRATEGIES:
+        if mode.startswith("crypto") and not config.crypto_enabled:
+            continue
         # strategy_fraction is the startup weight; sizing reads the live dashboard weights.
         cfg = replace(config, trading_mode=mode, coordinated=True)
-        if mode == "loop":
+        if mode in {"loop", "crypto_loop"}:
             # Per-symbol tests must see the stress test's window, not the prediction bot's training history.
             cfg = replace(cfg, history_days=loop.HISTORY_DAYS)
+        if mode.startswith("crypto"):
+            # Coins trade every day (about 1,830 daily candles in five years) and cost Alpaca's crypto fee.
+            cfg = replace(cfg, cost_bps=config.crypto_cost_bps, max_bars=2000)
         contexts.append((replace(cfg, strategy_fraction=max(.05, bot_share(cfg, store, mode))), StrategyStore(store, mode)))
     return contexts
 
@@ -135,7 +140,8 @@ class PortfolioEngine:
                     engine.store.set("engine", {"status": "error", "message": str(exc)[:240], "at": utcnow()})
                     engine.store.event("error", {"message": str(exc)[:240]})
         self.store.set("portfolio_engine", {"status": "error" if failed else "running",
-            "message": "Strategy error; check decision logs" if failed else "Prediction, day trading and trading-loop running together; shared account limits",
+            "message": "Strategy error; check decision logs" if failed else
+                       f"Prediction, day trading, trading-loop{' and crypto' if self.config.crypto_enabled else ''} running together; shared account limits",
             "at": utcnow()})
 
     def run(self):

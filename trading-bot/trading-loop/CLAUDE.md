@@ -50,8 +50,12 @@ Bei `SYMBOL = "LISTE"` (Wunsch des Nutzers: Aktienliste der Bots plus eigene Akt
 Aktie einzeln; die Version ist grün, wenn mindestens `MIN_GRUENE_AKTIEN` (3) Aktien grün sind, bei kürzeren Listen alle. Der Bot
 kauft später nur Aktien, deren eigener Test grün ist, und testet neue Aktien der Liste selbst. Der Bot wiederholt den Stresstest
 jeden Tag ab 8:00 New Yorker Zeit für alle getesteten, unveränderten Versionen (das 5-Jahres-Fenster wandert mit), und im
-Dashboard gibt es einen Knopf zum Neutesten. Die Strategie-Dateien ändert er dabei nie. Eigene Aktien des Nutzers bekommen nur Signale. Die Agenten ändern
-`stresstest.py` nie. Will der Nutzer andere Kriterien, passt du `urteil()` auf seinen Wunsch an.
+Dashboard gibt es einen Knopf zum Neutesten. Die Strategie-Dateien ändert er dabei nie. Eigene Aktien des Nutzers bekommen nur
+Signale. Die Agenten ändern `stresstest.py` nie. Will der Nutzer andere Kriterien, passt du `urteil()` auf seinen Wunsch an.
+Krypto: `SYMBOL = "BTC/USD"` (ein Coin) oder `SYMBOL = "KRYPTO"` (alle Coins, die die Sicherheitsregeln des Bots bestehen,
+`python liste.py`) handelt im Bot der Krypto-Trading-Loop rund um die Uhr. Für Coins rechnet der Stresstest 0,25 % Kosten pro
+Order (`KOSTEN_KRYPTO`). Bei `KRYPTO` gilt dieselbe Regel wie bei `LISTE`: jeder Coin einzeln, grün ab `MIN_GRUENE_AKTIEN` Coins.
+Tageskerzen bei Krypto sind UTC-Tage, auch am Wochenende.
 
 ## Im Trading-Bot (Standardweg für Live im Paper-Modus)
 Dieser Ordner liegt im Trading-Bot (`trading-bot/trading-loop`). Der Bot handelt Versionen aus diesem Ordner als dritten Bot

@@ -123,13 +123,19 @@ class LoopFolderTests(unittest.TestCase):
         green = add_version(self.folder, "trend_v2")
         add_version(self.folder, "trend_v3", result=None)
         add_version(self.folder, "krypto_v1", symbol="BTC/USD")
+        add_version(self.folder, "coins_v1", symbol="KRYPTO")
+        add_version(self.folder, "index_v1", symbol="^GSPC")
         add_version(self.folder, "alt_v1", stop=3)
         changed = add_version(self.folder, "edit_v1")
         changed.write_text(changed.read_text(encoding="utf-8") + "\n# edited\n", encoding="utf-8")
-        status = {v["version"]: (v["status"], v["tradable"]) for v in loop.catalogue(self.cfg)}
+        catalogue = loop.catalogue(self.cfg)
+        status = {v["version"]: (v["status"], v["tradable"]) for v in catalogue}
         self.assertEqual(status, {"trend_v1": ("rot", False), "trend_v2": ("gruen", True), "trend_v3": ("ungetestet", False),
-                                  "krypto_v1": ("nicht_handelbar", False), "alt_v1": ("veraltet", False),
-                                  "edit_v1": ("geaendert", False)})
+                                  "krypto_v1": ("gruen", True), "coins_v1": ("gruen", True), "index_v1": ("nicht_handelbar", False),
+                                  "alt_v1": ("veraltet", False), "edit_v1": ("geaendert", False)})
+        # Coin versions belong to the crypto trading-loop, stock versions to the trading-loop.
+        self.assertEqual({v["version"]: v["bot"] for v in catalogue if v["tradable"]},
+                         {"trend_v2": "loop", "krypto_v1": "crypto_loop", "coins_v1": "crypto_loop"})
         self.assertEqual(loop.strategy_path(self.cfg, "trend_v2"), green)
         for name in ("../risiko", "trend_v2.py", "TREND_V2", "..\\x_v1"):
             self.assertIsNone(loop.strategy_path(self.cfg, name))

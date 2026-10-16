@@ -12,6 +12,10 @@ def active_symbols(config, store):
         from .loop import active_versions, version_symbols
         return list(dict.fromkeys(s for record in active_versions(store).values()
                                   for s in version_symbols(config, store, record)))
+    if config.crypto:
+        # The coins that passed every safety rule in the last hourly check.
+        from .crypto import symbols
+        return symbols(store)
     if config.universe_mode == "watchlist":
         return list(config.symbols)
     return store.get("universe", {}).get("symbols", [])
@@ -101,6 +105,10 @@ def scan(config, store, broker, stop):
 
 
 def entries_ready(config, store):
+    if config.crypto:
+        # Every crypto entry, list or fixed coin, needs a recent, complete safety check.
+        from .crypto import ready
+        return ready(store)
     if config.universe_mode == "watchlist":
         return True
     if config.loop:

@@ -30,6 +30,8 @@ def strategy_signature(config):
                 "feedback_weight": config.feedback_weight, "validation_bars": config.validation_bars}
     if config.intraday:
         settings.update(mode="daytrade", bar_minutes=5, horizon_bars=3, intraday_schema=1)
+    if config.crypto:
+        settings.update(market="crypto", day="UTC")
     return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -77,7 +79,7 @@ def evaluate(frame, predictions, config):
         risk_returns = pd.Series(1 + net, index=frame.index).groupby(frame.index.tz_convert("America/New_York").date).prod().to_numpy() - 1
     std = float(np.std(risk_returns))
     return {"net_return": float(curve[-1] - 1), "max_drawdown": float(dd.max()),
-            "sharpe": float(np.mean(risk_returns) / std * np.sqrt(252)) if std > 1e-12 else 0.,
+            "sharpe": float(np.mean(risk_returns) / std * np.sqrt(365 if config.crypto else 252)) if std > 1e-12 else 0.,
             "active_days": len(set(frame.index[active].tz_convert("America/New_York").date)) if config.intraday else int(active.sum()),
             "active_trades": int(active.sum()), "observations": len(frame),
             "benchmark_return": float(np.prod(1 + frame.target.to_numpy()) * (1 - 2 * config.cost_bps / 10000) - 1),
@@ -149,7 +151,8 @@ def train_symbol(config, store, symbol, bars):
             incumbent_metrics = evaluate(holdout, np.where((ps > config.threshold).sum(axis=0) >= 2, np.median(ps, axis=0), 0), config)
             eligible = eligible and metrics["net_return"] > incumbent_metrics["net_return"] + .001
     version = uuid.uuid4().hex[:12]
-    file_prefix = f"daytrade-{symbol}" if config.intraday else symbol
+    # Coin pairs contain a slash, which a file name cannot.
+    file_prefix = f"daytrade-{symbol}" if config.intraday else f"crypto-{symbol.replace('/', '-')}" if config.crypto else symbol
     meta = {"version": version, "file": f"{file_prefix}-{version}.joblib", "symbol": symbol,
             "created_at": utcnow(), "data_through": bars.index[-1].isoformat(),
             "trained_through": train.label_end.max().isoformat(), "metrics": metrics,
@@ -221,5 +224,6 @@ def predict(config, meta, bars):
             "ensemble_method": "median", "target_session": bars.attrs.get("target_session"),
             "input_complete_at": bars.attrs.get("input_complete_at"),
             "last_close": float(bars.close.iloc[-1]), "threshold": config.threshold,
-            "horizon": "next 15 minutes from completed five-minute close" if config.intraday else "next session open to the following session open",
+            "horizon": "next 15 minutes from completed five-minute close" if config.intraday
+                       else "next UTC day open to the following open" if config.crypto else "next session open to the following session open",
             "trading_mode": config.trading_mode}

@@ -2,10 +2,12 @@
 
   python stresstest.py strategien/<name>_v1.py
 
-Die Strategie-Datei definiert SYMBOL (z. B. "XYZ" für eine Aktie, "BTC/USD" für Krypto oder "LISTE" für die
-Aktienliste der Bots plus die eigenen Aktien, siehe liste.py) und eine Klasse Strategie(backtesting.Strategy).
-Bei "LISTE" wird jede Aktie einzeln getestet; grün, wenn mindestens MIN_GRUENE_AKTIEN Aktien grün sind. Kurse kommen von Alpaca (Aktien: IEX-Daten mit den Schlüsseln aus .env,
-Krypto: ohne Schlüssel). Ergebnis, Trades und Chart landen in berichte/. Grün oder rot steht in der letzten Zeile.
+Die Strategie-Datei definiert SYMBOL (z. B. "XYZ" für eine Aktie, "BTC/USD" für Krypto, "LISTE" für die
+Aktienliste der Bots plus die eigenen Aktien oder "KRYPTO" für alle Coins, die die Sicherheitsregeln des Bots
+bestehen, siehe liste.py) und eine Klasse Strategie(backtesting.Strategy).
+Bei "LISTE" und "KRYPTO" wird jeder Wert einzeln getestet; grün, wenn mindestens MIN_GRUENE_AKTIEN Werte grün sind.
+Kurse kommen von Alpaca (Aktien: IEX-Daten mit den Schlüsseln aus .env, Krypto: ohne Schlüssel). Coins kosten
+KOSTEN_KRYPTO pro Order. Ergebnis, Trades und Chart landen in berichte/. Grün oder rot steht in der letzten Zeile.
 """
 import datetime as dt
 import hashlib
@@ -27,10 +29,19 @@ ORDNER = Path(__file__).resolve().parent
 JAHRE = 5
 STARTKAPITAL = 100_000
 KOSTEN = 0.001          # 0,1 % pro Order als Puffer für Spread und Gebühren
+KOSTEN_KRYPTO = 0.0025  # 0,25 % pro Order: Alpacas Krypto-Gebühr (Taker, Stufe 1)
 MIN_TRADES = 10
 # Bei "LISTE": so viele Aktien müssen einzeln grün sein (bei kürzeren Listen alle). Der Bot kauft ohnehin
 # nur Aktien, deren eigener Test grün ist; mehr als eine verlangt, damit nicht ein Glückstreffer reicht.
 MIN_GRUENE_AKTIEN = 3
+
+
+def kosten(symbol):
+    return KOSTEN_KRYPTO if "/" in symbol else KOSTEN
+
+
+def dateiname(symbol):
+    return symbol.replace("/", "-")
 
 
 def lade_strategie(pfad):
@@ -115,32 +126,34 @@ def kennzahlen(stats):
             "gewinnquote": zahl(stats["Win Rate [%]"])}
 
 
-def listen_urteil(gruen, anzahl):
+def listen_urteil(gruen, anzahl, wort="Aktien"):
     noetig = min(MIN_GRUENE_AKTIEN, anzahl)
-    return (f"GRÜN ({gruen} von {anzahl} Aktien grün)" if gruen >= noetig
-            else f"ROT (nur {gruen} von {anzahl} Aktien grün, nötig sind mindestens {noetig})")
+    return (f"GRÜN ({gruen} von {anzahl} {wort} grün)" if gruen >= noetig
+            else f"ROT (nur {gruen} von {anzahl} {wort} grün, nötig sind mindestens {noetig})")
 
 
 def listen_test(pfad, modul, berichte):
-    """SYMBOL = "LISTE": jede Aktie der Bot-Liste einzeln testen. Grün, wenn mindestens MIN_GRUENE_AKTIEN grün sind."""
+    """SYMBOL = "LISTE" oder "KRYPTO": jeden Wert der Liste einzeln testen. Grün, wenn mindestens MIN_GRUENE_AKTIEN grün sind."""
     import liste
-    symbole, eigene, _ = liste.symbole()
+    krypto = modul.SYMBOL == "KRYPTO"
+    symbole, eigene, _ = liste.krypto() if krypto else liste.symbole()
+    wort = "Coins" if krypto else "Aktien"
     ordner = berichte / pfad.stem
     ordner.mkdir(exist_ok=True)
     aktien, alle_trades = {}, []
-    print(f"{pfad.stem} · Liste mit {len(symbole)} Aktien")
+    print(f"{pfad.stem} · Liste mit {len(symbole)} {wort}")
     for symbol in symbole:
         try:
             kurse = lade_kurse(symbol)
-            bt = Backtest(kurse, modul.Strategie, cash=STARTKAPITAL, commission=KOSTEN, finalize_trades=True)
+            bt = Backtest(kurse, modul.Strategie, cash=STARTKAPITAL, commission=kosten(symbol), finalize_trades=True)
             stats = bt.run()
         except (SystemExit, Exception) as fehler:
             print(f"  {symbol:6} übersprungen: {fehler}")
             continue
         ergebnis = urteil(stats)
-        (ordner / f"{symbol}.txt").write_text(str(stats), encoding="utf-8")
+        (ordner / f"{dateiname(symbol)}.txt").write_text(str(stats), encoding="utf-8")
         try:
-            bt.plot(filename=str(ordner / f"{symbol}.html"), open_browser=False)
+            bt.plot(filename=str(ordner / f"{dateiname(symbol)}.html"), open_browser=False)
         except Exception:
             pass  # Chart ist nur Beiwerk
         trades = stats["_trades"].copy()
@@ -151,13 +164,13 @@ def listen_test(pfad, modul, berichte):
         print(f"  {symbol:6} Rendite {stats['Return [%]']:6.1f} % · Kaufen-und-Halten {stats['Buy & Hold Return [%]']:7.1f} % · "
               f"max. Drawdown {stats['Max. Drawdown [%]']:6.1f} % · Trades {stats['# Trades']:3} · {ergebnis}")
     if not aktien:
-        raise SystemExit("Keine Aktie der Liste ließ sich testen.")
+        raise SystemExit(f"Kein Wert der Liste ließ sich testen ({wort}).")
     gruen = sum(1 for a in aktien.values() if a["ergebnis"] == "gruen")
-    ergebnis = listen_urteil(gruen, len(aktien))
+    ergebnis = listen_urteil(gruen, len(aktien), wort)
     pd.concat(alle_trades).to_csv(berichte / f"{pfad.stem}_trades.csv", index=False)
     werte = list(aktien.values())
     mittel = lambda key: zahl(sum(a[key] or 0 for a in werte) / len(werte))
-    bericht = {"strategie": pfad.stem, "symbol": "LISTE", "anzahl": len(aktien), "gruen_anzahl": gruen,
+    bericht = {"strategie": pfad.stem, "symbol": modul.SYMBOL, "anzahl": len(aktien), "gruen_anzahl": gruen,
                "rendite": mittel("rendite"), "kaufen_halten": mittel("kaufen_halten"),
                "max_drawdown": min(a["max_drawdown"] or 0 for a in werte), "trades": sum(a["trades"] for a in werte),
                "ergebnis": "gruen" if ergebnis.startswith("GRÜN") else "rot", "urteil": ergebnis, "aktien": aktien,
@@ -180,11 +193,11 @@ def main():
     berichte = ORDNER / "berichte"
     berichte.mkdir(exist_ok=True)
     warnings.filterwarnings("ignore")
-    if modul.SYMBOL == "LISTE":
+    if modul.SYMBOL in ("LISTE", "KRYPTO"):
         return listen_test(pfad, modul, berichte)
     kurse = lade_kurse(modul.SYMBOL)
 
-    bt = Backtest(kurse, modul.Strategie, cash=STARTKAPITAL, commission=KOSTEN, finalize_trades=True)
+    bt = Backtest(kurse, modul.Strategie, cash=STARTKAPITAL, commission=kosten(modul.SYMBOL), finalize_trades=True)
     stats = bt.run()
 
     (berichte / f"{pfad.stem}.txt").write_text(str(stats), encoding="utf-8")

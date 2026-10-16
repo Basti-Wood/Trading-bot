@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+from .crypto import ENTRY_HOURS
 from .features import FEATURES, FEATURE_SCHEMA, dataset
 from .store import utcnow
 
@@ -32,7 +33,9 @@ def capture_forecast(config, store, forecast):
     # A forecast needs a completed input session, not an in-progress daily bar.
     if config.intraday and captured < bar_at + pd.Timedelta(minutes=5):
         raise ValueError("Forecast input bar is not complete")
-    if not config.intraday and captured.tz_convert("America/New_York").date() <= bar_at.tz_convert("America/New_York").date():
+    if config.crypto and captured < bar_at + pd.Timedelta(days=1):
+        raise ValueError("Forecast input UTC day is not complete")
+    if not config.intraday and not config.crypto and captured.tz_convert("America/New_York").date() <= bar_at.tz_convert("America/New_York").date():
         complete = pd.Timestamp(forecast.get("input_complete_at")) if forecast.get("input_complete_at") else None
         if (complete is None or complete.tzinfo is None or captured < complete
                 or complete.tz_convert("America/New_York").date() != bar_at.tz_convert("America/New_York").date()
@@ -52,8 +55,10 @@ def resolve_outcomes(config, store, symbol, bars, now=None):
     now = pd.Timestamp(now or utcnow())
     if config.intraday:
         return resolve_intraday(config, store, symbol, bars, now)
-    local_today = now.tz_convert("America/New_York").date()
-    completed = bars[bars.index.tz_convert("America/New_York").date < local_today]
+    # Crypto days are UTC candles; stock sessions are New York days opening 09:30.
+    zone = "UTC" if config.crypto else "America/New_York"
+    local_today = now.tz_convert(zone).date()
+    completed = bars[bars.index.tz_convert(zone).date < local_today]
     changed = 0
     for record in store.experience(symbol, config.feed, schema(config), status="pending"):
         at = pd.Timestamp(record["bar_at"])
@@ -65,9 +70,14 @@ def resolve_outcomes(config, store, symbol, bars, now=None):
         if index + 2 >= len(completed):
             continue
         entry_bar, exit_bar = completed.iloc[index + 1], completed.iloc[index + 2]
-        entry_day = completed.index[index + 1].tz_convert("America/New_York").date()
-        entry_at = pd.Timestamp(datetime.combine(entry_day, time(9, 30), tzinfo=ZoneInfo("America/New_York")))
-        if pd.Timestamp(record["captured_at"]) >= entry_at:
+        if config.crypto:
+            # The UTC candle opens at midnight; the bot buys within its entry window after that.
+            entry_at = completed.index[index + 1]
+            late = entry_at + pd.Timedelta(hours=ENTRY_HOURS)
+        else:
+            entry_day = completed.index[index + 1].tz_convert("America/New_York").date()
+            entry_at = late = pd.Timestamp(datetime.combine(entry_day, time(9, 30), tzinfo=ZoneInfo("America/New_York")))
+        if pd.Timestamp(record["captured_at"]) >= late:
             changed += store.resolve_experience(record["id"], "excluded", {"reason": "Prediction was recorded after its target session opened"})
             continue
         prices = [float(entry_bar.open), float(exit_bar.open), float(entry_bar.low), float(entry_bar.high)]

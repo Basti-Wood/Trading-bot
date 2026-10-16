@@ -36,12 +36,12 @@ def number(value):
     return round(value, 2) if math.isfinite(value) else None
 
 
-def run(module, data, stresstest, Backtest):
-    test = Backtest(data, module.Strategie, cash=stresstest.STARTKAPITAL, commission=stresstest.KOSTEN,
-                    finalize_trades=True).run()
+def run(module, data, stresstest, Backtest, symbol=""):
+    # Coins pay Alpaca's higher crypto fee, exactly as in stresstest.py.
+    costs = stresstest.kosten(symbol) if hasattr(stresstest, "kosten") else stresstest.KOSTEN
+    test = Backtest(data, module.Strategie, cash=stresstest.STARTKAPITAL, commission=costs, finalize_trades=True).run()
     verdict = stresstest.urteil(test)
-    live = Backtest(data, module.Strategie, cash=stresstest.STARTKAPITAL, commission=stresstest.KOSTEN,
-                    finalize_trades=False).run()
+    live = Backtest(data, module.Strategie, cash=stresstest.STARTKAPITAL, commission=costs, finalize_trades=False).run()
     action, reason = signal(live._strategy)
     return {"signal": action, "reason": reason, "bars": len(data),
             "from": str(data.index[0].date()), "to": str(data.index[-1].date()),
@@ -62,12 +62,13 @@ def main(path, folder, loop_dir):
     spec.loader.exec_module(module)
     results = {}
     for csv in sorted(Path(folder).glob("*.csv")):
+        symbol = csv.stem.replace("_", "/")  # BTC_USD.csv holds BTC/USD; stock symbols never contain "_".
         try:
-            results[csv.stem] = run(module, pd.read_csv(csv, index_col=0, parse_dates=True), stresstest, Backtest)
+            results[symbol] = run(module, pd.read_csv(csv, index_col=0, parse_dates=True), stresstest, Backtest, symbol)
         except SystemExit:
             raise
         except Exception as exc:  # One unusable symbol must not hide the others.
-            results[csv.stem] = {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+            results[symbol] = {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
     print(json.dumps({"symbol": module.SYMBOL, "symbols": results}))
 
 

@@ -267,6 +267,8 @@ def ballots(forecast, research=None, now=None):
     votes = {m.get("name", m.get("id")): m.get("signal", "HOLD") for m in forecast.get("models", [])}
     if forecast.get("trading_mode") == "daytrade":
         votes["Day-trading playbook"] = (forecast.get("playbook") or {}).get("signal", "HOLD")
+    elif forecast.get("trading_mode") == "crypto":
+        pass  # Stock news says nothing about coins: the three models vote alone.
     else:
         votes["LLM news"] = news_vote(forecast, research, now)
     return votes

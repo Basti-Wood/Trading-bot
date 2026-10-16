@@ -1,7 +1,9 @@
 """Bridge to the trading-loop folder: tested strategy versions become a paper strategy.
 
 A version trades either one fixed symbol or, with SYMBOL = "LISTE", the symbol list the other
-bots use (the scanner shortlist or watchlist) plus the user's own holdings. Only versions whose
+bots use (the scanner shortlist or watchlist) plus the user's own holdings. Crypto versions
+(SYMBOL = "BTC/USD" or "KRYPTO" for every coin that passes app/crypto.py) run in the separate
+crypto trading-loop bot. Only versions whose
 stress test is green, whose file is unchanged since that test and whose test used the current
 risiko.py values may be activated. The bot then re-runs the same strategy per symbol in an
 isolated subprocess: a symbol may be bought only if its own five-year test is green, and the
@@ -20,11 +22,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .crypto import is_crypto
 from .store import utcnow
 
 VERSION = re.compile(r"[a-z0-9_]{1,60}_v\d{1,3}")
 STOCK = re.compile(r"[A-Z][A-Z0-9.\-]{0,9}")
 LIST = "LISTE"
+CRYPTO_LIST = "KRYPTO"
 RULES = {"STOP_LOSS_PROZENT": "stop_loss", "MAX_DRAWDOWN_PROZENT": "max_drawdown"}
 BOT_ROOT = Path(__file__).resolve().parent.parent
 # stresstest.py loads 5 years up to yesterday; the bot's per-symbol tests use the same window.
@@ -111,10 +115,15 @@ def version_info(config, path, rules=None):
     elif report.get("risiko") != {"stop_loss": rules["stop_loss"], "max_drawdown": rules["max_drawdown"]}:
         status, note = "veraltet", "Getestet mit anderen Werten aus risiko.py; erst neu testen"
     else:
-        status, note = "gruen", "Stresstest grün" + (f" ({report.get('urteil')})" if symbol == LIST else "")
-    if status == "gruen" and not (symbol == LIST or symbol and STOCK.fullmatch(symbol)):
-        status, note = "nicht_handelbar", "Der Bot handelt nur US-Aktien und ETFs, kein Krypto"
-    return {**info, "status": status, "note": note, "tradable": status == "gruen" and rules["ok"]}
+        status, note = "gruen", "Stresstest grün" + (f" ({report.get('urteil')})" if symbol in (LIST, CRYPTO_LIST) else "")
+    if status == "gruen" and not (symbol in (LIST, CRYPTO_LIST) or symbol and (STOCK.fullmatch(symbol) or is_crypto(symbol))):
+        status, note = "nicht_handelbar", "Der Bot handelt US-Aktien, ETFs und Coins gegen USD (z. B. BTC/USD)"
+    return {**info, "status": status, "note": note, "tradable": status == "gruen" and rules["ok"], "bot": bot_for(symbol)}
+
+
+def bot_for(symbol):
+    """Which bot trades a version: the crypto trading-loop for coins, the stock trading-loop otherwise."""
+    return "crypto_loop" if symbol == CRYPTO_LIST or is_crypto(symbol) else "loop"
 
 
 def catalogue(config):
@@ -198,7 +207,13 @@ def bot_list(config, store, positions=None):
 
 def version_symbols(config, store, record, positions=None):
     """Symbols a version evaluates, including positions it still owns after they left the list."""
-    symbols = bot_list(config, store, positions) if record["symbol"] == LIST else [record["symbol"]]
+    if record["symbol"] == LIST:
+        symbols = bot_list(config, store, positions)
+    elif record["symbol"] == CRYPTO_LIST:
+        from .crypto import symbols as coins
+        symbols = coins(store)
+    else:
+        symbols = [record["symbol"]]
     owned = [s for s in store.owned_symbols() if owner_version(store, s) == record["version"]]
     return list(dict.fromkeys([*symbols, *owned]))
 
@@ -215,8 +230,10 @@ def owner_version(store, symbol):
 
 def daily_frame(bars):
     """Bot bars (UTC, lowercase) to the backtesting.py layout used by stresstest.py."""
+    # Crypto candles are UTC days; stock bars are New York sessions.
+    zone = "UTC" if bars.attrs.get("crypto") else "America/New_York"
     frame = bars[["open", "high", "low", "close", "volume"]].rename(columns=str.capitalize)
-    index = frame.index.tz_convert("America/New_York") if frame.index.tz is not None else frame.index
+    index = frame.index.tz_convert(zone) if frame.index.tz is not None else frame.index
     frame.index = index.normalize().tz_localize(None) if index.tz is not None else index.normalize()
     return frame[~frame.index.duplicated(keep="last")]
 
@@ -230,7 +247,8 @@ def evaluate(config, record, frames):
         raise ValueError(f"{record['version']} wurde nach dem Aktivieren geändert; neu testen und neu aktivieren")
     with tempfile.TemporaryDirectory() as folder:
         for symbol, bars in frames.items():
-            daily_frame(bars).to_csv(Path(folder) / f"{symbol}.csv")
+            # BTC/USD becomes BTC_USD.csv; loop_runner turns the name back into the symbol.
+            daily_frame(bars).to_csv(Path(folder) / f"{symbol.replace('/', '_')}.csv")
         try:
             result = subprocess.run([sys.executable, "-m", "app.loop_runner", str(path), folder, str(config.loop_dir)],
                                     cwd=BOT_ROOT, capture_output=True, text=True, timeout=config.loop_timeout)
@@ -257,7 +275,7 @@ def evaluate(config, record, frames):
 def combine(store, symbol):
     """One decision input per symbol from all active versions; the owning version decides its exit."""
     active = active_versions(store)
-    base = {"symbol": symbol, "trading_mode": "loop", "models": [], "expected_return": 0., "eligible": True,
+    base = {"symbol": symbol, "trading_mode": getattr(store, "strategy", "loop"), "models": [], "expected_return": 0., "eligible": True,
             "forecast_signal": "HOLD", "signal": "HOLD", "version": None, "sha256": None, "views": {}}
     views = {}
     for version, record in sorted(active.items()):

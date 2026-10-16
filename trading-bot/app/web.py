@@ -2,7 +2,7 @@ import hmac
 from pathlib import Path
 import psutil
 from flask import Flask, jsonify, request, send_from_directory
-from . import loop, manual
+from . import crypto, loop, manual
 from .allocation import BOTS, NAMES, allocation, bot_capital, bot_share, validate
 from .broker import Alpaca, BrokerError
 from .store import utcnow
@@ -18,35 +18,55 @@ def create_app(config, store, broker_factory=Alpaca):
     contexts = {cfg.trading_mode: (cfg, state) for cfg, state in strategy_contexts(config, store)}
     parallel = config.trading_mode == "both"
 
+    def loop_bots():
+        """The stock and the crypto trading-loop share one dashboard section."""
+        return [(mode, *contexts[mode]) for mode in ("loop", "crypto_loop") if mode in contexts]
+
     def loop_state(equity):
         if "loop" not in contexts:
             return None
         cfg, state = contexts["loop"]
-        active = loop.active_versions(state)
         versions = loop.catalogue(cfg)
+        running, halts, peaks = [], [], []
         for version in versions:
-            version["active"] = version["version"] in active
-        running = []
-        for name, record in sorted(active.items()):
-            results = state.get(f"loop_results:{name}") or {}
-            fresh = results.get("sha256") == record["sha256"]
-            rows = []
-            for symbol in loop.version_symbols(cfg, state, record):
-                item = (results.get("symbols") or {}).get(symbol) if fresh else None
-                decision = state.get(f"forecast:{symbol}") or {}
-                rows.append({"symbol": symbol, "result": item, "action": decision.get("action"),
-                             "reason": decision.get("reason"), "position": decision.get("position"),
-                             "own": store.owner(symbol) in (None, "manual") and bool((decision.get("position") or {}).get("qty"))})
-            running.append({"version": name, "symbol": record["symbol"], "activated_at": record.get("activated_at"),
-                            "computed_at": results.get("at") if fresh else None, "error": state.get(f"loop_error:{name}"),
-                            "green": sum(1 for r in rows if ((r["result"] or {}).get("test") or {}).get("gruen")), "rows": rows})
-        peak = state.get("equity_peak")
+            version["active"] = False
+            version["bot_available"] = version["bot"] in contexts
+        for mode, mode_cfg, mode_state in loop_bots():
+            active = loop.active_versions(mode_state)
+            for version in versions:
+                version["active"] = version["active"] or version["version"] in active
+            for name, record in sorted(active.items()):
+                results = mode_state.get(f"loop_results:{name}") or {}
+                fresh = results.get("sha256") == record["sha256"]
+                rows = []
+                for symbol in loop.version_symbols(mode_cfg, mode_state, record):
+                    item = (results.get("symbols") or {}).get(symbol) if fresh else None
+                    decision = mode_state.get(f"forecast:{symbol}") or {}
+                    rows.append({"symbol": symbol, "result": item, "action": decision.get("action"),
+                                 "reason": decision.get("reason"), "position": decision.get("position"),
+                                 "own": store.owner(symbol) in (None, "manual") and bool((decision.get("position") or {}).get("qty"))})
+                running.append({"version": name, "bot": mode, "symbol": record["symbol"], "activated_at": record.get("activated_at"),
+                                "computed_at": results.get("at") if fresh else None, "error": mode_state.get(f"loop_error:{name}"),
+                                "green": sum(1 for r in rows if ((r["result"] or {}).get("test") or {}).get("gruen")), "rows": rows})
+            halts.append(mode_state.get("halt"))
+            peaks.append(mode_state.get("equity_peak"))
+        peak = max((p for p in peaks if p), default=None)
         return {"available": loop.available(cfg), "folder": str(cfg.loop_dir or ""), "rules": loop.risk_rules(cfg),
-                "versions": versions, "running": running, "errors": loop.errors(cfg), "halt": state.get("halt"),
+                "versions": versions, "running": running, "errors": loop.errors(cfg), "halt": next((h for h in halts if h), None),
                 "peak": peak, "drawdown": (peak - equity) / peak * 100 if peak and equity else None,
                 "entries_enabled": state.get("entries_enabled", False),
                 "retest": state.get("loop_retest"), "retest_requested": bool(state.get("loop_retest_requested")),
                 "retest_hour": loop.RETEST_HOUR}
+
+    def crypto_state():
+        if "crypto" not in contexts:
+            return None
+        cfg, state = contexts["crypto"]
+        return {"universe": state.get("crypto_universe") or {}, "status": state.get("crypto_scan_status"),
+                "rules": {"min_history_days": cfg.crypto_min_history_days, "min_dollar_volume": cfg.crypto_min_dollar_volume,
+                          "max_day_move": cfg.crypto_max_day_move, "max_month_gain": cfg.crypto_max_month_gain,
+                          "max_spread": cfg.crypto_max_spread, "volume_share": cfg.crypto_volume_share,
+                          "cost_bps": cfg.crypto_cost_bps, "entry_hours": crypto.ENTRY_HOURS}}
 
     def manual_state(account):
         if not parallel or not account:
@@ -148,10 +168,13 @@ def create_app(config, store, broker_factory=Alpaca):
             any_entries_enabled=any(st.get("entries_enabled", False) for _, st in contexts.values()),
             allocation={**allocation(config, store), "budget": budget, "gross_fraction": config.gross_fraction,
                         "position_fraction": config.position_fraction} if parallel else None,
-            loop=loop_state(equity), manual=manual_state(account),
+            loop=loop_state(equity), manual=manual_state(account), crypto=crypto_state(),
             at=utcnow(), mode="paper" if cfg.paper else "live", trading_mode=cfg.trading_mode, configured=cfg.configured,
-            universe=state_store.get("universe", {"symbols": active_symbols(cfg, state_store), "candidates": []}),
-            scan_status=state_store.get("scan_status", {"status": "waiting" if cfg.universe_mode == "market" else "watchlist"}),
+            # The crypto bots show their coin check instead of the stock scanner.
+            universe=({"symbols": active_symbols(cfg, state_store), "candidates": []} if cfg.crypto else
+                      state_store.get("universe", {"symbols": active_symbols(cfg, state_store), "candidates": []})),
+            scan_status=state_store.get("crypto_scan_status" if cfg.crypto else "scan_status",
+                                        {"status": "waiting" if cfg.universe_mode == "market" or cfg.crypto else "watchlist"}),
             entries_enabled=state_store.get("entries_enabled", False), engine=state_store.get("engine", {"status": "starting"}),
             account=account, training=state_store.get("training", {"status": "waiting for data"}),
             research_status=state_store.get("research_status", {"status": "waiting"}),
@@ -192,7 +215,7 @@ def create_app(config, store, broker_factory=Alpaca):
                 return jsonify(error="Wait for a successful Alpaca account connection"), 409
             if store.get("account", {}).get("loss_halt"):
                 return jsonify(error="Daily loss halt is active"), 409
-            if selected == "loop" and contexts["loop"][1].get("halt"):
+            if selected in ("loop", "crypto_loop") and contexts[selected][1].get("halt"):
                 return jsonify(error="Drawdown-Stopp aus risiko.py aktiv. Erst im Trading-Loop den Höchststand zurücksetzen."), 409
             for cfg, state in targets:
                 # A drawdown-halted trading-loop stays paused when enabling all bots.
@@ -236,7 +259,7 @@ def create_app(config, store, broker_factory=Alpaca):
             return jsonify(error="Expected a JSON object"), 400
         cfg, state = contexts["loop"]
         action, version = body.get("action"), body.get("version")
-        active = loop.active_versions(state)
+        bot = "loop"
         if action == "activate":
             path = loop.strategy_path(cfg, version)
             if not path:
@@ -244,6 +267,12 @@ def create_app(config, store, broker_factory=Alpaca):
             info = loop.version_info(cfg, path)
             if not info["tradable"]:
                 return jsonify(error=f"{version} kann nicht aktiviert werden: {info['note'] if info['status'] != 'gruen' else loop.risk_rules(cfg)['message']}"), 409
+            bot = info["bot"]
+            if bot not in contexts:
+                return jsonify(error=f"{version} handelt Krypto; die Krypto-Bots sind ausgeschaltet (CRYPTO_ENABLED=false)"), 409
+            # Stock versions run in the trading-loop, coin versions in the crypto trading-loop.
+            state = contexts[bot][1]
+            active = loop.active_versions(state)
             # A newer version of the same idea replaces the older one and takes over its positions.
             replaced = [v for v in active if loop.idea(v) == info["idea"] and v != version]
             for old in replaced:
@@ -251,22 +280,29 @@ def create_app(config, store, broker_factory=Alpaca):
             if version not in active and len(active) >= MAX_LOOP_STRATEGIES:
                 return jsonify(error=f"Höchstens {MAX_LOOP_STRATEGIES} Strategien gleichzeitig"), 409
             active[version] = {"version": version, "symbol": info["symbol"], "sha256": info["sha256"], "activated_at": utcnow()}
-            target = "die Aktienliste der Bots plus deine eigenen Aktien" if info["symbol"] == loop.LIST else info["symbol"]
+            target = {loop.LIST: "die Aktienliste der Bots plus deine eigenen Aktien",
+                      loop.CRYPTO_LIST: "die Coins, die die Krypto-Sicherheitsregeln bestehen"}.get(info["symbol"], info["symbol"])
             message = f"{version} handelt {target} im Paper-Modus" + (f" (ersetzt {', '.join(replaced)})" if replaced else "")
             if info["symbol"] == loop.LIST:
                 message += ". Jede Aktie wird vor dem Kauf einzeln getestet; deine eigenen Aktien bekommen nur Signale"
+            elif info["symbol"] == loop.CRYPTO_LIST:
+                message += ". Jeder Coin wird vor dem Kauf einzeln getestet"
             else:
                 owner = store.owner(info["symbol"])
-                if owner not in (None, "loop"):
-                    message += f". {info['symbol']} gehört gerade dem {NAMES.get(owner, owner)}; gekauft wird erst, wenn die Aktie frei ist"
+                if owner not in (None, bot):
+                    message += f". {info['symbol']} gehört gerade dem {NAMES.get(owner, owner)}; gekauft wird erst, wenn der Wert frei ist"
         elif action == "deactivate":
-            if version not in active:
+            bot = next((mode for mode, _, mode_state in loop_bots() if version in loop.active_versions(mode_state)), None)
+            if not bot:
                 return jsonify(error="Diese Version ist nicht aktiv"), 404
+            state = contexts[bot][1]
+            active = loop.active_versions(state)
             del active[version]
             message = f"{version} abgeschaltet; ihre offenen Positionen werden geschlossen"
         elif action == "reset_peak":
-            state.set("halt", None)
-            state.set("equity_peak", None)
+            for _, _, mode_state in loop_bots():
+                mode_state.set("halt", None)
+                mode_state.set("equity_peak", None)
             store.event("control", {"action": "loop_reset_peak", "strategy": "loop"})
             return jsonify(ok=True, message="Höchststand zurückgesetzt. Einstiege bleiben pausiert, bis du sie einschaltest.")
         elif action == "retest":
@@ -282,7 +318,7 @@ def create_app(config, store, broker_factory=Alpaca):
         else:
             return jsonify(error="Unknown action"), 400
         state.set("loop_strategies", active)
-        store.event("control", {"action": f"loop_{action}", "strategy": "loop", "version": version})
+        store.event("control", {"action": f"loop_{action}", "strategy": bot, "version": version})
         return jsonify(ok=True, message=message)
 
     @app.post("/api/manual/order")
