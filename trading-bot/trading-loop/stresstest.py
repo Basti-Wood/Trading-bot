@@ -4,7 +4,7 @@
 
 Die Strategie-Datei definiert SYMBOL (z. B. "XYZ" für eine Aktie, "BTC/USD" für Krypto oder "LISTE" für die
 Aktienliste der Bots plus die eigenen Aktien, siehe liste.py) und eine Klasse Strategie(backtesting.Strategy).
-Bei "LISTE" wird jede Aktie einzeln getestet; grün, wenn mindestens die Hälfte der Aktien grün ist. Kurse kommen von Alpaca (Aktien: IEX-Daten mit den Schlüsseln aus .env,
+Bei "LISTE" wird jede Aktie einzeln getestet; grün, wenn mindestens MIN_GRUENE_AKTIEN Aktien grün sind. Kurse kommen von Alpaca (Aktien: IEX-Daten mit den Schlüsseln aus .env,
 Krypto: ohne Schlüssel). Ergebnis, Trades und Chart landen in berichte/. Grün oder rot steht in der letzten Zeile.
 """
 import datetime as dt
@@ -28,6 +28,9 @@ JAHRE = 5
 STARTKAPITAL = 100_000
 KOSTEN = 0.001          # 0,1 % pro Order als Puffer für Spread und Gebühren
 MIN_TRADES = 10
+# Bei "LISTE": so viele Aktien müssen einzeln grün sein (bei kürzeren Listen alle). Der Bot kauft ohnehin
+# nur Aktien, deren eigener Test grün ist; mehr als eine verlangt, damit nicht ein Glückstreffer reicht.
+MIN_GRUENE_AKTIEN = 3
 
 
 def lade_strategie(pfad):
@@ -112,8 +115,14 @@ def kennzahlen(stats):
             "gewinnquote": zahl(stats["Win Rate [%]"])}
 
 
+def listen_urteil(gruen, anzahl):
+    noetig = min(MIN_GRUENE_AKTIEN, anzahl)
+    return (f"GRÜN ({gruen} von {anzahl} Aktien grün)" if gruen >= noetig
+            else f"ROT (nur {gruen} von {anzahl} Aktien grün, nötig sind mindestens {noetig})")
+
+
 def listen_test(pfad, modul, berichte):
-    """SYMBOL = "LISTE": jede Aktie der Bot-Liste einzeln testen. Grün, wenn mindestens die Hälfte grün ist."""
+    """SYMBOL = "LISTE": jede Aktie der Bot-Liste einzeln testen. Grün, wenn mindestens MIN_GRUENE_AKTIEN grün sind."""
     import liste
     symbole, eigene, _ = liste.symbole()
     ordner = berichte / pfad.stem
@@ -144,8 +153,7 @@ def listen_test(pfad, modul, berichte):
     if not aktien:
         raise SystemExit("Keine Aktie der Liste ließ sich testen.")
     gruen = sum(1 for a in aktien.values() if a["ergebnis"] == "gruen")
-    ergebnis = (f"GRÜN ({gruen} von {len(aktien)} Aktien grün)" if gruen * 2 >= len(aktien)
-                else f"ROT (nur {gruen} von {len(aktien)} Aktien grün, nötig ist mindestens die Hälfte)")
+    ergebnis = listen_urteil(gruen, len(aktien))
     pd.concat(alle_trades).to_csv(berichte / f"{pfad.stem}_trades.csv", index=False)
     werte = list(aktien.values())
     mittel = lambda key: zahl(sum(a[key] or 0 for a in werte) / len(werte))

@@ -5,6 +5,9 @@ from pathlib import Path
 import re
 
 
+CHILD_MODES = ("loop", "crypto", "crypto_loop")
+
+
 def flag(name, default=False):
     value = os.getenv(name, str(default)).lower().strip()
     if value not in {"true", "false"}:
@@ -77,17 +80,31 @@ class Config:
     # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
     loop_dir: Path = None
     loop_timeout: int = 300
+    # Crypto bots (prediction models and trading-loop strategies on Alpaca coins), only with TRADING_MODE=both.
+    crypto_enabled: bool = False
+    # Alpaca's crypto taker fee is 0.25 % per order (tier 1), more than the stock cost buffer.
+    crypto_cost_bps: float = 25
+    # Safety rules every coin must pass before a crypto bot may buy it (see app/crypto.py).
+    crypto_min_history_days: int = 730
+    crypto_min_dollar_volume: float = 3000
+    crypto_max_day_move: float = .35
+    crypto_max_month_gain: float = 1.
+    crypto_max_spread: float = .01
+    crypto_volume_share: float = .10
+    crypto_exclude: tuple = ()
 
     def __post_init__(self):
         if not self.symbols or len(self.symbols) > 50 or len(set(self.symbols)) != len(self.symbols):
             raise ValueError("Configure 1 to 50 unique US equity/ETF symbols")
-        # "loop" is an internal child strategy of TRADING_MODE=both, never a standalone mode.
-        if self.trading_mode not in {"daily", "daytrade", "both", "loop"} or self.universe_mode not in {"watchlist", "market"}:
+        # "loop" and the crypto bots are internal child strategies of TRADING_MODE=both, never standalone modes.
+        if self.trading_mode not in {"daily", "daytrade", "both", *CHILD_MODES} or self.universe_mode not in {"watchlist", "market"}:
             raise ValueError("TRADING_MODE must be daily/daytrade/both; UNIVERSE_MODE must be watchlist/market")
-        if self.trading_mode == "loop" and not self.coordinated:
-            raise ValueError("The trading-loop strategy runs only inside TRADING_MODE=both")
-        if self.trading_mode in {"daytrade", "both", "loop"} and not self.paper:
-            raise ValueError("The daytrade and trading-loop strategies are currently paper-only")
+        if self.trading_mode in CHILD_MODES and not self.coordinated:
+            raise ValueError("The trading-loop and crypto strategies run only inside TRADING_MODE=both")
+        if self.trading_mode in {"daytrade", "both", *CHILD_MODES} and not self.paper:
+            raise ValueError("The daytrade, trading-loop and crypto strategies are currently paper-only")
+        if any(not re.fullmatch(r"[A-Z0-9]{2,15}", s) for s in self.crypto_exclude):
+            raise ValueError("CRYPTO_EXCLUDE lists coin symbols without /USD, e.g. DOGE,SHIB")
         if any(not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", s) for s in self.symbols):
             raise ValueError("Only US equity/ETF symbols are supported")
         if self.feed not in {"iex", "sip"}:
@@ -118,7 +135,10 @@ class Config:
                   "daytrade_close_minutes": (5, 60), "daytrade_capital_share": (.05, .95),
                   "strategy_fraction": (.05, 1), "min_votes": (2, 4),
                   "daytrade_run_minutes": (5, 240), "daytrade_trail_trigger": (.001, .05),
-                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 600)}
+                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 600),
+                  "crypto_cost_bps": (1, 100), "crypto_min_history_days": (365, 1800),
+                  "crypto_min_dollar_volume": (0, 100000000), "crypto_max_day_move": (.05, 1),
+                  "crypto_max_month_gain": (.1, 10), "crypto_max_spread": (.001, .05), "crypto_volume_share": (.01, 1)}
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
@@ -137,7 +157,13 @@ class Config:
 
     @property
     def loop(self):
-        return self.trading_mode == "loop"
+        """Trades tested trading-loop strategy files (stocks or crypto)."""
+        return self.trading_mode in {"loop", "crypto_loop"}
+
+    @property
+    def crypto(self):
+        """Trades Alpaca coins around the clock instead of US stocks."""
+        return self.trading_mode in {"crypto", "crypto_loop"}
 
     @property
     def configured(self):
@@ -211,4 +237,13 @@ class Config:
             # Relative paths start at the trading-bot folder, whatever the working directory.
             loop_dir=(Path(__file__).resolve().parent.parent / os.getenv("TRADING_LOOP_DIR", "trading-loop")).resolve(),
             loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "300")),
+            crypto_enabled=flag("CRYPTO_ENABLED", True),
+            crypto_cost_bps=float(os.getenv("CRYPTO_COST_BPS_PER_SIDE", "25")),
+            crypto_min_history_days=int(os.getenv("CRYPTO_MIN_HISTORY_DAYS", "730")),
+            crypto_min_dollar_volume=float(os.getenv("CRYPTO_MIN_DOLLAR_VOLUME", "3000")),
+            crypto_max_day_move=float(os.getenv("CRYPTO_MAX_DAY_MOVE", ".35")),
+            crypto_max_month_gain=float(os.getenv("CRYPTO_MAX_MONTH_GAIN", "1")),
+            crypto_max_spread=float(os.getenv("CRYPTO_MAX_SPREAD", ".01")),
+            crypto_volume_share=float(os.getenv("CRYPTO_MAX_VOLUME_SHARE", ".10")),
+            crypto_exclude=tuple(s.strip().upper().removesuffix("/USD") for s in os.getenv("CRYPTO_EXCLUDE", "").split(",") if s.strip()),
             origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()))

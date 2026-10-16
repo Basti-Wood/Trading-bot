@@ -44,7 +44,9 @@ def create_app(config, store, broker_factory=Alpaca):
         return {"available": loop.available(cfg), "folder": str(cfg.loop_dir or ""), "rules": loop.risk_rules(cfg),
                 "versions": versions, "running": running, "errors": loop.errors(cfg), "halt": state.get("halt"),
                 "peak": peak, "drawdown": (peak - equity) / peak * 100 if peak and equity else None,
-                "entries_enabled": state.get("entries_enabled", False)}
+                "entries_enabled": state.get("entries_enabled", False),
+                "retest": state.get("loop_retest"), "retest_requested": bool(state.get("loop_retest_requested")),
+                "retest_hour": loop.RETEST_HOUR}
 
     def manual_state(account):
         if not parallel or not account:
@@ -267,6 +269,16 @@ def create_app(config, store, broker_factory=Alpaca):
             state.set("equity_peak", None)
             store.event("control", {"action": "loop_reset_peak", "strategy": "loop"})
             return jsonify(ok=True, message="Höchststand zurückgesetzt. Einstiege bleiben pausiert, bis du sie einschaltest.")
+        elif action == "retest":
+            if version is not None and not loop.strategy_path(cfg, version):
+                return jsonify(error="Diese Strategie-Version gibt es nicht"), 404
+            if state.get("loop_retest_requested") or (state.get("loop_retest") or {}).get("status") == "running":
+                return jsonify(error="Es läuft schon ein Stresstest. Warte, bis er fertig ist."), 409
+            if not loop.retest_targets(cfg, version):
+                return jsonify(error="Keine getestete, unveränderte Version zum Neutesten"), 409
+            state.set("loop_retest_requested", {"version": version, "at": utcnow()})
+            store.event("control", {"action": "loop_retest", "strategy": "loop", "version": version})
+            return jsonify(ok=True, message=f"{version or 'Alle getesteten Versionen'}: Stresstest startet. Das dauert ein paar Minuten.")
         else:
             return jsonify(error="Unknown action"), 400
         state.set("loop_strategies", active)

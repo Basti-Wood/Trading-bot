@@ -8,7 +8,7 @@
   "max_drawdown": -35.52,
   "trades": 93,
   "ergebnis": "rot",
-  "urteil": "ROT (nur 0 von 21 Aktien grün, nötig ist mindestens die Hälfte)",
+  "urteil": "ROT (nur 0 von 21 Aktien grün, nötig sind mindestens 3)",
   "aktien": {
     "FMC": {
       "rendite": -13.58,
@@ -268,5 +268,5 @@
     "max_drawdown": 10
   },
   "sha256": "ace47bb5fafc3577bf1168179b793a9e9c1441f2bd279f46b204d1b3bef383c2",
-  "getestet_am": "2026-10-16T09:29"
+  "getestet_am": "2026-10-16T14:46"
 }

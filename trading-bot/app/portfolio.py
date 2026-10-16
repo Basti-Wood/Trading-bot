@@ -6,6 +6,7 @@ from dataclasses import replace
 import threading
 import time
 
+from . import loop
 from .allocation import bot_share
 from .engine import Engine
 from .store import StrategyStore, utcnow
@@ -20,6 +21,9 @@ def strategy_contexts(config, store):
     for mode in STRATEGIES:
         # strategy_fraction is the startup weight; sizing reads the live dashboard weights.
         cfg = replace(config, trading_mode=mode, coordinated=True)
+        if mode == "loop":
+            # Per-symbol tests must see the stress test's window, not the prediction bot's training history.
+            cfg = replace(cfg, history_days=loop.HISTORY_DAYS)
         contexts.append((replace(cfg, strategy_fraction=max(.05, bot_share(cfg, store, mode))), StrategyStore(store, mode)))
     return contexts
 

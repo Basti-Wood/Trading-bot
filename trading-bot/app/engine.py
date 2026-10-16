@@ -36,6 +36,7 @@ class Engine:
         self.forecast_attempts = {}
         self.scan_thread = None
         self.forecast_thread = None
+        self.retest_thread = None
         self.last_scan = 0
         self.playbook_thread = None
         self.last_playbook = None
@@ -55,6 +56,9 @@ class Engine:
             store.set("account_scope", scope)
         # A restart always requires deliberate re-enabling of new entries.
         store.set("entries_enabled", False)
+        retest = store.get("loop_retest") or {}
+        if retest.get("status") == "running":
+            store.set("loop_retest", {**retest, "status": "abgebrochen", "at": utcnow()})
 
     def start(self):
         self.monitor = threading.Thread(target=self.monitor_training, name="training-watchdog", daemon=True)
@@ -183,6 +187,8 @@ class Engine:
         self.scan_thread.start()
 
     def forecast_tick(self, symbols, day):
+        if self.config.loop:
+            self.retest_tick()
         if self.forecast_thread and self.forecast_thread.is_alive():
             return
         if self.config.loop:
@@ -252,6 +258,38 @@ class Engine:
                     self.store.event("error", {"message": str(exc)[:240]})
         self.forecast_thread = threading.Thread(target=work, name="trading-loop-signals", daemon=True)
         self.forecast_thread.start()
+
+    def retest_tick(self, now=None):
+        """Re-run stresstest.py when the dashboard asks, and once a day before the open."""
+        if self.retest_thread and self.retest_thread.is_alive() or not loop.available(self.config):
+            return
+        request = self.store.get("loop_retest_requested")
+        today = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York"))
+        daily = today.hour >= loop.RETEST_HOUR and self.store.get("loop_retest_day") != today.date().isoformat()
+        if not (request or daily):
+            return
+        if request:
+            self.store.set("loop_retest_requested", None)
+        else:
+            self.store.set("loop_retest_day", today.date().isoformat())
+        versions = loop.retest_targets(self.config, (request or {}).get("version"))
+        if not versions:
+            return
+        status = {"status": "running", "trigger": "manuell" if request else "täglich", "versions": versions,
+                  "done": {}, "started_at": utcnow()}
+        self.store.set("loop_retest", status)
+        def work():
+            try:
+                for version in versions:
+                    if self.stop.is_set():
+                        return
+                    self.store.set("loop_retest", {**status, "current": version})
+                    status["done"][version] = loop.retest(self.config, version)
+                self.store.set("loop_retest", {**status, "status": "fertig", "at": utcnow()})
+            except Exception as exc:
+                self.store.set("loop_retest", {**status, "status": "fehler", "message": str(exc)[:240], "at": utcnow()})
+        self.retest_thread = threading.Thread(target=work, name="trading-loop-retest", daemon=True)
+        self.retest_thread.start()
 
     def prediction(self, symbol):
         return loop.combine(self.store, symbol) if self.config.loop else self.store.get(f"prediction:{symbol}")

@@ -1,12 +1,16 @@
 """Trading-loop bot, dashboard budget/weights and manual trading."""
 from dataclasses import replace
+from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import unittest
 
 from app import loop
@@ -163,6 +167,33 @@ class LoopFolderTests(unittest.TestCase):
             loop.evaluate(self.cfg, record, {"AAA": bars(430)})
         with self.assertRaisesRegex(ValueError, "SYMBOL"):
             loop.evaluate(self.cfg, {**record, "sha256": loop.file_hash(path)}, {"AAA": bars(430)})
+
+    @unittest.skipUnless(REAL_STRESSTEST.is_file(), "needs trading-loop/stresstest.py")
+    def test_list_verdict_needs_three_green_stocks_or_the_whole_short_list(self):
+        code = "import stresstest as s; print(s.listen_urteil(2, 21)); print(s.listen_urteil(3, 21)); print(s.listen_urteil(2, 2))"
+        out = subprocess.run([sys.executable, "-c", code], cwd=self.folder, capture_output=True, text=True, encoding="utf-8",
+                             env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        self.assertEqual(out.stdout.splitlines(), ["ROT (nur 2 von 21 Aktien grün, nötig sind mindestens 3)",
+                                                   "GRÜN (3 von 21 Aktien grün)", "GRÜN (2 von 2 Aktien grün)"], out.stderr)
+
+    @unittest.skipUnless(REAL_STRESSTEST.is_file(), "needs trading-loop/stresstest.py")
+    def test_retest_reruns_the_stress_test_and_rewrites_the_report(self):
+        path = add_version(self.folder, "trend_v1", buy_at=100, result="gruen")
+        add_version(self.folder, "trend_v2", result=None)
+        changed = add_version(self.folder, "edit_v1")
+        changed.write_text(changed.read_text(encoding="utf-8") + "\n# edited\n", encoding="utf-8")
+        # Scheduled runs skip untested and edited files; a named version is always allowed.
+        self.assertEqual(loop.retest_targets(self.cfg), ["trend_v1"])
+        self.assertEqual(loop.retest_targets(self.cfg, "trend_v2"), ["trend_v2"])
+        self.assertEqual(loop.retest_targets(self.cfg, "../risiko"), [])
+        # Prices cached today: stresstest.py does not download.
+        (self.folder / "daten").mkdir()
+        loop.daily_frame(bars(430)).to_csv(self.folder / "daten" / "AAA_1Day.csv")
+        self.assertEqual(loop.retest(self.cfg, "trend_v1"), "ROT (weniger als 10 Trades)")
+        report = json.loads((self.folder / "berichte" / "trend_v1.json").read_text(encoding="utf-8"))
+        self.assertEqual((report["ergebnis"], report["sha256"], report["trades"]), ("rot", loop.file_hash(path), 1))
+        self.assertEqual(path.read_text(encoding="utf-8"), STRATEGY.format(name="trend_v1", symbol="AAA", buy_at=100, sell_at=0))
+        self.assertTrue(loop.retest(self.cfg, "nope_v1").startswith("Fehler"))
 
     def test_error_database_is_read_only_and_ordered(self):
         db = sqlite3.connect(self.folder / "fehler.db")
@@ -326,6 +357,33 @@ class LoopEngineTests(PortfolioCase):
         self.assertFalse(self.loop.store.get("entries_enabled"))
         self.assertEqual(client.post("/api/loop", json={"action": "reset_peak"}, headers=headers).status_code, 200)
         self.assertIsNone(self.loop.store.get("halt"))
+
+    def test_stress_tests_rerun_once_a_day_before_the_open_and_on_request(self):
+        self.assertEqual(self.loop.config.history_days, loop.HISTORY_DAYS)
+        self.assertNotEqual(self.daily.config.history_days, loop.HISTORY_DAYS)
+        add_version(self.folder, "trend_v1", result="rot")
+        calls = []
+        client = create_app(self.cfg, self.store).test_client()
+        post = lambda **body: client.post("/api/loop", json={"action": "retest", **body}, headers={"X-Bot-Control": "dashboard"})
+        with patch.object(loop, "retest", side_effect=lambda cfg, version: calls.append(version) or "GRÜN"):
+            self.loop.retest_tick(datetime(2026, 10, 16, 11, 0, tzinfo=timezone.utc))  # 07:00 New York
+            self.assertIsNone(self.loop.retest_thread)
+            morning = datetime(2026, 10, 16, 12, 30, tzinfo=timezone.utc)
+            self.loop.retest_tick(morning)
+            self.loop.retest_thread.join(5)
+            self.assertEqual(calls, ["trend_v1"])
+            self.assertEqual(self.loop.store.get("loop_retest")["status"], "fertig")
+            self.loop.retest_tick(morning)
+            self.loop.retest_thread.join(5)
+            self.assertEqual(calls, ["trend_v1"])  # Once per day.
+            self.assertEqual(post(version="nope_v1").status_code, 404)
+            self.assertEqual(post().status_code, 200)
+            self.assertEqual(post().status_code, 409)
+            self.loop.retest_tick(morning)
+            self.loop.retest_thread.join(5)
+            self.assertEqual(calls, ["trend_v1", "trend_v1"])
+        state = client.get("/api/state").get_json()["loop"]
+        self.assertEqual((state["retest"]["trigger"], state["retest"]["done"]), ("manuell", {"trend_v1": "GRÜN"}))
 
     def test_loop_never_trains_or_requests_news(self):
         self.loop.store.set("loop_strategies", {"AAA": {"version": "x_v1", "symbol": "AAA", "sha256": "0"}})

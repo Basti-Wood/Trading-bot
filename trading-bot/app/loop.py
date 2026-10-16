@@ -5,12 +5,14 @@ bots use (the scanner shortlist or watchlist) plus the user's own holdings. Only
 stress test is green, whose file is unchanged since that test and whose test used the current
 risiko.py values may be activated. The bot then re-runs the same strategy per symbol in an
 isolated subprocess: a symbol may be bought only if its own five-year test is green, and the
-pending orders after the last bar are the signal.
+pending orders after the last bar are the signal. stresstest.py itself is re-run daily and on request,
+so a version's verdict follows the moving five-year window; strategy files are never changed.
 """
 import ast
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import subprocess
@@ -25,6 +27,13 @@ STOCK = re.compile(r"[A-Z][A-Z0-9.\-]{0,9}")
 LIST = "LISTE"
 RULES = {"STOP_LOSS_PROZENT": "stop_loss", "MAX_DRAWDOWN_PROZENT": "max_drawdown"}
 BOT_ROOT = Path(__file__).resolve().parent.parent
+# stresstest.py loads 5 years up to yesterday; the bot's per-symbol tests use the same window.
+HISTORY_DAYS = 5 * 365 + 3
+# New York time: yesterday's daily candle is final and the market is not open yet.
+RETEST_HOUR = 8
+RETEST_TIMEOUT = 1200
+# Re-run on schedule: tested versions whose file is unchanged (edited files may be work in progress).
+RETESTABLE = ("gruen", "rot", "veraltet")
 
 
 def available(config):
@@ -116,6 +125,42 @@ def catalogue(config):
     files = sorted(folder.glob("*.py")) if folder.is_dir() else []
     versions = [version_info(config, p, rules) for p in files if VERSION.fullmatch(p.stem)]
     return sorted(versions, key=lambda v: (v["idea"], v["number"]))
+
+
+def retest_targets(config, version=None):
+    """One named version (any status), or every version due for the scheduled re-run."""
+    if version is not None:
+        path = strategy_path(config, version)
+        return [path.stem] if path else []
+    return [v["version"] for v in catalogue(config) if v["status"] in RETESTABLE]
+
+
+def loop_python(config):
+    """stresstest.py needs alpaca-py, which only the trading-loop's own .venv has."""
+    for name in ("Scripts/python.exe", "bin/python"):
+        path = config.loop_dir / ".venv" / name
+        if path.is_file():
+            return str(path)
+    return sys.executable
+
+
+def retest(config, version):
+    """Run stresstest.py for one version, exactly as the agents do; returns its verdict line."""
+    path = strategy_path(config, version)
+    if not path:
+        return "Fehler: Strategie-Datei fehlt"
+    # liste.py reads the stock list from this bot's database, wherever DATA_DIR points.
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "TRADING_BOT_DB": str((config.data_dir / "bot.sqlite3").resolve())}
+    try:
+        result = subprocess.run([loop_python(config), "stresstest.py", str(path)], cwd=config.loop_dir, env=env,
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=RETEST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"Fehler: Stresstest dauerte länger als {RETEST_TIMEOUT // 60} min"
+    verdict = next((l for l in reversed(result.stdout.splitlines()) if l.startswith("ERGEBNIS:")), None)
+    if result.returncode == 0 and verdict:
+        return verdict.removeprefix("ERGEBNIS:").strip()
+    detail = (result.stderr.strip().splitlines() or result.stdout.strip().splitlines() or ["unbekannter Fehler"])[-1]
+    return f"Fehler: {detail[:200]}"
 
 
 def errors(config, limit=10):
