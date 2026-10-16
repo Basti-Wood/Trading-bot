@@ -7,10 +7,13 @@ services:
     environment:
       HOST: 0.0.0.0
       DATA_DIR: /app/data
+      TRADING_LOOP_DIR: /app/trading-loop
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:1337:1337"
     volumes:
       - ./data:/app/data
+      # Strategies, reports, risiko.py and fehler.db; read-only, the bot never changes them.
+      - ./trading-loop:/app/trading-loop:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cpus: 2.0

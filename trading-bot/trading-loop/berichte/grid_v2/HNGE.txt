@@ -1,0 +1,36 @@
+Start                     2025-05-22 04:00:00
+End                       2026-10-15 04:00:00
+Duration                    511 days 00:00:00
+Exposure Time [%]                    19.60227
+Equity Final [$]                  91072.58782
+Equity Peak [$]                  101185.21583
+Commissions [$]                     944.39168
+Return [%]                           -8.92741
+Buy & Hold Return [%]               131.25069
+Return (Ann.) [%]                    -6.49336
+Volatility (Ann.) [%]                 3.46274
+CAGR [%]                             -6.46561
+Sharpe Ratio                         -1.87521
+Sortino Ratio                         -1.9638
+Calmar Ratio                         -0.59973
+Alpha [%]                           -10.90695
+Beta                                  0.01508
+Max. Drawdown [%]                    -10.8271
+Avg. Drawdown [%]                     -2.9986
+Max. Drawdown Duration      360 days 00:00:00
+Avg. Drawdown Duration       93 days 00:00:00
+# Trades                                   60
+Win Rate [%]                         38.33333
+Best Trade [%]                        6.01879
+Worst Trade [%]                      -6.37622
+Avg. Trade [%]                       -1.92563
+Max. Trade Duration          16 days 00:00:00
+Avg. Trade Duration           3 days 00:00:00
+Profit Factor                         0.31561
+Expectancy [%]                       -1.86093
+SQN                                  -3.84517
+Kelly Criterion                      -0.81229
+_strategy                           Strategie
+_equity_curve                             ...
+_trades                       Size  EntryB...
+dtype: object

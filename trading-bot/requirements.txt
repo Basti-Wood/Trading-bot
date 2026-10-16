@@ -8,3 +8,5 @@ psutil>=6,<8
 waitress>=3,<4
 joblib>=1.4,<2
 threadpoolctl>=3.5,<4
+# Runs trading-loop strategy files exactly as their stress test did.
+backtesting>=0.6.6,<0.7

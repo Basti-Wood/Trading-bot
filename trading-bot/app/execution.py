@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import hashlib
 import math
 import time
+from .allocation import BOTS, bot_capital, bot_share
 from .broker import BrokerError
 from .store import utcnow
 
@@ -99,8 +100,11 @@ class Executor:
                 return "Position or pending order already exists"
             if cfg.coordinated and owned:
                 return "Waiting for confirmed flat position before releasing strategy ownership"
-            if any(o["side"] == "buy" for o in self.store.unresolved_orders()):
+            # The user's own pending orders (e.g. a resting limit buy) never block the bots.
+            if any(o["side"] == "buy" and o.get("strategy") != "manual" for o in self.store.unresolved_orders()):
                 return "An entry outcome is unresolved; waiting for reconciliation"
+            if cfg.loop and not stop_fraction:
+                return "Stop-Loss aus risiko.py fehlt; Einstieg blockiert"
             if cfg.intraday:
                 counted = [p for p in positions if not cfg.coordinated or self.store.get(f"owned:{p['symbol']}", False)]
                 if len([p for p in counted if float(p["qty"]) != 0]) >= cfg.daytrade_max_positions:
@@ -116,12 +120,16 @@ class Executor:
             price = reference_price if queued_for_open else self.broker.quote(symbol)[1] if cfg.intraday else self.broker.latest_price(symbol)
             if not isinstance(price, (int, float)) or not math.isfinite(price) or not 0 < price < 1000000:
                 return "Invalid reference price; entry blocked"
-            capital = cfg.sizing_capital(float(account["equity"]))
-            strategy_capital = capital * cfg.strategy_fraction
-            gross = sum(abs(float(p["market_value"])) for p in positions)
+            capital = bot_capital(cfg, self.store, float(account["equity"]))
+            strategy_capital = capital * bot_share(cfg, self.store)
+            if strategy_capital <= 0:
+                return "No budget: this bot's weight is 0%"
+            # In parallel mode the user's own holdings live outside the bots' budget.
+            gross = sum(abs(float(p["market_value"])) for p in positions
+                        if not cfg.coordinated or self.store.owner(p["symbol"]) in BOTS)
             strategy_gross = sum(abs(float(p["market_value"])) for p in positions if self.store.get(f"owned:{p['symbol']}", False))
             # If any entry is pending, wait for a fresh account snapshot before allocating again.
-            if any(o["side"] == "buy" for o in orders):
+            if any(o["side"] == "buy" and not o.get("client_order_id", "").startswith("manual-") for o in orders):
                 return "Pending buy order; waiting for updated exposure"
             budget = min(strategy_capital * cfg.position_fraction, capital * cfg.gross_fraction - gross,
                          strategy_capital * cfg.gross_fraction - strategy_gross,
@@ -145,20 +153,29 @@ class Executor:
                 if qty * limit < 1:
                     return "Allocation is below Alpaca's $1 minimum order"
             side = "buy"
-            # A caller-supplied stop may only tighten the configured loss limit.
-            stop = min(stop_fraction, cfg.effective_stop) if stop_fraction else cfg.effective_stop
-            target = target_fraction or cfg.effective_take_profit
+            if cfg.loop:
+                # Trading-loop strategies exit by their own rules; risiko.py sets the only stop.
+                stop, target = stop_fraction, None
+            else:
+                # A caller-supplied stop may only tighten the configured loss limit.
+                stop = min(stop_fraction, cfg.effective_stop) if stop_fraction else cfg.effective_stop
+                target = target_fraction or cfg.effective_take_profit
             payload = {"symbol": symbol, "side": side, "qty": format(qty, "f").rstrip("0").rstrip("."), "type": "limit",
                        "limit_price": f"{limit:.2f}", "time_in_force": "day", "extended_hours": False}
             # Without broker-side legs, the engine enforces these levels on every poll.
             guard = {"stop": stop, "target": target} if fractional else None
-            if not fractional:
+            if not fractional and target is None:
+                payload.update({"order_class": "oto", "stop_loss": {"stop_price": f"{price * (1 - stop):.2f}"}})
+            elif not fractional:
                 payload.update({"order_class": "bracket",
                                 "stop_loss": {"stop_price": f"{price * (1 - stop):.2f}"},
                                 "take_profit": {"limit_price": f"{price * (1 + target):.2f}"}})
         # Include account/mode to prevent cross-account journal collisions, without exposing keys.
         scope = hashlib.sha256((self.broker.base + cfg.api_key).encode()).hexdigest()[:8]
         base_id = f"ensemble-{scope}-{session}-{symbol}-{side}"
+        if cfg.loop:
+            # Distinct from daily IDs so both bots can trade a symbol on the same day.
+            base_id = f"ensemble-{scope}-loop-{session}-{symbol}-{side}"
         if cfg.intraday:
             if side == "buy":
                 suffix = str(len(self.store.session_entries(symbol, session)) + 1)

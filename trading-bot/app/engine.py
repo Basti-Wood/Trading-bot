@@ -14,9 +14,10 @@ from .decisions import position_context, position_decision
 from .models import train_worker, predict, strategy_signature
 from .feedback import capture_forecast, resolve_outcomes
 from .daytrade import TREND_EXITS, baseline, best, bracket, exit_signal, fresh, playbook, session_open
+from . import loop
 from .research import Research, ballots, combine
 from .store import utcnow
-from .universe import active_symbols, monitored_symbols, scan, entries_ready
+from .universe import active_symbols, monitored_symbols, scan, entries_ready, watched_symbols
 
 
 class Engine:
@@ -38,6 +39,8 @@ class Engine:
         self.last_scan = 0
         self.playbook_thread = None
         self.last_playbook = None
+        self.sessions = set()
+        self.rules = None
         previous_mode = store.get("trading_mode", "daily")
         if not config.coordinated and store.get("parallel_enabled", False):
             raise ValueError("This journal contains parallel strategies; keep TRADING_MODE=both to monitor both")
@@ -78,6 +81,8 @@ class Engine:
             self.stop.wait(2)
 
     def training_tick(self, allow_start=True):
+        if self.config.loop:
+            return  # Trading-loop strategies are tested in the trading-loop folder, not trained here.
         if self.trainer:
             if self.trainer.is_alive():
                 try:
@@ -116,9 +121,10 @@ class Engine:
             self.training_started = time.monotonic()
 
     def research_tick(self, forecasts):
-        if self.config.intraday:
+        if self.config.intraday or self.config.loop:
             # Five-minute horizons decide on prediction models and setups only.
-            status = "not used for day trading; prediction models and setups decide"
+            status = ("not used by the trading-loop; tested strategy rules decide" if self.config.loop
+                      else "not used for day trading; prediction models and setups decide")
             if self.store.get("research_status", {}).get("status") != status:
                 self.store.set("research_status", {"status": status})
             return
@@ -161,7 +167,7 @@ class Engine:
         self.research_thread.start()
 
     def scan_tick(self):
-        if self.config.coordinated and self.config.intraday:
+        if self.config.coordinated and self.config.trading_mode != "daily" or self.config.loop:
             return
         if self.config.universe_mode != "market" or self.scan_thread and self.scan_thread.is_alive():
             return
@@ -179,6 +185,8 @@ class Engine:
     def forecast_tick(self, symbols, day):
         if self.forecast_thread and self.forecast_thread.is_alive():
             return
+        if self.config.loop:
+            return self.loop_tick()
         # Refresh daily inputs after session close as well as before the open.
         slot = int(time.time() // (300 if self.config.intraday else 1800))
         # Bound the in-memory cache even as discovery rotates through new stocks.
@@ -212,6 +220,82 @@ class Engine:
         self.forecast_thread = threading.Thread(target=work, name="forecasts", daemon=True)
         self.forecast_thread.start()
 
+    def loop_tick(self):
+        """Test and signal each activated version on its symbols, at most every 30 minutes."""
+        slot = int(time.time() // 1800)
+        versions = loop.active_versions(self.store)
+        plans = {v: loop.version_symbols(self.config, self.store, r) for v, r in versions.items()}
+        self.cached = {v: k for v, k in self.cached.items() if v in versions}
+        def work():
+            broker, frames = Alpaca(self.config), {}
+            for version, record in versions.items():
+                key = (slot, record["sha256"], tuple(plans[version]))
+                if self.stop.is_set():
+                    return
+                if self.cached.get(version) == key or time.time() - self.forecast_attempts.get(version, 0) < 60:
+                    continue
+                self.forecast_attempts[version] = time.time()
+                for symbol in plans[version]:
+                    if symbol not in frames:
+                        try:
+                            frames[symbol] = broker.bars(symbol)
+                        except Exception as exc:
+                            frames[symbol] = None
+                            self.store.event("error", {"symbol": symbol, "message": "Trading-Loop: " + str(exc)[:200]})
+                try:
+                    usable = {s: frames[s] for s in plans[version] if frames.get(s) is not None}
+                    self.store.set(f"loop_results:{version}", loop.evaluate(self.config, record, usable))
+                    self.cached[version] = key
+                    self.store.set(f"loop_error:{version}", None)
+                except Exception as exc:
+                    self.store.set(f"loop_error:{version}", {"message": str(exc)[:240], "at": utcnow()})
+                    self.store.event("error", {"message": str(exc)[:240]})
+        self.forecast_thread = threading.Thread(target=work, name="trading-loop-signals", daemon=True)
+        self.forecast_thread.start()
+
+    def prediction(self, symbol):
+        return loop.combine(self.store, symbol) if self.config.loop else self.store.get(f"prediction:{symbol}")
+
+    def loop_risk(self, equity, owned_any):
+        """risiko.py: stop per trade and the maximum drawdown from the account's peak."""
+        rules = loop.risk_rules(self.config)
+        if rules["ok"]:
+            self.store.set("risk_rules", rules)
+        # Invalid edits never remove protection from open positions: keep the last valid stop.
+        self.rules = rules if rules["ok"] else {**(self.store.get("risk_rules") or rules), "ok": False, "message": rules["message"]}
+        if not (self.store.get("loop_strategies") or owned_any):
+            self.store.set("equity_peak", None)
+            return self.store.get("halt")
+        peak = max(float(self.store.get("equity_peak") or 0), equity)
+        self.store.set("equity_peak", peak)
+        drawdown = (peak - equity) / peak * 100 if peak > 0 else 0.
+        limit = self.rules.get("max_drawdown")
+        if limit and drawdown >= limit and not self.store.get("halt"):
+            self.store.set("halt", {"at": utcnow(), "drawdown": round(drawdown, 2), "limit": limit, "peak": peak})
+            self.store.set("entries_enabled", False)
+            self.store.event("decision", {"symbol": "ALLE", "action": "SELL", "risk_exit": True,
+                                          "reason": f"Maximaler Drawdown aus risiko.py erreicht ({drawdown:.1f} % ≥ {limit} %); Trading-Loop gestoppt"})
+        return self.store.get("halt")
+
+    def stop_limit(self):
+        if self.config.loop:
+            stop = (self.rules or {}).get("stop_loss")
+            return stop / 100 if stop else self.config.stop_loss
+        return self.config.effective_stop
+
+    def loop_decision(self, forecast, now):
+        signal, reason = forecast["signal"], forecast.get("reason", "")
+        if signal != "BUY":
+            return signal, reason
+        if self.store.get("halt"):
+            return "HOLD", "Drawdown-Stopp aus risiko.py aktiv; keine neuen Käufe"
+        if not (self.rules or {}).get("ok"):
+            return "HOLD", "risiko.py ist unvollständig; keine neuen Käufe"
+        # A buy signal is valid only for the session right after its bar, like the backtest's next open.
+        if forecast.get("target_session") not in self.sessions:
+            return "HOLD", "Kaufsignal gilt nicht für die aktuelle Handelssitzung"
+        return signal, reason
+
     def stale_forecast(self, forecast, now):
         meta = self.store.get(f"model:{forecast['symbol']}")
         if not meta or meta.get("strategy_signature") != strategy_signature(self.config) or forecast.get("model_version") != meta["version"]:
@@ -225,6 +309,8 @@ class Engine:
     def forecast_decision(self, forecast, now):
         if self.config.intraday:
             return self.daytrade_decision(forecast, now)
+        if self.config.loop:
+            return self.loop_decision(forecast, now)
         stale = self.stale_forecast(forecast, now)
         if stale:
             return "HOLD", stale
@@ -361,6 +447,7 @@ class Engine:
         now = pd.Timestamp(clock["timestamp"])
         local = now.tz_convert("America/New_York")
         queue_session = self.queue_session(clock, now)
+        self.sessions = {s for s in (day if clock["is_open"] else None, queue_session) if s}
         entry_window = local.hour == 9 and 35 <= local.minute <= 59
         flatten = False
         if self.config.intraday:
@@ -374,6 +461,9 @@ class Engine:
         acted = not allow_action
         symbols = monitored_symbols(self.config, self.store, positions, orders)
         self.store.set("monitor_symbols", symbols)
+        halt = None
+        if self.config.loop:
+            halt = self.loop_risk(equity, any(self.store.get(f"owned:{p['symbol']}", False) for p in positions))
         if phase != "decisions":
             for order in orders:
                 if acted or order["side"] != "buy" or not order.get("client_order_id", "").startswith("ensemble-"):
@@ -388,7 +478,7 @@ class Engine:
                     keep_queued = (self.config.queue_daily_orders and
                                    (queue_session is not None and target == queue_session
                                     or clock["is_open"] and target == day and local.hour == 9))
-                    prediction = self.store.get(f"prediction:{order['symbol']}")
+                    prediction = self.prediction(order["symbol"])
                     invalid_queue = (not prediction or prediction.get("target_session") != target
                                      or self.forecast_decision(prediction, now)[0] != "BUY"
                                      or order["symbol"] not in active_symbols(self.config, self.store)
@@ -430,16 +520,20 @@ class Engine:
                     pnl_fraction = float(pos.get("unrealized_plpc") or 0)
                     if loss_breach:
                         exit_reason = "Account daily-loss limit reached"
-                    elif pnl_fraction <= -self.config.effective_stop:
-                        exit_reason = "Position stop-loss reached"
+                    elif pnl_fraction <= -self.stop_limit():
+                        exit_reason = "Position stop-loss reached" + (" (risiko.py)" if self.config.loop else "")
                     elif flatten:
                         exit_reason = "Day-trading exit before market close"
+                    elif halt:
+                        exit_reason = "Maximaler Drawdown aus risiko.py erreicht; Position wird geschlossen"
+                    elif self.config.loop and not loop.owner_version(self.store, symbol):
+                        exit_reason = "Trading-Loop-Strategie abgeschaltet; Position wird geschlossen"
                     guard = self.store.get(f"unbracketed:{symbol}")
                     if guard and not exit_reason:
                         # Fractional entries carry no broker bracket; enforce its levels here.
                         if pnl_fraction <= -guard["stop"]:
                             exit_reason = "Stop-loss reached (bot-managed for fractional shares)"
-                        elif not self.config.intraday and pnl_fraction >= guard["target"]:
+                        elif not self.config.intraday and guard.get("target") and pnl_fraction >= guard["target"]:
                             exit_reason = "Take-profit reached (bot-managed for fractional shares)"
                     if self.config.intraday and not exit_reason:
                         exit_reason = self.daytrade_exit(symbol, pos, pnl_fraction, now)
@@ -456,7 +550,7 @@ class Engine:
             return acted
         forecasts = []
         for symbol in symbols:
-            prediction = self.store.get(f"prediction:{symbol}")
+            prediction = self.prediction(symbol)
             if self.config.intraday:
                 # Day trading needs no trained model: the playbook alone can qualify an entry.
                 book = self.store.get(f"playbook:{symbol}")
@@ -505,14 +599,19 @@ class Engine:
                         plan = best(forecast["playbook"])
                         stop_fraction, target_fraction = bracket(self.config, plan)
                         queue_args.update(stop_fraction=stop_fraction, target_fraction=target_fraction, plan=plan)
+                    if self.config.loop and action == "BUY":
+                        queue_args.update(stop_fraction=self.stop_limit() if self.rules.get("ok") else None)
+                        # Recorded before the order: the buying version decides this position's exit.
+                        self.store.set(f"loop_owner:{symbol}", forecast["version"])
                     status = self.executor.execute(symbol, action, queue_session if queued_buy else day, account, positions, orders,
                                                    loss_breach=loss_breach, **queue_args)
                     if action == "SELL":
                         self.store.set(f"exit_status:{symbol}", status)
                     reason += "; " + status
                     acted = bool(self.executor.changed)
+                votes = {forecast.get("version", "Trading-Loop"): forecast.get("signal")} if self.config.loop else ballots(forecast, research)
                 forecast.update({"action": action, "reason": reason, "research": research,
-                                 "votes": ballots(forecast, research),
+                                 "votes": votes,
                                  "position": position, "decision_at": utcnow()})
                 previous = self.store.get(f"forecast:{symbol}", {})
                 if previous.get("action") != action or previous.get("reason") != reason:
@@ -522,7 +621,9 @@ class Engine:
                 self.store.event("error", {"symbol": symbol, "message": str(exc)[:240]})
         # Network-heavy scanning, forecasting and LLM calls cannot stall risk polling.
         self.scan_tick()
-        self.playbook_tick(symbols, now, clock["is_open"])
+        # Day trading also evaluates its setups for the user's own holdings (shown, never traded).
+        watched = watched_symbols(self.config, self.store, positions) if self.config.intraday else []
+        self.playbook_tick(list(dict.fromkeys([*symbols, *watched])), now, clock["is_open"])
         self.forecast_tick(symbols, day)
         self.research_tick(forecasts)
         self.store.set("engine", {"status": "running", "message": f"Monitoring {len(symbols)} symbols in {self.config.trading_mode} mode", "at": utcnow()})

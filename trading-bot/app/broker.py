@@ -72,6 +72,9 @@ class Alpaca:
     def order(self, client_id):
         return self.request("GET", "/v2/orders:by_client_order_id", params={"client_order_id": client_id})
 
+    def order_by_id(self, order_id):
+        return self.request("GET", f"/v2/orders/{quote(order_id, safe='')}")
+
     def submit(self, payload):
         return self.request("POST", "/v2/orders", json=payload)
 
@@ -192,12 +195,13 @@ class Alpaca:
                 frames[symbol] = frame
         return frames
 
-    def latest_price(self, symbol):
+    def latest_price(self, symbol, max_age=120):
+        """Latest trade; max_age=None accepts an older trade (e.g. a manual order while the market is closed)."""
         result = self.request("GET", f"/v2/stocks/{quote(symbol, safe='')}/trades/latest", data=True, params={"feed": self.config.feed})
         trade = result["trade"]
         at = pd.Timestamp(trade["t"])
         age = (pd.Timestamp.now(tz="UTC") - at).total_seconds()
         price = float(trade["p"])
-        if not 0 < price < 1000000 or not -10 <= age <= 120:
+        if not 0 < price < 1000000 or max_age is not None and not -10 <= age <= max_age:
             raise BrokerError(f"Stale or invalid latest trade for {symbol}")
         return price

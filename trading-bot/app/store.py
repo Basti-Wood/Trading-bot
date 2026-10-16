@@ -96,7 +96,7 @@ class Store:
             current = self._owner(db, symbol)
             if current and current != strategy:
                 if owned:
-                    raise ValueError("Symbol belongs to the other strategy")
+                    raise ValueError(f"Symbol belongs to the {current} strategy")
                 return
             db.execute("INSERT OR REPLACE INTO state VALUES (?,?)", (f"position_owner:{symbol}", json.dumps(strategy if owned else None)))
             if strategy == "daily":
@@ -169,11 +169,11 @@ class Store:
 
 class StrategyStore:
     """Strategy-local state over one account journal and ownership registry."""
-    SHARED = {"account", "account_scope", "loss_halt_day", "equity_sample", "universe", "scan_status"}
+    SHARED = {"account", "account_scope", "loss_halt_day", "equity_sample", "universe", "scan_status", "allocation"}
 
     def __init__(self, root, strategy):
         self.root, self.strategy = root, strategy
-        self.prefix = "" if strategy == "daily" else "daytrade:"
+        self.prefix = "" if strategy == "daily" else f"{strategy}:"
 
     def __getattr__(self, name):
         return getattr(self.root, name)

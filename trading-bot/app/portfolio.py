@@ -1,19 +1,44 @@
-"""Run daily and intraday strategies under one account/order coordinator."""
+"""Run the daily, intraday and trading-loop strategies under one account/order coordinator.
+
+The user's own (manual) trades share the account but sit outside the bots' budget.
+"""
 from dataclasses import replace
 import threading
 import time
 
+from .allocation import bot_share
 from .engine import Engine
 from .store import StrategyStore, utcnow
+
+STRATEGIES = ("daily", "daytrade", "loop")
 
 
 def strategy_contexts(config, store):
     if config.trading_mode != "both":
         return [(config, store)]
-    return [(replace(config, trading_mode=mode, coordinated=True, strategy_fraction=fraction),
-             StrategyStore(store, mode))
-            for mode, fraction in (("daily", 1 - config.daytrade_capital_share),
-                                   ("daytrade", config.daytrade_capital_share))]
+    contexts = []
+    for mode in STRATEGIES:
+        # strategy_fraction is the startup weight; sizing reads the live dashboard weights.
+        cfg = replace(config, trading_mode=mode, coordinated=True)
+        contexts.append((replace(cfg, strategy_fraction=max(.05, bot_share(cfg, store, mode))), StrategyStore(store, mode)))
+    return contexts
+
+
+def release_manual(store, positions, orders):
+    """Hand a fully sold manual symbol back to the bots after two flat observations."""
+    for symbol in store.owned_symbols("manual"):
+        busy = (any(p["symbol"] == symbol and float(p.get("qty") or 0) for p in positions)
+                or any(o["symbol"] == symbol for o in orders)
+                or any(o["symbol"] == symbol and o.get("strategy") == "manual" for o in store.unresolved_orders()))
+        if busy:
+            store.set(f"manual_flat:{symbol}", None)
+            continue
+        seen = store.get(f"manual_flat:{symbol}")
+        if seen is None:
+            store.set(f"manual_flat:{symbol}", time.time())
+        elif time.time() - seen >= 15:
+            store.set_owned(symbol, "manual", False)
+            store.set(f"manual_flat:{symbol}", None)
 
 
 class PortfolioEngine:
@@ -84,6 +109,11 @@ class PortfolioEngine:
         account, clock = self.broker.account(), self.broker.clock()
         positions, orders = self.broker.positions(), self.broker.open_orders()
         snapshot = (account, clock, positions, orders, reconciled)
+        # Open orders that are not bot entries, for the dashboard's "trade yourself" view.
+        self.store.set("open_orders", [{k: o.get(k) for k in ("id", "client_order_id", "symbol", "side", "type", "qty",
+                                        "notional", "limit_price", "stop_price", "status", "submitted_at")}
+                                       for o in orders if not o.get("client_order_id", "").startswith("ensemble-")][:100])
+        release_manual(self.store, positions, orders)
         sequence = self.engines[self.turn:] + self.engines[:self.turn]
         self.turn = (self.turn + 1) % len(self.engines)
         acted, failed = False, []
@@ -101,7 +131,7 @@ class PortfolioEngine:
                     engine.store.set("engine", {"status": "error", "message": str(exc)[:240], "at": utcnow()})
                     engine.store.event("error", {"message": str(exc)[:240]})
         self.store.set("portfolio_engine", {"status": "error" if failed else "running",
-            "message": "Strategy error; check decision logs" if failed else "Daily and day trading running together; shared account limits",
+            "message": "Strategy error; check decision logs" if failed else "Prediction, day trading and trading-loop running together; shared account limits",
             "at": utcnow()})
 
     def run(self):

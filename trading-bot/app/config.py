@@ -74,14 +74,20 @@ class Config:
     llm_models: tuple = ("auto",)
     brave_key: str = ""
     origins: tuple = ("https://trade.bastiwood.com",)
+    # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
+    loop_dir: Path = None
+    loop_timeout: int = 300
 
     def __post_init__(self):
         if not self.symbols or len(self.symbols) > 50 or len(set(self.symbols)) != len(self.symbols):
             raise ValueError("Configure 1 to 50 unique US equity/ETF symbols")
-        if self.trading_mode not in {"daily", "daytrade", "both"} or self.universe_mode not in {"watchlist", "market"}:
+        # "loop" is an internal child strategy of TRADING_MODE=both, never a standalone mode.
+        if self.trading_mode not in {"daily", "daytrade", "both", "loop"} or self.universe_mode not in {"watchlist", "market"}:
             raise ValueError("TRADING_MODE must be daily/daytrade/both; UNIVERSE_MODE must be watchlist/market")
-        if self.trading_mode in {"daytrade", "both"} and not self.paper:
-            raise ValueError("The daytrade strategy is currently paper-only")
+        if self.trading_mode == "loop" and not self.coordinated:
+            raise ValueError("The trading-loop strategy runs only inside TRADING_MODE=both")
+        if self.trading_mode in {"daytrade", "both", "loop"} and not self.paper:
+            raise ValueError("The daytrade and trading-loop strategies are currently paper-only")
         if any(not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", s) for s in self.symbols):
             raise ValueError("Only US equity/ETF symbols are supported")
         if self.feed not in {"iex", "sip"}:
@@ -112,7 +118,7 @@ class Config:
                   "daytrade_close_minutes": (5, 60), "daytrade_capital_share": (.05, .95),
                   "strategy_fraction": (.05, 1), "min_votes": (2, 4),
                   "daytrade_run_minutes": (5, 240), "daytrade_trail_trigger": (.001, .05),
-                  "daytrade_trail_gap": (.001, .05)}
+                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 600)}
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
@@ -128,6 +134,10 @@ class Config:
         """The capital this bot may use at the current account equity."""
         base = max(0., equity) * self.capital_fraction
         return min(base, self.capital) if self.capital else base
+
+    @property
+    def loop(self):
+        return self.trading_mode == "loop"
 
     @property
     def configured(self):
@@ -198,4 +208,7 @@ class Config:
             llm_key=os.getenv("FREELLM_API_KEY", ""),
             llm_models=tuple(s.strip() for s in os.getenv("FREELLM_MODELS", "auto").split(",") if s.strip()),
             brave_key=os.getenv("BRAVE_SEARCH_API_KEY", ""),
+            # Relative paths start at the trading-bot folder, whatever the working directory.
+            loop_dir=(Path(__file__).resolve().parent.parent / os.getenv("TRADING_LOOP_DIR", "trading-loop")).resolve(),
+            loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "300")),
             origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()))

@@ -7,9 +7,23 @@ from .store import utcnow
 
 
 def active_symbols(config, store):
+    if config.loop:
+        # Fixed symbols of activated versions, or the other bots' list plus the user's holdings for "LISTE" versions.
+        from .loop import active_versions, version_symbols
+        return list(dict.fromkeys(s for record in active_versions(store).values()
+                                  for s in version_symbols(config, store, record)))
     if config.universe_mode == "watchlist":
         return list(config.symbols)
     return store.get("universe", {}).get("symbols", [])
+
+
+def watched_symbols(config, store, positions=()):
+    """The user's own holdings (manual or bought outside the bot): observed, never traded by a bot."""
+    if not config.coordinated:
+        return []
+    return [p["symbol"] for p in positions if p.get("asset_class", "us_equity") == "us_equity"
+            and re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", p.get("symbol", "")) and float(p.get("qty") or 0) > 0
+            and store.owner(p["symbol"]) in (None, "manual")]
 
 
 def monitored_symbols(config, store, positions=(), orders=()):
@@ -18,7 +32,9 @@ def monitored_symbols(config, store, positions=(), orders=()):
     pending = [o["symbol"] for o in orders if o.get("client_order_id", "").startswith("ensemble-")
                and (not config.coordinated or store.owns_order(o))]
     registered = store.owned_symbols() if config.coordinated else []
-    return list(dict.fromkeys([*held, *pending, *registered, *active_symbols(config, store)]))
+    # The prediction bot also forecasts and reads news for the user's own holdings.
+    watched = watched_symbols(config, store, positions) if config.trading_mode == "daily" else []
+    return list(dict.fromkeys([*held, *pending, *registered, *active_symbols(config, store), *watched]))
 
 
 def screen(config, symbol, snapshot, now):
@@ -87,6 +103,11 @@ def scan(config, store, broker, stop):
 def entries_ready(config, store):
     if config.universe_mode == "watchlist":
         return True
+    if config.loop:
+        # Only versions trading the scanner list need a fresh, complete scan.
+        from .loop import LIST, active_versions
+        if all(r["symbol"] != LIST for r in active_versions(store).values()):
+            return True
     state = store.get("universe", {})
     return (store.get("scan_status", {}).get("status") in {"ready", "scanning"}
             and state.get("feed") == config.feed

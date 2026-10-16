@@ -4,3 +4,5 @@ data
 __pycache__
 *.pyc
 tests
+# Mounted read-only by docker-compose; keeps its keys, venv and price cache out of the image.
+trading-loop
