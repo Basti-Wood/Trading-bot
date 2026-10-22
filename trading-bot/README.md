@@ -71,7 +71,15 @@ Keep `TRADING_MODE=both` once a journal contains both strategies so all existing
 
 The strategy runs unchanged in an isolated `app.loop_runner` subprocess over the stress test's five-year window and costs (0.1% per order). Signals are pending orders after the last completed daily bar: entry = BUY, pending close/flat = SELL, invested = HOLD. BUY targets the next market session and uses the daily entry/queue timing. File/risk changes block entries until retesting. The owning version keeps control of an existing position's exits; explicitly deactivating it closes the position unless an active successor of the same idea takes over. Each whole-share entry carries an OTO stop from `risiko.py`; fractional protection is enforced by the engine. There is no take-profit for the loop. The loop reads risk values without executing the file and stops/ closes its positions when the configured account-peak drawdown is reached. Restarting leaves entries paused.
 
-`stresstest.py` retests unchanged versions daily from 08:00 New York time and on demand. LISTE reports save `aktien[symbol]` with that stock's metrics and verdict, including individual data errors. The list summary (`ergebnis=einzeltests`) is informational. Strategy files and `risiko.py` are never changed by retesting. Reports already in the repository are historical evidence and are not rewritten by this rebuild.
+**Self-tuning (walk-forward).** A strategy may declare `PARAMETER = {"NAME": [values, ...]}` for its own module constants (all eight bundled strategies do; at most 10 values per constant and 36 combinations per fit). For each stock, `stresstest.pruefe` then:
+
+1. for each of the last two years, picks the combination with the best *return − ½·|drawdown|* (at least the pro-rated 10 trades and the `risiko.py` drawdown limit) using only the years **before** it, and trades that unseen year with it;
+2. judges the stock on those two out-of-sample years only: green needs a positive return, drawdown within `MAX_DRAWDOWN_PROZENT` and at least 4 trades (10 per 5 years, pro-rated);
+3. picks the live values on all five years.
+
+So the verdict never comes from values that already knew the prices they are tested on. The report keeps per stock `parameter`, `standard`, the yearly picks (`test.jahre`) and the five-year figures for information (`gesamt`). The daily 08:00 retest re-tunes every stock as the window moves; strategy files are never changed (values are set in memory for each run). Strategies without `PARAMETER` keep the previous five-year verdict. The bot reuses a report's tuned values and verdict when its hash and `risiko.py` values match and it is at most 7 days older than the latest bar; a stock the report does not cover is tuned by `app.loop_runner` itself (about 2 s per stock; `TRADING_LOOP_TIMEOUT_SECONDS` now defaults to 900). Walk-forward testing reduces, but does not remove, overfitting: two test years are a small sample and the parameter lists themselves were chosen by people who had seen past markets.
+
+`stresstest.py` retests unchanged versions daily from 08:00 New York time and on demand; the dashboard's "Alle neu testen" also includes edited files (for example after adding `PARAMETER`). LISTE reports save `aktien[symbol]` with that stock's metrics and verdict, including individual data errors. The list summary (`ergebnis=einzeltests`) is informational. Strategy files and `risiko.py` are never changed by retesting. Reports already in the repository are historical evidence and are not rewritten by this rebuild.
 
 
 ### Daily strategy
@@ -172,6 +180,14 @@ Requests are sequential, with a 120-second read timeout. Answers must contain ex
 The report combines these per-stock summaries with a separate Llama market overview grounded in SPY/QQQ/IWM news. It is stored in SQLite under `news_report` and `news_report:YYYY-MM-DD` and shown in **Market & stock report**. A missing overview never blocks stock votes; its failure is shown explicitly. No report is invented before data and the proxy are available.
 
 Set `FREELLM_BASE_URL` and `FREELLM_API_KEY` for your proxy. Leave `FREELLM_MODELS` empty to discover an available Llama model via `/models?available=true`, or set one installed Llama model ID. Only one model is used per stock. Cached daily forecasts keep their original chronology and learning labels.
+
+### Trading-loop candle chart
+
+In the Trading-Loop section, choose a stock to see `GET /api/loop/chart/<symbol>`: the last 130 daily candles, the deciding version's own indicators (`self.I(...)`; price-scale lines on the candles, oscillators such as ADX/RSI in a lower pane), its backtest buys/sells with the current tuned values, the live values next to the defaults, the yearly walk-forward picks and the current signal. The chart comes from the same subprocess run that produces the signal; `/api/state` omits it to stay small.
+
+### Forecast versus reality
+
+Under *Inside the models*, `GET /api/predictions/<symbol>?strategy=daily|daytrade` draws candles (about 90 daily sessions, or the latest session's five-minute bars) with every model's **recorded** forecast in price terms: reference price × (1 + predicted return) at the forecast's target candle, next to the actually observed price (white diamonds) and this bot's fills (▲/▼). Daily reference is the next session's open and the target the open after it; intraday reference is the input bar's close and the target 15 minutes later. Open forecasts are dashed; for daily ones the next open is still unknown, so they use the latest close as an indicative reference. Points come only from the immutable experience records used for learning, never recomputed after the fact. Legend checkboxes hide single models; the table lists the latest eight forecasts with direction hits in green. Bars are cached for 2 minutes (intraday) or 30 minutes (daily). The order journal now also records Alpaca's `filled_at`.
 
 ### Day-trading candle chart
 

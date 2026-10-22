@@ -11,11 +11,14 @@ from .broker import Alpaca, BrokerError
 from .store import utcnow
 from .feedback import summary_key
 from .prediction_quality import forecast_quality
+from .prediction_chart import payload as prediction_payload
 from .universe import active_symbols
 from .portfolio import strategy_contexts
 from .decisions import position_context
 
 MAX_LOOP_STRATEGIES = 10
+# About 90 sessions of daily candles for the forecast chart.
+DAILY_LOOKBACK_DAYS = 140
 
 
 def create_app(config, store, broker_factory=Alpaca):
@@ -45,6 +48,8 @@ def create_app(config, store, broker_factory=Alpaca):
                 rows = []
                 for symbol in loop.version_symbols(mode_cfg, mode_state, record):
                     item = (results.get("symbols") or {}).get(symbol) if fresh else None
+                    if item:
+                        item = {k: v for k, v in item.items() if k != "chart"}  # Served by /api/loop/chart.
                     decision = mode_state.get(f"forecast:{symbol}") or {}
                     rows.append({"symbol": symbol, "result": item, "action": decision.get("action"),
                                  "reason": decision.get("reason"), "position": decision.get("position"),
@@ -153,6 +158,61 @@ def create_app(config, store, broker_factory=Alpaca):
         quality = forecast_quality(cfg, state.get(f"model:{symbol}"), prediction, now)
         return jsonify(**data, quality=quality,
                        forecast=forecast_overlay(prediction, now, data.get("session_close")) if quality["ready"] else None)
+
+    @app.get("/api/predictions/<symbol>")
+    def predictions(symbol):
+        """Candles plus every model's recorded forecast and the observed outcome."""
+        selected = request.args.get("strategy", "daily")
+        if not loop.STOCK.fullmatch(symbol):
+            return jsonify(error="Invalid stock symbol"), 400
+        if selected not in contexts or selected == "loop":
+            return jsonify(error="Forecast charts exist for the prediction and day-trading bots"), 400
+        cfg, state = contexts[selected]
+        if symbol not in {*active_symbols(cfg, state), *state.get("monitor_symbols", [])}:
+            return jsonify(error="Stock is not monitored by this bot"), 404
+        now = pd.Timestamp.now(tz="UTC")
+        cached = state.get(f"prediction_bars:{symbol}")
+        ttl = 120 if cfg.intraday else 1800
+        if cached and (now - pd.Timestamp(cached["at"])).total_seconds() <= ttl:
+            frame = pd.DataFrame(cached["bars"]).set_index("at") if cached["bars"] else None
+            if frame is not None:
+                frame.index = pd.to_datetime(frame.index, utc=True)
+        else:
+            if not cfg.configured:
+                return jsonify(error="Configure Alpaca first"), 409
+            try:
+                start = now - (pd.Timedelta(days=5) if cfg.intraday else pd.Timedelta(days=DAILY_LOOKBACK_DAYS))
+                frame = broker_factory(cfg).multi_bars([symbol], "5Min" if cfg.intraday else "1Day", start, end=now).get(symbol)
+            except (BrokerError, ValueError, KeyError):
+                return jsonify(error="Price data unavailable; will retry"), 502
+            if frame is not None and cfg.intraday:
+                frame = frame[frame.index + pd.Timedelta(minutes=5) <= now]  # completed bars only
+            rows = [] if frame is None else [{"at": at.isoformat(), **{k: float(row[k]) for k in ("open", "high", "low", "close")}}
+                                             for at, row in frame.iterrows()]
+            state.set(f"prediction_bars:{symbol}", {"at": now.isoformat(), "bars": rows})
+        return jsonify(prediction_payload(cfg, state, symbol, frame, selected, now))
+
+    @app.get("/api/loop/chart/<symbol>")
+    def loop_chart(symbol):
+        if not loop.STOCK.fullmatch(symbol):
+            return jsonify(error="Invalid stock symbol"), 400
+        if "loop" not in contexts:
+            return jsonify(error="Der Trading-Loop läuft nur mit TRADING_MODE=both"), 409
+        cfg, state = contexts["loop"]
+        choice = loop.combine(state, symbol, cfg)
+        active = loop.active_versions(state)
+        # The deciding version, else any active version that evaluated this stock.
+        versions = [v for v in [choice.get("version"), *sorted(active)] if v in active]
+        for version in dict.fromkeys(versions):
+            results = state.get(f"loop_results:{version}") or {}
+            item = (results.get("symbols") or {}).get(symbol)
+            if results.get("sha256") == active[version]["sha256"] and item and item.get("chart"):
+                decision = state.get(f"forecast:{symbol}") or {}
+                return jsonify(symbol=symbol, version=version, deciding=version == choice.get("version"),
+                               chart=item["chart"], test=item.get("test"), signal=item.get("signal"),
+                               strategy_reason=item.get("reason"), reason=choice.get("reason"),
+                               action=decision.get("action", "WAIT"), computed_at=results.get("at"))
+        return jsonify(error="Noch keine Chartdaten: die aktiven Versionen haben diese Aktie noch nicht berechnet"), 404
 
     @app.get("/api/state")
     def state():
@@ -327,8 +387,8 @@ def create_app(config, store, broker_factory=Alpaca):
                 return jsonify(error="Diese Strategie-Version gibt es nicht"), 404
             if state.get("loop_retest_requested") or (state.get("loop_retest") or {}).get("status") == "running":
                 return jsonify(error="Es läuft schon ein Stresstest. Warte, bis er fertig ist."), 409
-            if not loop.retest_targets(cfg, version):
-                return jsonify(error="Keine getestete, unveränderte Version zum Neutesten"), 409
+            if not loop.retest_targets(cfg, version, include_changed=True):
+                return jsonify(error="Keine getestete Version zum Neutesten"), 409
             state.set("loop_retest_requested", {"version": version, "at": utcnow()})
             store.event("control", {"action": "loop_retest", "strategy": "loop", "version": version})
             return jsonify(ok=True, message=f"{version or 'Alle getesteten Versionen'}: Stresstest startet. Das dauert ein paar Minuten.")

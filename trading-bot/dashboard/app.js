@@ -102,7 +102,7 @@ function renderLoop(s) {
   $('loop-retest-status').textContent=`Der Bot testet alle getesteten, unveränderten Versionen jeden Tag ab ${l.retest_hour}:00 New Yorker Zeit neu, damit das 5-Jahres-Fenster aktuell bleibt. Die Strategien selbst ändern sich dabei nicht. `+
     (l.retest_requested?'Stresstest startet gleich…':rt?.status==='running'?`Stresstest läuft (${rt.trigger}): ${rt.current||''} · ${done.length} von ${rt.versions.length} fertig.`:
      rt?`Letzter Lauf (${rt.trigger}) ${time(rt.at||rt.started_at)}: ${rt.status==='fertig'?`${done.length} Version${done.length===1?'':'en'} getestet`:rt.status}${rt.message?' · '+rt.message:''}${failed.length?' · '+failed.map(([v,r])=>`${v}: ${r}`).join(' · '):''}`:'');
-  const testCell=t=>t?`<span class="pill ${t.gruen?'buy':'sell'}">${t.gruen?'GRÜN':'ROT'}</span><br><small class="muted">${pct(t.rendite)} · DD ${pct(t.max_drawdown)} · ${escape(t.trades)} Trades</small>`:'—';
+  const testCell=t=>t?`<span class="pill ${t.gruen?'buy':'sell'}">${t.gruen?'GRÜN':'ROT'}</span><br><small class="muted">${pct(t.rendite)} · DD ${pct(t.max_drawdown)} · ${escape(t.trades)} Trades${t.methode==='walk_forward'?' · selbst angepasst, Test '+escape(t.zeitraum||''):''}</small>`:'—';
   $('loop-running').innerHTML=`<div class="table-wrap"><table><thead><tr><th>Aktie</th><th>Beste grüne Version / Besitzer</th><th>Einzeltest</th><th>Strategie-Signal</th><th>Entscheidung</th></tr></thead><tbody>${(l.stocks||[]).map(r=>`<tr><td>${escape(r.symbol)}</td><td>${escape(r.version||'—')}${r.owner?`<br><small>Besitzer: ${escape(r.owner)}</small>`:''}</td><td>${testCell(r.test)}</td><td>${signal(r.signal||'HOLD')}</td><td>${signal(r.action||'WAIT')}<br><small class="muted">${escape(r.reason)}</small><details><summary>Alle Versionen</summary>${Object.entries(r.views||{}).map(([v,i])=>`<div>${escape(v)}: ${escape(i.signal||i.error||'—')} · ${pct(i.test?.rendite)} · DD ${pct(i.test?.max_drawdown)} · ${i.test?.gruen?'GRÜN':'ROT'}</div>`).join('')}</details></td></tr>`).join('')||'<tr><td colspan="5" class="empty">Aktiviere getestete Versionen und gib dem Trading-Loop eine Gewichtung über 0.</td></tr>'}</tbody></table></div>` + l.running.map(v=>`<div class="loop-version section-title"><span><b>${escape(v.version)}</b> · ${v.green}/${v.rows.length} Einzeltests grün · ${v.computed_at?time(v.computed_at):'wird berechnet…'}${v.error?` · ${escape(v.error.message)}`:''}</span><button data-loop="deactivate" data-version="${escape(v.version)}">Abschalten</button></div>`).join('');
   $('loop-versions').innerHTML=l.versions.map(v=>{const r=v.report||{},[label,tone]=LOOP_STATUS[v.status]||[v.status,'hold'];return `<tr><td>${escape(v.version)}</td><td>${v.symbol==='LISTE'?`Liste (${escape(r.gruen_anzahl??'—')}/${escape(r.anzahl??'—')} grün)`:escape(v.symbol||'—')}</td><td>${pct(r.rendite)}</td><td>${pct(r.kaufen_halten)}</td><td>${pct(r.max_drawdown)}</td><td>${escape(r.trades??'—')}</td><td><span class="pill ${tone}">${escape(label)}</span><br><small class="muted">${escape(v.note)}</small></td><td><div class="row-actions">${v.active?`<button data-loop="deactivate" data-version="${escape(v.version)}">Abschalten</button>`:v.tradable?`<button data-loop="activate" data-version="${escape(v.version)}">Einschalten</button>`:''}<button data-loop="retest" data-version="${escape(v.version)}" ${testing?'disabled':''}>Neu testen</button></div></td></tr>`;}).join('')||'<tr><td colspan="8" class="empty">Keine Strategie-Versionen gefunden.</td></tr>';
   $('loop-errors').innerHTML=l.errors.map(e=>`<div class="log-row"><time>${escape(e.datum)}</time><span><b>${escape(e.strategie)} v${escape(e.version)}</b>${e.verlust_trades!=null?` · ${escape(e.verlust_trades)} Verlust-Trades`:''} · ${escape(e.problem)} → ${escape(e.aenderung)}${e.ergebnis?` (danach ${escape(e.ergebnis)})`:''}</span></div>`).join('')||'<p class="empty">Noch keine Fehler gespeichert.</p>';
@@ -140,13 +140,13 @@ function render(s) {
   $('orders').innerHTML=s.orders.map(o=>`<tr><td>${time(o.at)}</td><td>${escape(o.symbol)}</td><td>${escape(o.strategy||'daily')}</td><td>${signal(o.side.toUpperCase())}</td><td>${escape(o.qty)}</td><td>${escape(o.filled_qty??'—')}</td><td>${o.filled_avg_price?money(Number(o.filled_avg_price)):'—'}</td><td>${escape(o.status)}${o.queued_for_open?`<br><small>Queued for ${escape(o.session)} / limit ${money(Number(o.limit_price))}</small>`:o.limit_price?`<br><small>Limit ${money(Number(o.limit_price))}</small>`:''}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">No orders submitted.</td></tr>';
   $('positions').innerHTML=(s.account?.positions||[]).map(p=>`<div class="position"><b>${escape(p.symbol)}${p.strategy?` / ${escape(p.strategy)}`:''}</b><span>${escape(p.qty)} shares</span><span>${money(Number(p.market_value))}</span><span>${money(Number(p.unrealized_pl))} unrealized</span></div>`).join('') || 'No open positions.';
   $('updated').textContent=`LAST UPDATED ${time(s.at)}`;
-  drawChart(s.equity); renderModels(); renderCandles();
+  drawChart(s.equity); renderModels(); renderCandles(); renderForecast(); if(s.loop) renderLoopChart(s);
 }
 async function refresh() {const serial=++refreshSerial;try{const r=await fetch('/api/state'+(selectedStrategy?'?strategy='+encodeURIComponent(selectedStrategy):''));if(!r.ok)throw Error(`Dashboard request failed (${r.status})`);const snapshot=await r.json();if(serial===refreshSerial)render(snapshot);}catch(e){$('connection').textContent='OFFLINE';$('notice').textContent=e.message+' · displayed information may be stale.';}}
 async function control(action,strategy='all') {try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json','X-Bot-Control':'dashboard'},body:JSON.stringify({action,strategy})});const body=await r.json();if(!r.ok)throw Error(body.error||'Action failed');toast(action==='train'?'Retraining queued.':'Entry setting saved.');await refresh();}catch(e){toast(e.message);}}
 $('toggle').addEventListener('click',()=>control((state.portfolio_mode==='both'?state.any_entries_enabled:state.entries_enabled)?'pause':'resume'));
 $('train').addEventListener('click',()=>control('train',selectedStrategy||'all'));
-$('symbols').addEventListener('click',e=>{const b=e.target.closest('[data-symbol]');if(b){selected=b.dataset.symbol;renderModels();renderCandles();}});
+$('symbols').addEventListener('click',e=>{const b=e.target.closest('[data-symbol]');if(b){selected=b.dataset.symbol;renderModels();renderCandles();renderForecast();}});
 $('strategy-cards').addEventListener('click',e=>{const view=e.target.closest('[data-view]'), toggle=e.target.closest('[data-strategy]');if(view){selectedStrategy=view.dataset.view;selected=null;refresh();}else if(toggle){control(toggle.dataset.action,toggle.dataset.strategy);}});
 $('allocation-form').addEventListener('input',()=>{allocDirty=true;allocationPreview();});
 $('alloc-reset').addEventListener('click',()=>{if(state?.allocation){fillAllocation(state.allocation);allocationPreview();}});
@@ -205,4 +205,110 @@ function drawCandles(data) {
   for(let i=0;i<5;i++) {const t=first+(end-first)*i/4;svg+=`<text x="${x(t)}" y="405" text-anchor="middle">${escape(new Date(t).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hour12:false}))}</text>`;}
   $('candles').innerHTML=svg+'</svg>';
 }
+const PALETTE=['#6ca5da','#b69ad7','#d39462','#83b9a3','#c4a572','#df8d81','#9fc7c0','#e1a7c4'];
+// The page's CSP forbids inline style attributes; SVG fill is a presentation attribute.
+const swatch=color=>`<svg class="swatch" viewBox="0 0 14 4" aria-hidden="true"><rect width="14" height="4" rx="2" fill="${escape(color)}"/></svg>`;
+const MODEL_COLORS={ridge:'#6ca5da',extra_trees:'#b69ad7',hist_gradient:'#d39462',ensemble:'#e5cb86',actual:'#f4f7f4'};
+// Shared candlestick renderer: bars by index (no weekend/overnight gaps), optional lines, markers and a lower pane.
+function candleSvg(o) {
+  const bars=o.bars, n=bars.length+(o.extra||0), lines=o.lines||[], markers=o.markers||[];
+  const upper=lines.filter(l=>!l.lower), lower=lines.filter(l=>l.lower&&l.points.length);
+  const bottom=lower.length?290:370, lowTop=315, lowBottom=375;
+  const values=bars.flatMap(b=>[b.low,b.high]).concat(upper.flatMap(l=>l.points.map(p=>p.v)),markers.map(m=>m.v)).filter(Number.isFinite);
+  if(!values.length) return '';
+  const lo=Math.min(...values),hi=Math.max(...values),pad=(hi-lo||hi*.01||1)*.06;
+  const x=i=>60+(i+.5)/Math.max(1,n)*860, y=v=>bottom-(v-lo+pad)/(hi-lo+2*pad)*(bottom-20);
+  const width=Math.max(1,Math.min(12,860/Math.max(1,n)*.7));
+  let svg=`<svg viewBox="0 0 1000 410" role="img" aria-label="${escape(o.label||'Candlestick chart')}">`;
+  for(let k=0;k<5;k++){const p=lo+(hi-lo)*k/4,yy=y(p);svg+=`<line class="chart-grid" x1="60" x2="930" y1="${yy}" y2="${yy}"/><text x="936" y="${yy+4}">${escape(money(p))}</text>`;}
+  bars.forEach((b,i)=>{if(![b.open,b.high,b.low,b.close].every(Number.isFinite))return;const xx=x(i),color=b.close>=b.open?'#70b79e':'#df8d81';svg+=`<g><title>${escape(o.time(b.at))} · O ${b.open.toFixed(2)} H ${b.high.toFixed(2)} L ${b.low.toFixed(2)} C ${b.close.toFixed(2)}</title><line x1="${xx}" x2="${xx}" y1="${y(b.high)}" y2="${y(b.low)}" stroke="${color}"/><rect x="${xx-width/2}" y="${Math.min(y(b.open),y(b.close))}" width="${width}" height="${Math.max(1,Math.abs(y(b.open)-y(b.close)))}" fill="${color}"/></g>`;});
+  if(o.extra) svg+=`<line class="chart-grid" x1="${x(bars.length-.5)}" x2="${x(bars.length-.5)}" y1="20" y2="${bottom}" stroke-dasharray="3 4"/><text x="${x(bars.length)}" y="${bottom+14}" text-anchor="middle">Ziel</text>`;
+  const path=(points,yf)=>{let d='',last=null;for(const p of points){if(!Number.isFinite(p.v)){last=null;continue;}d+=`${last!==null&&p.i-last<=(p.gap||1)?'L':'M'}${x(p.i).toFixed(1)},${yf(p.v).toFixed(1)} `;last=p.i;}return d;};
+  for(const l of upper) {svg+=`<path d="${path(l.points,y)}" fill="none" stroke="${l.color}" stroke-width="${l.width||1.5}" ${l.dash?`stroke-dasharray="${l.dash}"`:''} opacity="${l.opacity||1}"><title>${escape(l.name)}</title></path>`;if(l.dots)for(const p of l.points)if(Number.isFinite(p.v))svg+=`<circle cx="${x(p.i)}" cy="${y(p.v)}" r="${l.dots}" fill="${l.hollow?'none':l.color}" stroke="${l.color}"><title>${escape(p.title||l.name)}</title></circle>`;}
+  if(lower.length){const lv=lower.flatMap(l=>l.points.map(p=>p.v)).filter(Number.isFinite),a=Math.min(...lv),b=Math.max(...lv)||a+1,ly=v=>lowBottom-(v-a)/((b-a)||1)*(lowBottom-lowTop);svg+=`<line class="chart-grid" x1="60" x2="930" y1="${lowTop}" y2="${lowTop}"/><text x="936" y="${lowTop+4}">${b.toFixed(1)}</text><text x="936" y="${lowBottom+4}">${a.toFixed(1)}</text>`;for(const l of lower)svg+=`<path d="${path(l.points,ly)}" fill="none" stroke="${l.color}" stroke-width="1.2"><title>${escape(l.name)}</title></path>`;}
+  for(const m of markers){if(!Number.isFinite(m.v))continue;const xx=x(m.i),yy=y(m.v);const shape=m.kind==='buy'?`M${xx},${yy+4} l-6,11 h12 Z`:m.kind==='sell'?`M${xx},${yy-4} l-6,-11 h12 Z`:`M${xx},${yy-4.5} l4.5,4.5 l-4.5,4.5 l-4.5,-4.5 Z`;svg+=`<path d="${shape}" fill="${m.color||(m.kind==='buy'?'#b6df9c':m.kind==='sell'?'#f2998a':'#f4f7f4')}" ${m.hollow?'fill-opacity=".15" stroke="#f4f7f4"':''}><title>${escape(m.title||'')}</title></path>`;}
+  const ticks=Math.min(6,bars.length);for(let k=0;k<ticks;k++){const i=Math.round(k*(bars.length-1)/Math.max(1,ticks-1));svg+=`<text x="${x(i)}" y="402" text-anchor="middle">${escape(o.tick(bars[i].at))}</text>`;}
+  return svg+'</svg>';
+}
+const nyDay=t=>new Date(t).toLocaleDateString('de-DE',{timeZone:'America/New_York',day:'2-digit',month:'2-digit'});
+const nyTime=t=>new Date(t).toLocaleTimeString('de-DE',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit'});
+// Largest bar index whose start is at or before t (fills, forecast references).
+function barAt(times,t){let found=-1;for(let i=0;i<times.length;i++){if(times[i]<=t)found=i;else break;}return found;}
+
+let forecastData=null, forecastKey='', forecastFetched=0, forecastSerial=0;
+const forecastHidden=new Set();
+async function renderForecast() {
+  const strategy=state?.trading_mode, symbol=selected;
+  const show=['daily','daytrade'].includes(strategy)&&symbol;
+  $('forecast-panel').hidden=!show; if(!show) return;
+  const key=strategy+':'+symbol;
+  if(key===forecastKey&&Date.now()-forecastFetched<(strategy==='daytrade'?60000:300000)) return;
+  forecastKey=key; forecastFetched=Date.now();
+  const serial=++forecastSerial;
+  $('forecast-title').textContent=`${symbol} · was jedes Modell vorhergesagt hat`;
+  try {
+    const r=await fetch(`/api/predictions/${encodeURIComponent(symbol)}?strategy=${encodeURIComponent(strategy)}`);
+    const data=await r.json(); if(serial!==forecastSerial) return;
+    if(!r.ok) throw Error(data.error||'Prognosedaten nicht verfügbar');
+    forecastData=data; drawForecast();
+  } catch(err) {if(serial===forecastSerial){forecastFetched=0;$('forecast-chart').textContent=err.message;$('forecast-status').textContent='NICHT VERFÜGBAR';}}
+}
+function drawForecast() {
+  const d=forecastData, bars=d.bars||[], intraday=d.timeframe==='5Min';
+  const models=Object.keys(d.names||{}).filter(id=>d.forecasts.some(f=>f.models[id]));
+  $('forecast-legend').innerHTML=[...models,'actual'].map(id=>`<label><input type="checkbox" data-series="${escape(id)}" ${forecastHidden.has(id)?'':'checked'}>${swatch(MODEL_COLORS[id]||'#aaa')}${escape(id==='actual'?'Tatsächlicher Kurs am Ziel':d.names[id])}</label>`).join('')+'<span>▲ Kauf · ▼ Verkauf (Fills)</span>';
+  $('forecast-status').textContent=intraday?'5-MIN-KERZEN':'TAGESKERZEN';
+  if(!bars.length){$('forecast-chart').textContent='Noch keine Kerzen verfügbar.';$('forecast-table').innerHTML='';return;}
+  const times=bars.map(b=>Date.parse(b.at)), last=times.at(-1);
+  const step=intraday?300000:null;
+  const target=t=>{if(t==null)return bars.length;const ms=Date.parse(t),exact=times.indexOf(ms);if(exact>=0)return exact;return ms>last&&step?bars.length-1+Math.round((ms-last)/step):barAt(times,ms);};
+  const extra=d.forecasts.some(f=>f.status==='pending')?(intraday?Math.max(1,...d.forecasts.filter(f=>f.status==='pending').map(f=>target(f.target_at)-bars.length+1)):1):0;
+  const lines=[];
+  for(const id of models){if(forecastHidden.has(id))continue;const color=MODEL_COLORS[id]||'#aaa';
+    lines.push({name:d.names[id],color,width:1.2,opacity:.85,dots:2.5,points:d.forecasts.filter(f=>f.status==='resolved'&&f.models[id]).map(f=>({i:target(f.target_at),v:f.models[id].price,gap:intraday?4:3,title:`${d.names[id]}: ${money(f.models[id].price)} (${percent(f.models[id].return)}) für ${intraday?nyTime(f.target_at):nyDay(f.target_at)}`}))});
+    for(const f of d.forecasts.filter(f=>f.status==='pending'&&f.models[id])) lines.push({name:`${d.names[id]} (offen)`,color,dash:'5 4',dots:3,hollow:true,points:[{i:barAt(times,Date.parse(f.reference_at)),v:f.reference},{i:target(f.target_at),v:f.models[id].price,gap:99,title:`${d.names[id]}: ${money(f.models[id].price)} (${percent(f.models[id].return)}), noch offen`}]});}
+  const markers=[];
+  if(!forecastHidden.has('actual')) for(const f of d.forecasts.filter(f=>f.status==='resolved')) markers.push({i:target(f.target_at),v:f.actual,kind:'actual',title:`Tatsächlich ${money(f.actual)} (${percent(f.actual_return)}) · Bezug ${money(f.reference)}`});
+  for(const fill of d.fills||[]) markers.push({i:barAt(times,Date.parse(fill.at)),v:fill.price,kind:fill.side==='buy'?'buy':'sell',title:`${fill.side==='buy'?'Kauf':'Verkauf'} ${fill.qty} zu ${money(fill.price)} · ${time(fill.at)}`});
+  $('forecast-chart').innerHTML=candleSvg({bars,lines,markers,extra,label:'Kerzen mit den Prognosen jedes Modells und dem tatsächlichen Kurs',time:t=>intraday?nyTime(t):nyDay(t),tick:t=>intraday?nyTime(t):nyDay(t)});
+  const resolved=d.forecasts.filter(f=>f.status==='resolved').length;
+  $('forecast-note').textContent=`Punkte: Kurs, den jedes Modell für das Ziel vorhergesagt hat (Bezugskurs × (1 + vorhergesagte Rendite)); weiße Rauten: tatsächlicher Kurs. Horizont: ${d.horizon}. ${resolved} aufgelöste Prognosen im Bild, offene Prognosen gestrichelt${intraday?'':' (Bezug: letzter Schlusskurs, da die nächste Eröffnung noch unbekannt ist)'}. Nur gespeicherte Prognosen, nichts nachträglich berechnet.`;
+  $('forecast-model-heads').outerHTML=`<th id="forecast-model-heads" colspan="1">${models.map(id=>escape(d.names[id])).join(' / ')}</th>`;
+  $('forecast-table').innerHTML=[...d.forecasts].reverse().slice(0,8).map(f=>{const actual=f.status==='resolved'?f.actual_return:null;return `<tr><td>${escape(intraday?nyTime(f.bar_at):nyDay(f.bar_at))}${f.status==='pending'?' <small class="muted">offen</small>':''}</td><td>${money(f.reference)}</td><td>${models.map(id=>{const m=f.models[id];if(!m)return '—';const hit=actual==null?'':Math.sign(m.return)===Math.sign(actual)?'buy':'sell';return `<span class="${hit}">${percent(m.return)}</span>`;}).join(' / ')}</td><td>${actual==null?'—':`${money(f.actual)} (${percent(actual)})`}</td></tr>`;}).join('')||'<tr><td colspan="4" class="empty">Noch keine gespeicherten Prognosen für diese Aktie.</td></tr>';
+}
+$('forecast-legend').addEventListener('change',e=>{const id=e.target.dataset.series;if(!id||!forecastData)return;e.target.checked?forecastHidden.delete(id):forecastHidden.add(id);drawForecast();});
+
+let loopChartSymbol=null, loopChartKey='', loopChartFetched=0, loopChartSerial=0;
+async function renderLoopChart(s) {
+  const stocks=(s.loop?.stocks||[]).map(r=>r.symbol);
+  if(!stocks.length){$('loop-chart-symbols').innerHTML='';$('loop-chart').textContent='Aktiviere getestete Versionen; danach erscheinen hier die Kerzen jeder Aktie.';return;}
+  if(!stocks.includes(loopChartSymbol)) loopChartSymbol=stocks[0];
+  $('loop-chart-symbols').innerHTML=stocks.map(x=>`<button data-loop-chart="${escape(x)}" class="${x===loopChartSymbol?'active':''}" aria-pressed="${x===loopChartSymbol}">${escape(x)}</button>`).join('');
+  if(loopChartSymbol===loopChartKey&&Date.now()-loopChartFetched<300000) return;
+  loopChartKey=loopChartSymbol; loopChartFetched=Date.now();
+  const serial=++loopChartSerial, symbol=loopChartSymbol;
+  try {
+    const r=await fetch('/api/loop/chart/'+encodeURIComponent(symbol)); const data=await r.json();
+    if(serial!==loopChartSerial) return;
+    if(!r.ok) throw Error(data.error||'Chartdaten nicht verfügbar');
+    drawLoopChart(data);
+  } catch(err){if(serial===loopChartSerial){loopChartFetched=0;$('loop-chart').textContent=err.message;$('loop-chart-status').textContent='NICHT VERFÜGBAR';$('loop-chart-legend').innerHTML='';$('loop-chart-note').textContent='';}}
+}
+function drawLoopChart(d) {
+  const c=d.chart, bars=c.bars||[], t=d.test||{}, days=bars.map(b=>b.at);
+  $('loop-chart-title').textContent=`${d.symbol} · ${d.version}${d.deciding?'':' (nicht entscheidend)'}`;
+  $('loop-chart-status').innerHTML=`${signal(d.signal||'HOLD')}`;
+  const overlay=c.indicators.filter(i=>i.overlay), lower=c.indicators.filter(i=>!i.overlay).slice(0,3);
+  const lines=[...overlay.map((ind,k)=>({name:ind.name,color:PALETTE[k%PALETTE.length],points:ind.values.map((v,i)=>({i,v}))})),
+    ...lower.map((ind,k)=>({name:ind.name,lower:true,color:PALETTE[(overlay.length+k)%PALETTE.length],points:ind.values.map((v,i)=>({i,v}))}))];
+  const markers=[];
+  for(const tr of c.trades){const a=days.indexOf(tr.entry_at);if(a>=0)markers.push({i:a,v:tr.entry,kind:'buy',title:`Kauf ${tr.entry_at} zu ${money(tr.entry)}${tr.exit_at?'':' · noch offen'}`});
+    const b=tr.exit_at?days.indexOf(tr.exit_at):-1;if(b>=0)markers.push({i:b,v:tr.exit,kind:'sell',title:`Verkauf ${tr.exit_at} zu ${money(tr.exit)} · ${percent(tr.return)}`});}
+  $('loop-chart-legend').innerHTML=lines.map(l=>`<span>${swatch(l.color)} ${escape(l.name)}${l.lower?' (unten)':''}</span>`).join('')+'<span>▲ Kauf · ▼ Verkauf (Backtest mit den aktuellen Werten)</span>';
+  $('loop-chart').innerHTML=bars.length?candleSvg({bars,lines,markers,label:'Tageskerzen mit den Indikatoren und Trades der Strategie',time:x=>x,tick:x=>x.slice(5).split('-').reverse().join('.')}):'Keine Kerzen.';
+  const params=Object.entries(t.parameter||{}).map(([k,v])=>`${k}=<b>${escape(v)}</b>${t.standard&&t.standard[k]!==v?` <span class="muted">(Standard ${escape(t.standard[k])})</span>`:''}`).join(' · ');
+  const years=(t.jahre||[]).map(j=>`${j.von.slice(0,4)}/${j.bis.slice(0,4)}: ${pct(j.rendite)} mit ${Object.entries(j.parameter).map(([k,v])=>`${k}=${v}`).join(', ')||'Standardwerten'}`).join(' · ');
+  $('loop-chart-note').innerHTML=`${escape(d.strategy_reason||'')}. Entscheidung: ${signal(d.action)} <span class="muted">${escape(d.reason||'')}</span><br>${t.methode==='walk_forward'?`Selbst-Anpassung (Walk-forward)${t.angepasst?'':', Standardwerte blieben die besten'}. Test ${escape(t.zeitraum||'')} mit vorher gewählten Werten: ${pct(t.rendite)}, max. Drawdown ${pct(t.max_drawdown)}, ${escape(t.trades)} Trades → ${t.gruen?'GRÜN':'ROT'}${years?` (${escape(years)})`:''}.`:`Ohne Selbst-Anpassung (keine PARAMETER): 5-Jahres-Test ${pct(t.rendite)}, max. Drawdown ${pct(t.max_drawdown)}, ${escape(t.trades)} Trades → ${t.gruen?'GRÜN':'ROT'}.`}${params?`<br><span class="param-list">Live-Werte: ${params}</span>`:''} <span class="muted">· ${t.quelle==='bericht'?'aus dem täglichen Stresstest':'vom Bot selbst getestet'} · berechnet ${time(d.computed_at)}</span>`;
+}
+$('loop-chart-symbols').addEventListener('click',e=>{const b=e.target.closest('[data-loop-chart]');if(b){loopChartSymbol=b.dataset.loopChart;loopChartKey='';renderLoopChart(state);}});
 refresh(); setInterval(refresh,5000);

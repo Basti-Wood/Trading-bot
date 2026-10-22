@@ -22,7 +22,8 @@ class Executor:
             try:
                 remote = self.broker.order(local["client_id"])
                 self.store.update_order(local["client_id"], {**local, "status": remote["status"],
-                    "broker_id": remote["id"], "filled_qty": remote.get("filled_qty"), "filled_avg_price": remote.get("filled_avg_price")})
+                    "broker_id": remote["id"], "filled_qty": remote.get("filled_qty"), "filled_avg_price": remote.get("filled_avg_price"),
+                    "filled_at": remote.get("filled_at")})
             except BrokerError:
                 # A 404 after a timed-out POST is ambiguous: do not retry or discard it.
                 blocked = True
@@ -52,7 +53,8 @@ class Executor:
             self.store.update_order(cid, {**record, "status": status})
             return f"Order {status}; {exc}"
         self.store.update_order(cid, {**record, "status": remote["status"], "broker_id": remote["id"],
-                                     "filled_qty": remote.get("filled_qty"), "filled_avg_price": remote.get("filled_avg_price")})
+                                     "filled_qty": remote.get("filled_qty"), "filled_avg_price": remote.get("filled_avg_price"),
+                                     "filled_at": remote.get("filled_at")})
         queued = f"; queued for regular session {session}" if queued_for_open else ""
         return f"Alpaca order {remote['status']} (acceptance is not a fill){queued}"
 
