@@ -1,5 +1,9 @@
 """Tested stock strategies: activate versions, rank their verdicts per stock.
 
+Versions on daily candles run in the Trading-Loop bot ("loop"); versions that declare an
+intraday ZEITRAHMEN (5Min, 15Min, 30Min, 1Hour) run in the Intraday-Loop bot ("loop_day"),
+which signals after every completed bar and is flat before each close.
+
 Activation validates file hashes and risk settings. Each stock's own backtest decides
 entry eligibility; a list-wide result never gates a stock. The best green version
 by return, then lowest absolute drawdown supplies the entry signal. An open position
@@ -31,6 +35,12 @@ RETEST_HOUR = 8
 RETEST_TIMEOUT = 1200
 # Re-run on schedule: tested versions whose file is unchanged (edited files may be work in progress).
 RETESTABLE = ("bereit", "gruen", "rot", "veraltet")
+# Intraday versions: bar length in minutes. stresstest.py loads about 60 sessions of these bars.
+TIMEFRAMES = {"5Min": 5, "15Min": 15, "30Min": 30, "1Hour": 60}
+DAILY = "1Day"
+INTRADAY_HISTORY_DAYS = 90
+# Intraday versions are re-tuned this often during the session, besides the morning run.
+INTRADAY_RETEST_MINUTES = 60
 
 
 def available(config):
@@ -65,15 +75,25 @@ def file_hash(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def declared_symbol(path):
+def declared(path, name):
+    """A top-level string/number constant of a strategy file, read without executing it."""
     try:
         for node in ast.parse(path.read_text(encoding="utf-8")).body:
             if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-                    and any(isinstance(t, ast.Name) and t.id == "SYMBOL" for t in node.targets)):
+                    and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)):
                 return str(node.value.value)
     except (OSError, SyntaxError, ValueError):
         pass
     return None
+
+
+def declared_symbol(path):
+    return declared(path, "SYMBOL")
+
+
+def bot_for(timeframe):
+    """Which bot trades a version: intraday candles go to the Intraday-Loop."""
+    return "loop_day" if timeframe in TIMEFRAMES else "loop"
 
 
 def strategy_path(config, version):
@@ -99,8 +119,10 @@ def version_info(config, path, rules=None):
         report = None
     sha = file_hash(path)
     symbol = (report or {}).get("symbol") or declared_symbol(path)
+    timeframe = declared(path, "ZEITRAHMEN") or DAILY
     name, _, number = path.stem.rpartition("_v")
-    info = {"version": path.stem, "idea": name, "number": int(number), "symbol": symbol, "sha256": sha, "report": report}
+    info = {"version": path.stem, "idea": name, "number": int(number), "symbol": symbol, "sha256": sha, "report": report,
+            "timeframe": timeframe}
     if not report:
         status, note = "ungetestet", "Noch kein Stresstest mit Bericht"
     elif report.get("sha256") != sha:
@@ -111,7 +133,9 @@ def version_info(config, path, rules=None):
         status, note = "bereit", "Getestet; jede Aktie entscheidet einzeln"
     if not (symbol == LIST or isinstance(symbol, str) and STOCK.fullmatch(symbol)):
         status, note = "nicht_handelbar", "Nur US-Aktien und ETFs werden unterstützt"
-    return {**info, "status": status, "note": note, "tradable": status == "bereit" and rules["ok"], "bot": "loop"}
+    elif timeframe != DAILY and timeframe not in TIMEFRAMES:
+        status, note = "nicht_handelbar", f"ZEITRAHMEN muss {', '.join(TIMEFRAMES)} sein (oder fehlen für Tageskerzen)"
+    return {**info, "status": status, "note": note, "tradable": status == "bereit" and rules["ok"], "bot": bot_for(timeframe)}
 
 
 def catalogue(config):
@@ -124,7 +148,7 @@ def catalogue(config):
     return sorted(versions, key=lambda v: (v["idea"], v["number"]))
 
 
-def retest_targets(config, version=None, include_changed=False):
+def retest_targets(config, version=None, include_changed=False, bot=None):
     """One named version (any status), or every version due for a re-run.
 
     The scheduled run skips edited files (they may be work in progress); "Alle neu testen" in the
@@ -134,7 +158,7 @@ def retest_targets(config, version=None, include_changed=False):
         path = strategy_path(config, version)
         return [path.stem] if path else []
     due = (*RETESTABLE, "geaendert") if include_changed else RETESTABLE
-    return [v["version"] for v in catalogue(config) if v["status"] in due]
+    return [v["version"] for v in catalogue(config) if v["status"] in due and (bot is None or v["bot"] == bot)]
 
 
 def loop_python(config):
@@ -227,6 +251,17 @@ def daily_frame(bars):
     return frame[~frame.index.duplicated(keep="last")]
 
 
+def intraday_frame(bars, minutes):
+    """Completed regular-session bars in New York wall time, as stresstest.py loads them."""
+    frame = bars[["open", "high", "low", "close", "volume"]].rename(columns=str.capitalize)
+    local = frame.index.tz_convert("America/New_York")
+    start = local.hour * 60 + local.minute
+    keep = (start >= 9 * 60 + 30) & (start + minutes <= 16 * 60)
+    frame = frame[keep]
+    frame.index = local[keep].tz_localize(None)
+    return frame[~frame.index.duplicated(keep="last")]
+
+
 def evaluate(config, record, frames):
     """Test and signal one version on {symbol: bars} in a subprocess; returns per-symbol results."""
     path = strategy_path(config, record["version"])
@@ -235,8 +270,11 @@ def evaluate(config, record, frames):
     if file_hash(path) != record["sha256"]:
         raise ValueError(f"{record['version']} wurde nach dem Aktivieren geändert; neu testen und neu aktivieren")
     with tempfile.TemporaryDirectory() as folder:
-        for symbol, bars in frames.items():
-            daily_frame(bars).to_csv(Path(folder) / f"{symbol}.csv")
+        minutes = TIMEFRAMES.get(record.get("timeframe"))
+        converted = {s: intraday_frame(b, minutes) if minutes else daily_frame(b) for s, b in frames.items()}
+        for symbol, frame in converted.items():
+            if len(frame):
+                frame.to_csv(Path(folder) / f"{symbol}.csv")
         try:
             result = subprocess.run([sys.executable, "-m", "app.loop_runner", str(path), folder, str(config.loop_dir)],
                                     cwd=BOT_ROOT, capture_output=True, text=True, timeout=config.loop_timeout)
@@ -255,7 +293,13 @@ def evaluate(config, record, frames):
         if bars is None:
             continue
         close = float(bars["close"].iloc[-1])
-        results[symbol] = {**item, "bar_at": bars.index[-1].isoformat(), "target_session": bars.attrs.get("target_session"),
+        bar_at = bars.index[-1]
+        if minutes:
+            # The last completed regular-session bar the strategy saw (bot frames may hold extended hours).
+            bar_at = converted[symbol].index[-1].tz_localize("America/New_York").tz_convert("UTC")
+            close = float(converted[symbol]["Close"].iloc[-1])
+        results[symbol] = {**item, "bar_at": bar_at.isoformat(), "target_session": bars.attrs.get("target_session"),
+                           "timeframe": record.get("timeframe", DAILY),
                            "last_close": close if math.isfinite(close) else None}
     return {"version": record["version"], "sha256": record["sha256"], "symbols": results, "at": utcnow()}
 
@@ -313,4 +357,4 @@ def ranking(entry):
 
 
 def _source(item):
-    return {k: item.get(k) for k in ("bar_at", "target_session", "last_close", "to")}
+    return {k: item.get(k) for k in ("bar_at", "target_session", "last_close", "to", "timeframe")}

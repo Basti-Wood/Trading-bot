@@ -8,6 +8,10 @@ Each stock then gets its own values by walk-forward: for each of the last TEST_J
 best values are chosen on the years before it and judged on that unseen year. Only this
 out-of-sample result decides green or red. The values for live signals are chosen on all
 five years. Strategy files are never changed; the chosen values live in the report.
+
+Intraday: a strategy with ZEITRAHMEN = "5Min" (or 15Min, 30Min, 1Hour) is tested on about
+60 sessions of regular-session bars. Positions are closed before every close (never held
+overnight), and the walk-forward judges the last TEST_SITZUNGEN sessions in two parts.
 """
 from contextlib import contextmanager
 import datetime as dt
@@ -22,6 +26,7 @@ import sys
 import warnings
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from backtesting import Backtest
 from dotenv import load_dotenv
@@ -40,6 +45,13 @@ MIN_LERN_TAGE = 400        # mindestens gut anderthalb Jahre zum Anpassen
 MAX_KOMBINATIONEN = 36     # so viele Wertekombinationen höchstens pro Anpassung
 MAX_WERTE = 10             # so viele Werte höchstens pro Parameter
 DRAWDOWN_GEWICHT = .5      # Anpassung: Rendite minus halber Drawdown, damit wilde Kurven nicht gewinnen
+# Intraday (ZEITRAHMEN unter einem Tag)
+ZEITRAHMEN = {"1Day": None, "5Min": 5, "15Min": 15, "30Min": 30, "1Hour": 60}
+INTRADAY_KALENDERTAGE = 90     # rund 60 Handelstage Kerzen
+TEST_SITZUNGEN = 20            # die letzten 20 Handelstage entscheiden, in zwei Hälften angepasst
+MIN_LERN_SITZUNGEN = 20
+MIN_TRADES_INTRADAY = 10       # mindestens so viele Trades in den TEST_SITZUNGEN
+SCHLUSS_MINUTEN = 10           # so lange vor Börsenschluss ist jede Position geschlossen, keine neuen Käufe
 
 
 def dateiname(symbol):
@@ -56,17 +68,38 @@ def lade_strategie(pfad):
     return modul
 
 
-def lade_kurse(symbol):
-    """Tageskerzen der letzten 5 Jahre, zwischengespeichert in daten/ (einmal pro Tag neu)."""
+def zeitrahmen(modul):
+    wert = getattr(modul, "ZEITRAHMEN", "1Day")
+    if wert not in ZEITRAHMEN:
+        raise SystemExit(f"ZEITRAHMEN muss einer von {', '.join(ZEITRAHMEN)} sein (jetzt: {wert!r}).")
+    return wert
+
+
+def ist_intraday(kurse):
+    """Intraday-Kerzen haben Uhrzeiten; Tageskerzen liegen alle auf Mitternacht."""
+    return bool(len(kurse)) and bool((kurse.index != kurse.index.normalize()).any())
+
+
+def lade_kurse(symbol, rahmen="1Day"):
+    """Tageskerzen der letzten 5 Jahre (einmal pro Tag neu) oder rund 60 Handelstage Intraday-Kerzen
+    der regulären Handelszeit in New Yorker Zeit (alle 30 Minuten neu), zwischengespeichert in daten/."""
     if not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", symbol):
         raise ValueError("Nur US-Aktien und ETFs werden unterstützt")
-    datei = ORDNER / "daten" / f"{symbol}_1Day.csv"
-    if datei.exists() and dt.date.fromtimestamp(datei.stat().st_mtime) == dt.date.today():
+    minuten = ZEITRAHMEN[rahmen]
+    datei = ORDNER / "daten" / f"{symbol}_{rahmen}.csv"
+    if datei.exists() and (dt.datetime.now().timestamp() - datei.stat().st_mtime < 1800 if minuten
+                           else dt.date.fromtimestamp(datei.stat().st_mtime) == dt.date.today()):
         return pd.read_csv(datei, index_col=0, parse_dates=True)
 
-    from alpaca.data.timeframe import TimeFrame
-    ende = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
-    start = ende - dt.timedelta(days=JAHRE * 365 + 2)
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    if minuten:
+        ende = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=16)  # kostenlose Daten: 15 Minuten Verzug
+        start = ende - dt.timedelta(days=INTRADAY_KALENDERTAGE)
+        rahmen_alpaca = TimeFrame(minuten // 60, TimeFrameUnit.Hour) if minuten >= 60 else TimeFrame(minuten, TimeFrameUnit.Minute)
+    else:
+        ende = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+        start = ende - dt.timedelta(days=JAHRE * 365 + 2)
+        rahmen_alpaca = TimeFrame.Day
     from alpaca.data.enums import Adjustment, DataFeed
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
@@ -75,7 +108,7 @@ def lade_kurse(symbol):
     if not key or not secret:
         raise SystemExit("Alpaca-Schlüssel fehlen in .env (ALPACA_API_KEY, ALPACA_SECRET_KEY).")
     bars = StockHistoricalDataClient(key, secret).get_stock_bars(StockBarsRequest(
-        symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start, end=ende,
+        symbol_or_symbols=symbol, timeframe=rahmen_alpaca, start=start, end=ende,
         feed=DataFeed.IEX, adjustment=Adjustment.ALL))
 
     df = bars.df
@@ -83,7 +116,17 @@ def lade_kurse(symbol):
         raise SystemExit(f"Keine Kurse für {symbol} gefunden. Stimmt das Symbol?")
     df = df.xs(symbol, level="symbol") if "symbol" in df.index.names else df
     df = df.rename(columns=str.capitalize)[["Open", "High", "Low", "Close", "Volume"]]
-    df.index = pd.DatetimeIndex(df.index).tz_localize(None)
+    if minuten:
+        # Nur abgeschlossene Kerzen der regulären Handelszeit, in New Yorker Uhrzeit.
+        lokal = pd.DatetimeIndex(df.index).tz_convert("America/New_York")
+        beginn = lokal.hour * 60 + lokal.minute
+        behalten = (beginn >= 9 * 60 + 30) & (beginn + minuten <= 16 * 60)
+        df = df[behalten]
+        df.index = lokal[behalten].tz_localize(None)
+        if df.empty:
+            raise SystemExit(f"Keine Intraday-Kerzen für {symbol} in der regulären Handelszeit.")
+    else:
+        df.index = pd.DatetimeIndex(df.index).tz_localize(None)
     datei.parent.mkdir(exist_ok=True)
     df.to_csv(datei)
     return df
@@ -143,9 +186,51 @@ def parameter(modul, werte):
             setattr(modul, name, wert)
 
 
+def schluss_kerzen(index):
+    """True für Kerzen, die höchstens SCHLUSS_MINUTEN vor dem Ende ihrer Sitzung enden.
+
+    Vergangene Sitzungen enden mit ihrer letzten Kerze (Halbtage inklusive). Die letzte Sitzung kann noch
+    laufen: Sie endet frühestens um 16:00, damit die neueste Kerze nicht als Schluss gilt (den Halbtag
+    heute erkennt der Bot an der Börsenuhr).
+    """
+    if len(index) < 2:
+        return np.zeros(len(index), dtype=bool)
+    abstaende = pd.Series(index).diff().dropna()
+    schritt = abstaende[abstaende > pd.Timedelta(0)].min()
+    tage = index.normalize()
+    ende = pd.Series(index + schritt)
+    sitzung = ende.groupby(tage.values).transform("max")
+    letzte = tage == tage[-1]
+    sitzung[letzte] = sitzung[letzte].clip(lower=tage[-1] + pd.Timedelta(hours=16))
+    return ((sitzung - ende) <= pd.Timedelta(minutes=SCHLUSS_MINUTEN)).to_numpy()
+
+
+def strategie_klasse(modul, kurse):
+    """Tageskerzen: die Strategie unverändert. Intraday: dieselbe Strategie, aber vor jedem Schluss flach,
+    wie der Bot (keine Position über Nacht, keine Käufe in den letzten SCHLUSS_MINUTEN)."""
+    basis = modul.Strategie
+    if not ist_intraday(kurse):
+        return basis
+    schluss = schluss_kerzen(kurse.index)
+
+    class Tagesende(basis):
+        def next(self):
+            if schluss[len(self.data) - 1]:
+                for order in list(self.orders):
+                    if not order.is_contingent:
+                        order.cancel()
+                if self.position:
+                    self.position.close()
+                return
+            super().next()
+
+    Tagesende.__name__ = basis.__name__
+    return Tagesende
+
+
 def backtest(modul, kurse, werte, finalize=True):
     with parameter(modul, werte):
-        bt = Backtest(kurse, modul.Strategie, cash=STARTKAPITAL, commission=KOSTEN, finalize_trades=finalize)
+        bt = Backtest(kurse, strategie_klasse(modul, kurse), cash=STARTKAPITAL, commission=KOSTEN, finalize_trades=finalize)
         return bt, bt.run()
 
 
@@ -162,7 +247,10 @@ def beste_werte(modul, kurse, kombinationen, standard):
     """Die Kombination mit der besten Bewertung auf diesen Kursen; ohne gültige bleiben die Standardwerte."""
     if len(kombinationen) < 2:
         return standard
-    min_trades = max(1, round(MIN_TRADES * len(kurse) / (JAHRE * 252)))
+    if ist_intraday(kurse):
+        min_trades = max(1, round(MIN_TRADES_INTRADAY * kurse.index.normalize().nunique() / TEST_SITZUNGEN))
+    else:
+        min_trades = max(1, round(MIN_TRADES * len(kurse) / (JAHRE * 252)))
     bester = None
     for werte in kombinationen:
         try:
@@ -183,15 +271,26 @@ def fenster_kurve(stats, start):
     return kapital[kapital.index >= start] / basis
 
 
+def test_grenzen(kurse):
+    """Beginn jedes Testabschnitts: Tageskerzen je ein Jahr, Intraday je die Hälfte der TEST_SITZUNGEN."""
+    if not ist_intraday(kurse):
+        ende = kurse.index[-1]
+        return [ende - pd.DateOffset(years=TEST_JAHRE - i) for i in range(TEST_JAHRE)]
+    tage = kurse.index.normalize().unique()
+    if len(tage) < TEST_SITZUNGEN + MIN_LERN_SITZUNGEN:
+        raise ValueError(f"zu wenig Intraday-Kurshistorie (mindestens {TEST_SITZUNGEN + MIN_LERN_SITZUNGEN} Handelstage)")
+    return [tage[-TEST_SITZUNGEN], tage[-TEST_SITZUNGEN // 2]]
+
+
 def walk_forward(modul, kurse, kombinationen, standard):
-    """Out-of-sample-Kennzahlen der letzten TEST_JAHRE Jahre, jedes Jahr mit vorher angepassten Werten."""
-    ende = kurse.index[-1]
-    grenzen = [ende - pd.DateOffset(years=TEST_JAHRE - i) for i in range(TEST_JAHRE)]
+    """Out-of-sample-Kennzahlen der Testabschnitte, jeder mit Werten, die nur ältere Kurse kannten."""
+    grenzen = test_grenzen(kurse)
+    intraday = ist_intraday(kurse)
     kurven, trades, jahre, stand = [], 0, [], 1.
     for i, start in enumerate(grenzen):
         stop = grenzen[i + 1] if i + 1 < len(grenzen) else None
         lernen = kurse[kurse.index < start]
-        if len(lernen) < MIN_LERN_TAGE:
+        if not intraday and len(lernen) < MIN_LERN_TAGE:
             raise ValueError(f"zu wenig Kurshistorie für den Walk-forward (mindestens {MIN_LERN_TAGE} Tage vor dem Test)")
         werte = beste_werte(modul, lernen, kombinationen, standard)
         teil = kurse if stop is None else kurse[kurse.index < stop]
@@ -222,15 +321,19 @@ def pruefe(modul, kurse):
     Mit PARAMETER entscheidet der Walk-forward der letzten TEST_JAHRE Jahre, sonst wie bisher die 5 Jahre.
     """
     standard, kombinationen = parameter_raster(modul)
+    intraday = ist_intraday(kurse)
     werte = beste_werte(modul, kurse, kombinationen, standard)
     bt, stats = backtest(modul, kurse, werte)
     gesamt = kennzahlen(stats)
-    eintrag = {"methode": "walk_forward" if len(kombinationen) > 1 else "fuenf_jahre",
+    # Intraday entscheidet immer der Testabschnitt (gut 60 Sitzungen sind für ein Gesamturteil zu wenig).
+    walk = len(kombinationen) > 1 or intraday
+    eintrag = {"methode": "walk_forward" if walk else "fuenf_jahre", "zeitrahmen": zeitrahmen(modul),
                "parameter": werte, "standard": standard, "angepasst": werte != standard,
                "von": f"{kurse.index[0]:%Y-%m-%d}", "bis": f"{kurse.index[-1]:%Y-%m-%d}"}
-    if len(kombinationen) > 1:
+    if walk:
         test = walk_forward(modul, kurse, kombinationen, standard)
-        ergebnis = urteil_werte(test["rendite"], test["max_drawdown"], test["trades"], MIN_TRADES_TEST)
+        ergebnis = urteil_werte(test["rendite"], test["max_drawdown"], test["trades"],
+                                MIN_TRADES_INTRADAY if intraday else MIN_TRADES_TEST)
         eintrag.update({k: test[k] for k in ("rendite", "kaufen_halten", "max_drawdown", "trades")},
                        gewinnquote=gesamt["gewinnquote"], test=test, gesamt=gesamt)
     else:
@@ -287,7 +390,7 @@ def listen_test(pfad, modul, berichte):
     print(f"{pfad.stem} · Liste mit {len(symbole)} {wort}")
     for symbol in symbole:
         try:
-            kurse = lade_kurse(symbol)
+            kurse = lade_kurse(symbol, zeitrahmen(modul))
             eintrag, bt, stats = pruefe(modul, kurse)
         except (SystemExit, Exception) as fehler:
             print(f"  {symbol:6} übersprungen: {fehler}")
@@ -336,7 +439,7 @@ def main():
     warnings.filterwarnings("ignore")
     if modul.SYMBOL == "LISTE":
         return listen_test(pfad, modul, berichte)
-    kurse = lade_kurse(modul.SYMBOL)
+    kurse = lade_kurse(modul.SYMBOL, zeitrahmen(modul))
     eintrag, bt, stats = pruefe(modul, kurse)
 
     (berichte / f"{pfad.stem}.txt").write_text(str(stats), encoding="utf-8")

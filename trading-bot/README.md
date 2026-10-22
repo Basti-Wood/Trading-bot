@@ -181,9 +181,18 @@ The report combines these per-stock summaries with a separate Llama market overv
 
 Set `FREELLM_BASE_URL` and `FREELLM_API_KEY` for your proxy. Leave `FREELLM_MODELS` empty to discover an available Llama model via `/models?available=true`, or set one installed Llama model ID. Only one model is used per stock. Cached daily forecasts keep their original chronology and learning labels.
 
+### Intraday-Loop (trading-loop strategies on intraday candles)
+
+A strategy file with `ZEITRAHMEN = "5Min"` (also `15Min`, `30Min`, `1Hour`) is traded by a fourth bot, **Intraday-Loop** (`loop_day`), with its own weight in *Deine Trader* (starts at 0). Files without `ZEITRAHMEN` stay with the daily Trading-Loop. `strategien/intraday_trend_v1.py` is an example (EMA cross above the session VWAP, 5-minute bars, tunable `PARAMETER`); it is untested until you run its stress test.
+
+* **Stress test:** about 60 trading days (90 calendar days) of IEX regular-session bars in New York time, cached for 30 minutes. The strategy runs unchanged inside a wrapper that cancels entries and closes the position on every bar ending 10 minutes or less before its session's close (half days included), so no test trade is held overnight. The walk-forward always applies: values are chosen on the sessions before each half of the last 20 sessions and judged on those 20 unseen sessions; green needs a positive return, drawdown within `risiko.py` and at least 10 trades. At least 40 sessions of history are required.
+* **Re-tuning:** at 08:00 New York time like daily versions, plus every 60 minutes while the market is open. Each bot only re-tests its own versions; "Alle neu testen" asks both.
+* **Signals:** after every completed bar (20 seconds grace for the data feed), one bar request per timeframe covers all of the bot's stocks; each active version is evaluated in the same isolated `app.loop_runner` subprocess and reuses the report's tuned values when the report is from today or yesterday. A BUY is valid only for the bar right after its signal bar. Exits: the strategy's own sell signal, the `risiko.py` stop (broker OTO stop), the `risiko.py` account drawdown halt, and flattening 10 minutes before the actual close (`DAYTRADE_FLATTEN_MINUTES`). Entries use fresh quotes, a 60-second unfilled-entry cancel, numbered client order IDs and at most `DAYTRADE_MAX_ENTRIES_PER_SYMBOL` entries per stock and day. Paper only.
+* **Limits:** 20 test sessions are a small sample, IEX volume is a single exchange, and the backtest fills at the next bar's open without spread or partial fills. Intraday strategies trade often; the 0.1% cost per order matters more than on daily candles.
+
 ### Trading-loop candle chart
 
-In the Trading-Loop section, choose a stock to see `GET /api/loop/chart/<symbol>`: the last 130 daily candles, the deciding version's own indicators (`self.I(...)`; price-scale lines on the candles, oscillators such as ADX/RSI in a lower pane), its backtest buys/sells with the current tuned values, the live values next to the defaults, the yearly walk-forward picks and the current signal. The chart comes from the same subprocess run that produces the signal; `/api/state` omits it to stay small.
+In the Trading-Loop section, choose a stock to see `GET /api/loop/chart/<symbol>?bot=loop|loop_day`: the last 130 daily (or intraday) candles, the deciding version's own indicators (`self.I(...)`; price-scale lines on the candles, oscillators such as ADX/RSI in a lower pane), its backtest buys/sells with the current tuned values, the live values next to the defaults, the yearly walk-forward picks and the current signal. The chart comes from the same subprocess run that produces the signal; `/api/state` omits it to stay small.
 
 ### Forecast versus reality
 

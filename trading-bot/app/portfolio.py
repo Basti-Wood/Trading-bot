@@ -1,4 +1,4 @@
-"""Coordinate three stock strategies under shared account/order limits."""
+"""Coordinate four stock strategies under shared account/order limits."""
 from dataclasses import replace
 import threading
 
@@ -7,7 +7,7 @@ from .allocation import bot_share
 from .engine import Engine
 from .store import StrategyStore, utcnow
 
-STRATEGIES = ("daily", "daytrade", "loop")
+STRATEGIES = ("daily", "daytrade", "loop", "loop_day")
 
 
 def strategy_contexts(config, store):

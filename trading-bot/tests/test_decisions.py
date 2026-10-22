@@ -217,7 +217,7 @@ class ParallelPositionDisplayTests(TempCase):
     def test_same_holding_belongs_only_to_owning_strategy(self):
         cfg = replace(self.cfg, trading_mode='both')
         portfolio = PortfolioEngine(cfg, self.store)
-        daily, daytrade, _ = portfolio.engines
+        daily, daytrade, _, _ = portfolio.engines
         daily.store.set('owned:SPY', True)
         self.store.set('account', {'positions': [{'symbol': 'SPY', 'qty': '4', 'avg_entry_price': '100'}]})
         client = create_app(cfg, self.store).test_client()

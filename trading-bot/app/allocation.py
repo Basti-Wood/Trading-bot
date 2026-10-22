@@ -6,15 +6,15 @@ External holdings are observed and stay outside the bots' allowances.
 """
 import math
 
-BOTS = ("daily", "daytrade", "loop")
-NAMES = {"daily": "Prediction-Bot", "daytrade": "Daytrading-Bot", "loop": "Trading-Loop"}
+BOTS = ("daily", "daytrade", "loop", "loop_day")
+NAMES = {"daily": "Prediction-Bot", "daytrade": "Daytrading-Bot", "loop": "Trading-Loop", "loop_day": "Intraday-Loop"}
 
 
 def allocation(config, store):
     saved = store.get("allocation") or {}
     share = config.daytrade_capital_share
     # Without saved settings the previous daily/day-trading split applies; newer bots start at 0.
-    weights = {"daily": round((1 - share) * 100), "daytrade": round(share * 100), "loop": 0}
+    weights = {"daily": round((1 - share) * 100), "daytrade": round(share * 100), "loop": 0, "loop_day": 0}
     weights.update({k: v for k, v in (saved.get("weights") or {}).items() if k in BOTS})
     return {"capital_fraction": saved.get("capital_fraction", config.capital_fraction),
             "capital_cap": saved.get("capital_cap", config.capital),

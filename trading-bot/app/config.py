@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 
-CHILD_MODES = ("loop",)
+CHILD_MODES = ("loop", "loop_day")
 
 
 def flag(name, default=False):
@@ -140,8 +140,18 @@ class Config:
 
     @property
     def loop(self):
-        """Trades tested trading-loop stock strategy files."""
-        return self.trading_mode == "loop"
+        """Trades tested trading-loop stock strategy files (daily or intraday candles)."""
+        return self.trading_mode in {"loop", "loop_day"}
+
+    @property
+    def loop_intraday(self):
+        """The intraday trading-loop: strategy files with ZEITRAHMEN below one day."""
+        return self.trading_mode == "loop_day"
+
+    @property
+    def same_day(self):
+        """Strategies that trade inside one session and are flat before the close."""
+        return self.trading_mode in {"daytrade", "loop_day"}
 
 
     @property

@@ -63,6 +63,14 @@ Live-Handel wählt er über alle 5 Jahre. Der Bot passt jeden Morgen neu an. Die
 stehen im Bericht (`parameter`, `standard`, `test.jahre`). Ohne `PARAMETER` gilt wie bisher der 5-Jahres-Test. Der Kritiker
 darf keine Listen wählen, die nur die Vergangenheit schönrechnen: wenige, übliche Werte rund um die Idee des Nutzers.
 
+## Intraday-Strategien (Intraday-Loop)
+Will der Nutzer innerhalb eines Tages handeln, bekommt die Strategie `ZEITRAHMEN = "5Min"` (oder `"15Min"`, `"30Min"`, `"1Hour"`).
+Der Stresstest lädt dann rund 60 Handelstage dieser Kerzen (reguläre Handelszeit, New Yorker Uhrzeit) und schließt jede Position
+10 Minuten vor Börsenschluss, nie über Nacht. Grün oder rot entscheiden immer die letzten 20 Handelstage mit vorher angepassten
+Werten (mindestens 10 Trades). Im Bot handelt sie der Intraday-Loop: Signal nach jeder abgeschlossenen Kerze, stündlich neu
+angepasst. Indikatoren, die pro Tag neu starten (z. B. VWAP), rechnen pro Datum (`self.data.index.normalize()`), Beispiel:
+`strategien/intraday_trend_v1.py`. Ohne `ZEITRAHMEN` bleibt alles wie oben (Tageskerzen, Trading-Loop).
+
 ## Im Trading-Bot (Standardweg für Live im Paper-Modus)
 Dieser Ordner liegt im Trading-Bot (`trading-bot/trading-loop`). Der Bot handelt Versionen aus diesem Ordner als dritten Bot
 „Trading-Loop“. Bot-Code (`../app`, `../dashboard`, `../tests`) änderst du nur, wenn der Nutzer es ausdrücklich verlangt.

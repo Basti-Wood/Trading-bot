@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 
 REPORT_DAYS = 7
+# Intraday reports are re-tuned hourly; one from before today's session is still acceptable.
+INTRADAY_REPORT_DAYS = 1
 CHART_BARS = 130
 
 
@@ -61,12 +63,17 @@ def report_entries(path, loop_dir, stresstest):
     return {report.get("symbol"): report}
 
 
+def intraday(data):
+    return bool(len(data)) and bool((data.index != data.index.normalize()).any())
+
+
 def usable(entry, data):
     """Only tuned entries (stresstest.pruefe) whose test reaches the current data are reused."""
     try:
+        limit = INTRADAY_REPORT_DAYS if intraday(data) else REPORT_DAYS
         return (entry.get("methode") in {"walk_forward", "fuenf_jahre"} and entry.get("ergebnis") in {"gruen", "rot"}
                 and isinstance(entry.get("parameter"), dict)
-                and (data.index[-1] - pd.Timestamp(entry["bis"])).days <= REPORT_DAYS)
+                and (data.index[-1].normalize() - pd.Timestamp(entry["bis"]).normalize()).days <= limit)
     except (AttributeError, KeyError, TypeError, ValueError):
         return False
 
@@ -80,11 +87,12 @@ def chart(live, data):
     """Recent daily candles with the strategy's own indicators and trades, for the dashboard."""
     strategy = live._strategy
     start = len(data) - min(CHART_BARS, len(data))
-    days = [f"{d:%Y-%m-%d}" for d in data.index[start:]]
+    label = "%Y-%m-%dT%H:%M" if intraday(data) else "%Y-%m-%d"
+    days = [d.strftime(label) for d in data.index[start:]]
     bars = [{"at": day, **{k.lower(): finite(row[k]) for k in ("Open", "High", "Low", "Close")}}
             for day, (_, row) in zip(days, data.iloc[start:].iterrows())]
     indicators = []
-    for indicator in getattr(strategy, "_indicators", [])[:8]:
+    for indicator in [i for i in getattr(strategy, "_indicators", []) if i._opts.get("plot", True)][:8]:
         values = np.atleast_2d(np.asarray(indicator, dtype=float))
         names = indicator.name if isinstance(indicator.name, list) else [indicator.name] * len(values)
         overlay = indicator._opts.get("overlay")
@@ -97,11 +105,11 @@ def chart(live, data):
     closed = live["_trades"]
     for _, trade in closed.iterrows():
         if trade["ExitTime"] >= data.index[start]:
-            trades.append({"entry_at": f"{trade['EntryTime']:%Y-%m-%d}", "entry": finite(trade["EntryPrice"]),
-                           "exit_at": f"{trade['ExitTime']:%Y-%m-%d}", "exit": finite(trade["ExitPrice"]),
+            trades.append({"entry_at": trade["EntryTime"].strftime(label), "entry": finite(trade["EntryPrice"]),
+                           "exit_at": trade["ExitTime"].strftime(label), "exit": finite(trade["ExitPrice"]),
                            "return": finite(trade["ReturnPct"])})
     for trade in strategy.trades:  # Still open after the last bar.
-        trades.append({"entry_at": f"{trade.entry_time:%Y-%m-%d}", "entry": finite(trade.entry_price),
+        trades.append({"entry_at": trade.entry_time.strftime(label), "entry": finite(trade.entry_price),
                        "exit_at": None, "exit": None, "return": None})
     return {"bars": bars, "indicators": indicators, "trades": trades}
 
@@ -114,13 +122,18 @@ def run(module, data, stresstest, Backtest, symbol="", reports=None):
         if source == "neu":
             entry, _, _ = stresstest.pruefe(module, data)
         values = entry["parameter"]
-        with stresstest.parameter(module, values):
-            live = Backtest(data, module.Strategie, cash=stresstest.STARTKAPITAL, commission=costs, finalize_trades=False).run()
+        if hasattr(stresstest, "strategie_klasse"):
+            # Same class as the stress test: intraday strategies are flat before every close.
+            _, live = stresstest.backtest(module, data, values, finalize=False)
+        else:
+            with stresstest.parameter(module, values):
+                live = Backtest(data, module.Strategie, cash=stresstest.STARTKAPITAL, commission=costs, finalize_trades=False).run()
         verdict = entry["urteil"]
         test = {k: entry.get(k) for k in ("rendite", "kaufen_halten", "max_drawdown", "trades")}
         test.update(methode=entry["methode"], parameter=values, standard=entry.get("standard", {}), quelle=source,
                     angepasst=bool(entry.get("angepasst")), zeitraum=entry.get("test", {}).get("von") and
-                    f"{entry['test']['von']} bis {entry['test']['bis']}", jahre=entry.get("test", {}).get("jahre", []))
+                    f"{entry['test']['von']} bis {entry['test']['bis']}", jahre=entry.get("test", {}).get("jahre", []),
+                    zeitrahmen=entry.get("zeitrahmen", "1Day"))
     else:  # An older stresstest.py without self-tuning.
         stats = Backtest(data, module.Strategie, cash=stresstest.STARTKAPITAL, commission=costs, finalize_trades=True).run()
         verdict = stresstest.urteil(stats)

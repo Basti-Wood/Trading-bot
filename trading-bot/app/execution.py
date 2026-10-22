@@ -62,7 +62,7 @@ class Executor:
                 queued_for_open=False, reference_price=None, stop_fraction=None, target_fraction=None, plan=None):
         cfg = self.config
         self.changed = False
-        if queued_for_open and (cfg.intraday or not cfg.queue_daily_orders or action != "BUY"):
+        if queued_for_open and (cfg.same_day or not cfg.queue_daily_orders or action != "BUY"):
             return "Only daily buy orders can be queued for the next regular session"
         if not cfg.paper and not cfg.allow_live:
             return "Live mode is not enabled"
@@ -107,6 +107,8 @@ class Executor:
                 return "An entry outcome is unresolved; waiting for reconciliation"
             if cfg.loop and not stop_fraction:
                 return "Stop-Loss aus risiko.py fehlt; Einstieg blockiert"
+            if cfg.loop_intraday and len(self.store.session_entries(symbol, session)) >= cfg.daytrade_max_entries:
+                return "Intraday-Loop: Einstiegslimit für diese Aktie heute erreicht"
             if cfg.intraday:
                 counted = [p for p in positions if not cfg.coordinated or self.store.get(f"owned:{p['symbol']}", False)]
                 if len([p for p in counted if float(p["qty"]) != 0]) >= cfg.daytrade_max_positions:
@@ -120,7 +122,7 @@ class Executor:
             if (not asset.get("tradable") or asset.get("status") != "active"
                     or asset.get("class", "us_equity") != "us_equity"):
                 return "Asset is not a tradable US stock or ETF"
-            price = (reference_price if queued_for_open else self.broker.quote(symbol)[1] if cfg.intraday
+            price = (reference_price if queued_for_open else self.broker.quote(symbol)[1] if cfg.same_day
                      else self.broker.latest_price(symbol))
             if not isinstance(price, (int, float)) or not math.isfinite(price) or not 0 < price < 1000000:
                 return "Invalid reference price; entry blocked"
@@ -138,12 +140,12 @@ class Executor:
             budget = min(strategy_capital * cfg.position_fraction, capital * cfg.gross_fraction - gross,
                          strategy_capital * cfg.gross_fraction - strategy_gross,
                          float(account["cash"]), float(account["buying_power"]))
-            if cfg.intraday:
+            if cfg.same_day:
                 # Broker-reported capacity, when supplied, can only lower our cash cap.
                 for field in ("daytrading_buying_power", "non_marginable_buying_power"):
                     if account.get(field) is not None:
                         budget = min(budget, float(account[field]))
-            limit = math.ceil(price * (1.0005 if cfg.intraday else 1.002) * 100) / 100
+            limit = math.ceil(price * (1.0005 if cfg.same_day else 1.002) * 100) / 100
             qty = math.floor(budget / limit)
             fractional = qty < 1
             if fractional:
@@ -180,6 +182,10 @@ class Executor:
         if cfg.loop:
             # Distinct from daily IDs so both bots can trade a symbol on the same day.
             base_id = f"ensemble-{scope}-loop-{session}-{symbol}-{side}"
+        if cfg.loop_intraday:
+            # Several round trips per day: number each entry; its exit carries the same number.
+            entries = len(self.store.session_entries(symbol, session))
+            base_id = f"ensemble-{scope}-lday-{session.replace('-', '')}-{symbol}-{side[0]}{entries + 1 if side == 'buy' else max(1, entries)}"
         if cfg.intraday:
             if side == "buy":
                 suffix = str(len(self.store.session_entries(symbol, session)) + 1)

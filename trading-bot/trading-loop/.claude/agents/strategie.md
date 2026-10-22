@@ -18,6 +18,7 @@ Du bist der Strategie-Agent im Trading-Loop. Du übersetzt die Regeln des Nutzer
    SYMBOL = "..."   # Aktie/ETF wie bei Alpaca geschrieben,
                     # oder "LISTE" = Aktienliste der Bots plus externe Aktien (python liste.py)
 
+   # ZEITRAHMEN = "5Min"  # nur für Intraday-Ideen (5Min, 15Min, 30Min, 1Hour); sonst weglassen = Tageskerzen
    TAGE = 20        # Konstanten der Idee
    # Selbst-Anpassung: der Stresstest wählt pro Aktie Werte aus diesen Listen (Walk-forward, siehe stresstest.py).
    PARAMETER = {"TAGE": [10, 20, 30]}

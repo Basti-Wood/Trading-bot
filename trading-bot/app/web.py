@@ -17,6 +17,7 @@ from .portfolio import strategy_contexts
 from .decisions import position_context
 
 MAX_LOOP_STRATEGIES = 10
+LOOP_BOTS = ("loop", "loop_day")
 # About 90 sessions of daily candles for the forecast chart.
 DAILY_LOOKBACK_DAYS = 140
 
@@ -26,8 +27,8 @@ def create_app(config, store, broker_factory=Alpaca):
     parallel = config.trading_mode == "both"
 
     def loop_bots():
-        """The stock trading-loop dashboard context."""
-        return [(mode, *contexts[mode]) for mode in ("loop",) if mode in contexts]
+        """The trading-loop bots: daily candles ("loop") and intraday candles ("loop_day")."""
+        return [(mode, *contexts[mode]) for mode in LOOP_BOTS if mode in contexts]
 
     def loop_state(equity):
         if "loop" not in contexts:
@@ -60,21 +61,31 @@ def create_app(config, store, broker_factory=Alpaca):
             halts.append(mode_state.get("halt"))
             peaks.append(mode_state.get("equity_peak"))
         peak = max((p for p in peaks if p), default=None)
+        bots = {mode: {"name": NAMES[mode], "entries_enabled": mode_state.get("entries_enabled", False), "halt": mode_state.get("halt"),
+                       "retest": mode_state.get("loop_retest"), "retest_requested": bool(mode_state.get("loop_retest_requested"))}
+                for mode, _, mode_state in loop_bots()}
         return {"available": loop.available(cfg), "folder": str(cfg.loop_dir or ""), "rules": loop.risk_rules(cfg),
-                "versions": versions, "running": running, "stocks": loop_stock_rows(cfg, state, running), "errors": loop.errors(cfg), "halt": next((h for h in halts if h), None),
+                "versions": versions, "running": running,
+                "stocks": [row for mode, mode_cfg, mode_state in loop_bots()
+                           for row in loop_stock_rows(mode, mode_cfg, mode_state, [v for v in running if v["bot"] == mode])],
+                "errors": loop.errors(cfg), "halt": next((h for h in halts if h), None),
                 "peak": peak, "drawdown": (peak - equity) / peak * 100 if peak and equity else None,
-                "entries_enabled": state.get("entries_enabled", False),
-                "retest": state.get("loop_retest"), "retest_requested": bool(state.get("loop_retest_requested")),
-                "retest_hour": loop.RETEST_HOUR}
+                "entries_enabled": state.get("entries_enabled", False), "bots": bots,
+                "retest": state.get("loop_retest"),
+                "retest_requested": any(b["retest_requested"] for b in bots.values()),
+                "retest_running": any((b["retest"] or {}).get("status") == "running" for b in bots.values()),
+                "retest_hour": loop.RETEST_HOUR, "intraday_retest_minutes": loop.INTRADAY_RETEST_MINUTES,
+                "timeframes": list(loop.TIMEFRAMES)}
 
 
-    def loop_stock_rows(cfg, state, running):
+    def loop_stock_rows(mode, cfg, state, running):
         symbols = sorted({r["symbol"] for v in running for r in v["rows"]})
         rows = []
         for symbol in symbols:
             choice = loop.combine(state, symbol, cfg)
             decision = state.get(f"forecast:{symbol}") or {}
-            rows.append({"symbol": symbol, "version": choice.get("version"), "test": choice.get("test"),
+            rows.append({"symbol": symbol, "bot": mode, "version": choice.get("version"), "test": choice.get("test"),
+                         "timeframe": choice.get("timeframe"),
                          "signal": choice.get("strategy_signal", choice.get("signal")), "reason": choice.get("reason"),
                          "action": decision.get("action", "WAIT"), "views": choice.get("views", {}),
                          "owner": loop.owner_version(state, symbol) if state.get(f"owned:{symbol}", False) else None})
@@ -196,9 +207,12 @@ def create_app(config, store, broker_factory=Alpaca):
     def loop_chart(symbol):
         if not loop.STOCK.fullmatch(symbol):
             return jsonify(error="Invalid stock symbol"), 400
-        if "loop" not in contexts:
+        bot = request.args.get("bot", "loop")
+        if bot not in LOOP_BOTS:
+            return jsonify(error="Unknown trading-loop bot"), 400
+        if bot not in contexts:
             return jsonify(error="Der Trading-Loop läuft nur mit TRADING_MODE=both"), 409
-        cfg, state = contexts["loop"]
+        cfg, state = contexts[bot]
         choice = loop.combine(state, symbol, cfg)
         active = loop.active_versions(state)
         # The deciding version, else any active version that evaluated this stock.
@@ -208,7 +222,7 @@ def create_app(config, store, broker_factory=Alpaca):
             item = (results.get("symbols") or {}).get(symbol)
             if results.get("sha256") == active[version]["sha256"] and item and item.get("chart"):
                 decision = state.get(f"forecast:{symbol}") or {}
-                return jsonify(symbol=symbol, version=version, deciding=version == choice.get("version"),
+                return jsonify(symbol=symbol, bot=bot, version=version, deciding=version == choice.get("version"),
                                chart=item["chart"], test=item.get("test"), signal=item.get("signal"),
                                strategy_reason=item.get("reason"), reason=choice.get("reason"),
                                action=decision.get("action", "WAIT"), computed_at=results.get("at"))
@@ -308,7 +322,7 @@ def create_app(config, store, broker_factory=Alpaca):
                 return jsonify(error="Wait for a successful Alpaca account connection"), 409
             if store.get("account", {}).get("loss_halt"):
                 return jsonify(error="Daily loss halt is active"), 409
-            if selected in ("loop",) and contexts[selected][1].get("halt"):
+            if selected in LOOP_BOTS and contexts[selected][1].get("halt"):
                 return jsonify(error="Drawdown-Stopp aus risiko.py aktiv. Erst im Trading-Loop den Höchststand zurücksetzen."), 409
             for cfg, state in targets:
                 # A drawdown-halted trading-loop stays paused when enabling all bots.
@@ -361,13 +375,18 @@ def create_app(config, store, broker_factory=Alpaca):
             if not info["tradable"]:
                 return jsonify(error=f"{version} kann nicht aktiviert werden: {info['note'] if info['status'] != 'bereit' else loop.risk_rules(cfg)['message']}"), 409
             bot = info["bot"]
+            if bot not in contexts:
+                return jsonify(error=f"Der Bot {NAMES.get(bot, bot)} läuft nicht"), 409
             state = contexts[bot][1]
             active = loop.active_versions(state)
             if version not in active and len(active) >= MAX_LOOP_STRATEGIES:
                 return jsonify(error=f"Höchstens {MAX_LOOP_STRATEGIES} Strategien gleichzeitig"), 409
-            active[version] = {"version": version, "symbol": info["symbol"], "sha256": info["sha256"], "activated_at": utcnow()}
+            active[version] = {"version": version, "symbol": info["symbol"], "sha256": info["sha256"],
+                               "timeframe": info["timeframe"], "activated_at": utcnow()}
             target = "die Aktienliste der Bots plus externe Aktien" if info["symbol"] == loop.LIST else info["symbol"]
-            message = f"{version} prüft {target} im Paper-Modus. Pro Aktie entscheidet die beste grüne aktive Version."
+            message = (f"{version} prüft {target} im Paper-Modus ({NAMES[bot]}"
+                       f"{', ' + info['timeframe'] + '-Kerzen, flat vor Börsenschluss' if bot == 'loop_day' else ''}). "
+                       "Pro Aktie entscheidet die beste grüne aktive Version.")
         elif action == "deactivate":
             bot = next((mode for mode, _, mode_state in loop_bots() if version in loop.active_versions(mode_state)), None)
             if not bot:
@@ -383,14 +402,19 @@ def create_app(config, store, broker_factory=Alpaca):
             store.event("control", {"action": "loop_reset_peak", "strategy": "loop"})
             return jsonify(ok=True, message="Höchststand zurückgesetzt. Einstiege bleiben pausiert, bis du sie einschaltest.")
         elif action == "retest":
-            if version is not None and not loop.strategy_path(cfg, version):
+            path = loop.strategy_path(cfg, version) if version is not None else None
+            if version is not None and not path:
                 return jsonify(error="Diese Strategie-Version gibt es nicht"), 404
-            if state.get("loop_retest_requested") or (state.get("loop_retest") or {}).get("status") == "running":
+            if any(s.get("loop_retest_requested") or (s.get("loop_retest") or {}).get("status") == "running" for _, _, s in loop_bots()):
                 return jsonify(error="Es läuft schon ein Stresstest. Warte, bis er fertig ist."), 409
-            if not loop.retest_targets(cfg, version, include_changed=True):
+            # A named version is tested by its own bot; "all" asks each bot for its own versions.
+            owners = [loop.version_info(cfg, path)["bot"]] if path else [m for m, _, _ in loop_bots()]
+            targets = [m for m in owners if m in contexts and loop.retest_targets(cfg, version, include_changed=True, bot=None if path else m)]
+            if not targets:
                 return jsonify(error="Keine getestete Version zum Neutesten"), 409
-            state.set("loop_retest_requested", {"version": version, "at": utcnow()})
-            store.event("control", {"action": "loop_retest", "strategy": "loop", "version": version})
+            for mode in targets:
+                contexts[mode][1].set("loop_retest_requested", {"version": version, "at": utcnow()})
+            store.event("control", {"action": "loop_retest", "strategy": ",".join(targets), "version": version})
             return jsonify(ok=True, message=f"{version or 'Alle getesteten Versionen'}: Stresstest startet. Das dauert ein paar Minuten.")
         else:
             return jsonify(error="Unknown action"), 400

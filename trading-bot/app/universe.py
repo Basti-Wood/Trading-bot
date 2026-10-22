@@ -23,7 +23,7 @@ def watched_symbols(config, store, positions=()):
         return []
     return [p["symbol"] for p in positions if p.get("asset_class", "us_equity") == "us_equity"
             and re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", p.get("symbol", "")) and float(p.get("qty") or 0) > 0
-            and store.owner(p["symbol"]) not in {"daily", "daytrade", "loop"}]
+            and store.owner(p["symbol"]) not in {"daily", "daytrade", "loop", "loop_day"}]
 
 
 def monitored_symbols(config, store, positions=(), orders=()):
