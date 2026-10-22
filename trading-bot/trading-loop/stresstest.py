@@ -1,13 +1,7 @@
-"""Stresstest: eine Strategie-Version über die letzten 5 Jahre Tageskerzen im Backtest.
+"""Five-year stress tests of stocks/ETFs with a verdict per stock.
 
-  python stresstest.py strategien/<name>_v1.py
-
-Die Strategie-Datei definiert SYMBOL (z. B. "XYZ" für eine Aktie, "BTC/USD" für Krypto, "LISTE" für die
-Aktienliste der Bots plus die eigenen Aktien oder "KRYPTO" für alle Coins, die die Sicherheitsregeln des Bots
-bestehen, siehe liste.py) und eine Klasse Strategie(backtesting.Strategy).
-Bei "LISTE" und "KRYPTO" wird jeder Wert einzeln getestet; grün, wenn mindestens MIN_GRUENE_AKTIEN Werte grün sind.
-Kurse kommen von Alpaca (Aktien: IEX-Daten mit den Schlüsseln aus .env, Krypto: ohne Schlüssel). Coins kosten
-KOSTEN_KRYPTO pro Order. Ergebnis, Trades und Chart landen in berichte/. Grün oder rot steht in der letzten Zeile.
+SYMBOL = "LISTE" tests the bots' list plus external holdings (see liste.py).
+List summaries are informational; only each stock's own verdict gates its entries.
 """
 import datetime as dt
 import hashlib
@@ -15,6 +9,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -29,15 +24,7 @@ ORDNER = Path(__file__).resolve().parent
 JAHRE = 5
 STARTKAPITAL = 100_000
 KOSTEN = 0.001          # 0,1 % pro Order als Puffer für Spread und Gebühren
-KOSTEN_KRYPTO = 0.0025  # 0,25 % pro Order: Alpacas Krypto-Gebühr (Taker, Stufe 1)
 MIN_TRADES = 10
-# Bei "LISTE": so viele Aktien müssen einzeln grün sein (bei kürzeren Listen alle). Der Bot kauft ohnehin
-# nur Aktien, deren eigener Test grün ist; mehr als eine verlangt, damit nicht ein Glückstreffer reicht.
-MIN_GRUENE_AKTIEN = 3
-
-
-def kosten(symbol):
-    return KOSTEN_KRYPTO if "/" in symbol else KOSTEN
 
 
 def dateiname(symbol):
@@ -56,29 +43,25 @@ def lade_strategie(pfad):
 
 def lade_kurse(symbol):
     """Tageskerzen der letzten 5 Jahre, zwischengespeichert in daten/ (einmal pro Tag neu)."""
-    datei = ORDNER / "daten" / f"{symbol.replace('/', '-')}_1Day.csv"
+    if not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", symbol):
+        raise ValueError("Nur US-Aktien und ETFs werden unterstützt")
+    datei = ORDNER / "daten" / f"{symbol}_1Day.csv"
     if datei.exists() and dt.date.fromtimestamp(datei.stat().st_mtime) == dt.date.today():
         return pd.read_csv(datei, index_col=0, parse_dates=True)
 
     from alpaca.data.timeframe import TimeFrame
     ende = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
     start = ende - dt.timedelta(days=JAHRE * 365 + 2)
-    if "/" in symbol:
-        from alpaca.data.historical import CryptoHistoricalDataClient
-        from alpaca.data.requests import CryptoBarsRequest
-        bars = CryptoHistoricalDataClient().get_crypto_bars(
-            CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start, end=ende))
-    else:
-        from alpaca.data.enums import Adjustment, DataFeed
-        from alpaca.data.historical import StockHistoricalDataClient
-        from alpaca.data.requests import StockBarsRequest
-        load_dotenv(ORDNER / ".env")
-        key, secret = os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY")
-        if not key or not secret:
-            raise SystemExit("Alpaca-Schlüssel fehlen in .env (ALPACA_API_KEY, ALPACA_SECRET_KEY).")
-        bars = StockHistoricalDataClient(key, secret).get_stock_bars(StockBarsRequest(
-            symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start, end=ende,
-            feed=DataFeed.IEX, adjustment=Adjustment.ALL))
+    from alpaca.data.enums import Adjustment, DataFeed
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest
+    load_dotenv(ORDNER / ".env")
+    key, secret = os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY")
+    if not key or not secret:
+        raise SystemExit("Alpaca-Schlüssel fehlen in .env (ALPACA_API_KEY, ALPACA_SECRET_KEY).")
+    bars = StockHistoricalDataClient(key, secret).get_stock_bars(StockBarsRequest(
+        symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start, end=ende,
+        feed=DataFeed.IEX, adjustment=Adjustment.ALL))
 
     df = bars.df
     if df.empty:
@@ -92,6 +75,8 @@ def lade_kurse(symbol):
 
 
 def urteil(stats):
+    if not all(math.isfinite(float(stats[k])) for k in ("Return [%]", "Max. Drawdown [%]", "# Trades")):
+        return "ROT (ungültige Kennzahlen)"
     gruende = []
     if stats["Return [%]"] <= 0:
         gruende.append("Rendite 0 % oder weniger")
@@ -108,7 +93,7 @@ def zahl(wert):
 
 
 def bericht_json(pfad, modul, kurse, stats, ergebnis):
-    """Maschinenlesbarer Bericht für den Trading-Bot: Er handelt nur grüne, unveränderte Versionen."""
+    """Maschinenlesbarer Einzeltest für den Trading-Bot."""
     return {"strategie": pfad.stem, "symbol": modul.SYMBOL,
             "von": f"{kurse.index[0]:%Y-%m-%d}", "bis": f"{kurse.index[-1]:%Y-%m-%d}",
             "rendite": zahl(stats["Return [%]"]), "kaufen_halten": zahl(stats["Buy & Hold Return [%]"]),
@@ -126,18 +111,15 @@ def kennzahlen(stats):
             "gewinnquote": zahl(stats["Win Rate [%]"])}
 
 
-def listen_urteil(gruen, anzahl, wort="Aktien"):
-    noetig = min(MIN_GRUENE_AKTIEN, anzahl)
-    return (f"GRÜN ({gruen} von {anzahl} {wort} grün)" if gruen >= noetig
-            else f"ROT (nur {gruen} von {anzahl} {wort} grün, nötig sind mindestens {noetig})")
+def listen_urteil(gruen, anzahl):
+    return f"EINZELTESTS ({gruen} von {anzahl} Aktien grün)"
 
 
 def listen_test(pfad, modul, berichte):
-    """SYMBOL = "LISTE" oder "KRYPTO": jeden Wert der Liste einzeln testen. Grün, wenn mindestens MIN_GRUENE_AKTIEN grün sind."""
+    """Jede Aktie einzeln testen; die Liste hat kein gemeinsames Kaufurteil."""
     import liste
-    krypto = modul.SYMBOL == "KRYPTO"
-    symbole, eigene, _ = liste.krypto() if krypto else liste.symbole()
-    wort = "Coins" if krypto else "Aktien"
+    symbole, eigene, _ = liste.symbole()
+    wort = "Aktien"
     ordner = berichte / pfad.stem
     ordner.mkdir(exist_ok=True)
     aktien, alle_trades = {}, []
@@ -145,10 +127,11 @@ def listen_test(pfad, modul, berichte):
     for symbol in symbole:
         try:
             kurse = lade_kurse(symbol)
-            bt = Backtest(kurse, modul.Strategie, cash=STARTKAPITAL, commission=kosten(symbol), finalize_trades=True)
+            bt = Backtest(kurse, modul.Strategie, cash=STARTKAPITAL, commission=KOSTEN, finalize_trades=True)
             stats = bt.run()
         except (SystemExit, Exception) as fehler:
             print(f"  {symbol:6} übersprungen: {fehler}")
+            aktien[symbol] = {"ergebnis": "fehler", "urteil": str(fehler)[:200], "eigene": symbol in eigene}
             continue
         ergebnis = urteil(stats)
         (ordner / f"{dateiname(symbol)}.txt").write_text(str(stats), encoding="utf-8")
@@ -163,17 +146,17 @@ def listen_test(pfad, modul, berichte):
                           "eigene": symbol in eigene, "von": f"{kurse.index[0]:%Y-%m-%d}", "bis": f"{kurse.index[-1]:%Y-%m-%d}"}
         print(f"  {symbol:6} Rendite {stats['Return [%]']:6.1f} % · Kaufen-und-Halten {stats['Buy & Hold Return [%]']:7.1f} % · "
               f"max. Drawdown {stats['Max. Drawdown [%]']:6.1f} % · Trades {stats['# Trades']:3} · {ergebnis}")
-    if not aktien:
+    if not alle_trades:
         raise SystemExit(f"Kein Wert der Liste ließ sich testen ({wort}).")
     gruen = sum(1 for a in aktien.values() if a["ergebnis"] == "gruen")
-    ergebnis = listen_urteil(gruen, len(aktien), wort)
+    ergebnis = listen_urteil(gruen, len(aktien))
     pd.concat(alle_trades).to_csv(berichte / f"{pfad.stem}_trades.csv", index=False)
-    werte = list(aktien.values())
+    werte = [a for a in aktien.values() if a["ergebnis"] != "fehler"]
     mittel = lambda key: zahl(sum(a[key] or 0 for a in werte) / len(werte))
     bericht = {"strategie": pfad.stem, "symbol": modul.SYMBOL, "anzahl": len(aktien), "gruen_anzahl": gruen,
                "rendite": mittel("rendite"), "kaufen_halten": mittel("kaufen_halten"),
                "max_drawdown": min(a["max_drawdown"] or 0 for a in werte), "trades": sum(a["trades"] for a in werte),
-               "ergebnis": "gruen" if ergebnis.startswith("GRÜN") else "rot", "urteil": ergebnis, "aktien": aktien,
+               "ergebnis": "einzeltests", "urteil": ergebnis, "aktien": aktien,
                "risiko": {"stop_loss": risiko.STOP_LOSS_PROZENT, "max_drawdown": risiko.MAX_DRAWDOWN_PROZENT},
                "sha256": hashlib.sha256(pfad.read_bytes()).hexdigest(),
                "getestet_am": dt.datetime.now().isoformat(timespec="minutes")}
@@ -193,11 +176,11 @@ def main():
     berichte = ORDNER / "berichte"
     berichte.mkdir(exist_ok=True)
     warnings.filterwarnings("ignore")
-    if modul.SYMBOL in ("LISTE", "KRYPTO"):
+    if modul.SYMBOL == "LISTE":
         return listen_test(pfad, modul, berichte)
     kurse = lade_kurse(modul.SYMBOL)
 
-    bt = Backtest(kurse, modul.Strategie, cash=STARTKAPITAL, commission=kosten(modul.SYMBOL), finalize_trades=True)
+    bt = Backtest(kurse, modul.Strategie, cash=STARTKAPITAL, commission=KOSTEN, finalize_trades=True)
     stats = bt.run()
 
     (berichte / f"{pfad.stem}.txt").write_text(str(stats), encoding="utf-8")

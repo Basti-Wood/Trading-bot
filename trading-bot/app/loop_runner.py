@@ -37,8 +37,7 @@ def number(value):
 
 
 def run(module, data, stresstest, Backtest, symbol=""):
-    # Coins pay Alpaca's higher crypto fee, exactly as in stresstest.py.
-    costs = stresstest.kosten(symbol) if hasattr(stresstest, "kosten") else stresstest.KOSTEN
+    costs = stresstest.KOSTEN
     test = Backtest(data, module.Strategie, cash=stresstest.STARTKAPITAL, commission=costs, finalize_trades=True).run()
     verdict = stresstest.urteil(test)
     live = Backtest(data, module.Strategie, cash=stresstest.STARTKAPITAL, commission=costs, finalize_trades=False).run()
@@ -62,7 +61,7 @@ def main(path, folder, loop_dir):
     spec.loader.exec_module(module)
     results = {}
     for csv in sorted(Path(folder).glob("*.csv")):
-        symbol = csv.stem.replace("_", "/")  # BTC_USD.csv holds BTC/USD; stock symbols never contain "_".
+        symbol = csv.stem
         try:
             results[symbol] = run(module, pd.read_csv(csv, index_col=0, parse_dates=True), stresstest, Backtest, symbol)
         except SystemExit:

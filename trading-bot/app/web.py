@@ -1,12 +1,16 @@
 import hmac
+import pandas as pd
 from pathlib import Path
 import psutil
 from flask import Flask, jsonify, request, send_from_directory
-from . import crypto, loop, manual
+from . import loop
+from .candles import snapshot, forecast_overlay
+from .daytrade import NY, session_open
 from .allocation import BOTS, NAMES, allocation, bot_capital, bot_share, validate
 from .broker import Alpaca, BrokerError
 from .store import utcnow
 from .feedback import summary_key
+from .prediction_quality import forecast_quality
 from .universe import active_symbols
 from .portfolio import strategy_contexts
 from .decisions import position_context
@@ -19,8 +23,8 @@ def create_app(config, store, broker_factory=Alpaca):
     parallel = config.trading_mode == "both"
 
     def loop_bots():
-        """The stock and the crypto trading-loop share one dashboard section."""
-        return [(mode, *contexts[mode]) for mode in ("loop", "crypto_loop") if mode in contexts]
+        """The stock trading-loop dashboard context."""
+        return [(mode, *contexts[mode]) for mode in ("loop",) if mode in contexts]
 
     def loop_state(equity):
         if "loop" not in contexts:
@@ -44,7 +48,7 @@ def create_app(config, store, broker_factory=Alpaca):
                     decision = mode_state.get(f"forecast:{symbol}") or {}
                     rows.append({"symbol": symbol, "result": item, "action": decision.get("action"),
                                  "reason": decision.get("reason"), "position": decision.get("position"),
-                                 "own": store.owner(symbol) in (None, "manual") and bool((decision.get("position") or {}).get("qty"))})
+                                 "own": store.owner(symbol) not in BOTS and bool((decision.get("position") or {}).get("qty"))})
                 running.append({"version": name, "bot": mode, "symbol": record["symbol"], "activated_at": record.get("activated_at"),
                                 "computed_at": results.get("at") if fresh else None, "error": mode_state.get(f"loop_error:{name}"),
                                 "green": sum(1 for r in rows if ((r["result"] or {}).get("test") or {}).get("gruen")), "rows": rows})
@@ -52,36 +56,25 @@ def create_app(config, store, broker_factory=Alpaca):
             peaks.append(mode_state.get("equity_peak"))
         peak = max((p for p in peaks if p), default=None)
         return {"available": loop.available(cfg), "folder": str(cfg.loop_dir or ""), "rules": loop.risk_rules(cfg),
-                "versions": versions, "running": running, "errors": loop.errors(cfg), "halt": next((h for h in halts if h), None),
+                "versions": versions, "running": running, "stocks": loop_stock_rows(cfg, state, running), "errors": loop.errors(cfg), "halt": next((h for h in halts if h), None),
                 "peak": peak, "drawdown": (peak - equity) / peak * 100 if peak and equity else None,
                 "entries_enabled": state.get("entries_enabled", False),
                 "retest": state.get("loop_retest"), "retest_requested": bool(state.get("loop_retest_requested")),
                 "retest_hour": loop.RETEST_HOUR}
 
-    def crypto_state():
-        if "crypto" not in contexts:
-            return None
-        cfg, state = contexts["crypto"]
-        return {"universe": state.get("crypto_universe") or {}, "status": state.get("crypto_scan_status"),
-                "rules": {"min_history_days": cfg.crypto_min_history_days, "min_dollar_volume": cfg.crypto_min_dollar_volume,
-                          "max_day_move": cfg.crypto_max_day_move, "max_month_gain": cfg.crypto_max_month_gain,
-                          "max_spread": cfg.crypto_max_spread, "volume_share": cfg.crypto_volume_share,
-                          "cost_bps": cfg.crypto_cost_bps, "entry_hours": crypto.ENTRY_HOURS}}
 
-    def manual_state(account):
-        if not parallel or not account:
-            return None
-        open_orders = store.get("open_orders", [])
-        positions = []
-        for p in account.get("positions", []):
-            owner = store.owner(p["symbol"])
-            if owner in BOTS:
-                continue
-            positions.append({**p, "owner": owner or "external",
-                              "outlook": manual.outlook(config, contexts, p, open_orders),
-                              "orders": [o for o in open_orders if o["symbol"] == p["symbol"]]})
-        return {"positions": positions, "orders": [o for o in open_orders if store.owner(o["symbol"]) not in BOTS],
-                "cash": account.get("cash"), "history": store.history("manual", 15)}
+    def loop_stock_rows(cfg, state, running):
+        symbols = sorted({r["symbol"] for v in running for r in v["rows"]})
+        rows = []
+        for symbol in symbols:
+            choice = loop.combine(state, symbol, cfg)
+            decision = state.get(f"forecast:{symbol}") or {}
+            rows.append({"symbol": symbol, "version": choice.get("version"), "test": choice.get("test"),
+                         "signal": choice.get("strategy_signal", choice.get("signal")), "reason": choice.get("reason"),
+                         "action": decision.get("action", "WAIT"), "views": choice.get("views", {}),
+                         "owner": loop.owner_version(state, symbol) if state.get(f"owned:{symbol}", False) else None})
+        return rows
+
     app = Flask(__name__, static_folder=None)
     root = Path(__file__).resolve().parent.parent / "dashboard"
     app.config["MAX_CONTENT_LENGTH"] = 4096
@@ -125,6 +118,42 @@ def create_app(config, store, broker_factory=Alpaca):
     def assets(name):
         return send_from_directory(root, name)
 
+    @app.get("/api/candles/<symbol>")
+    def candles(symbol):
+        if not loop.STOCK.fullmatch(symbol):
+            return jsonify(error="Invalid stock symbol"), 400
+        if "daytrade" not in contexts:
+            return jsonify(error="Day trading is not enabled"), 409
+        cfg, state = contexts["daytrade"]
+        allowed = {*active_symbols(cfg, state), *state.get("monitor_symbols", [])}
+        if symbol not in allowed:
+            return jsonify(error="Stock is not monitored by the day-trading bot"), 404
+        now = pd.Timestamp.now(tz="UTC")
+        day = str(now.tz_convert(NY).date())
+        data = state.get(f"candles:{symbol}")
+        if not data or data.get("day") != day or (now - pd.Timestamp(data["at"])).total_seconds() > 60:
+            if not cfg.configured:
+                return jsonify(error="Configure Alpaca first"), 409
+            try:
+                broker = broker_factory(cfg)
+                sessions = broker.calendar(day, day)
+                session = next((r for r in sessions if r["date"] == day), None)
+                opening = session_open(now.tz_convert(NY).date())
+                closing = pd.Timestamp(f"{day} {session['close']}", tz=NY) if session else opening
+                frames = broker.multi_bars([symbol], "1Min", opening, end=min(now, closing)) if session and now > opening else {}
+                base = state.get(f"playbook_base:{symbol}")
+                if not base or base.get("day") != day:
+                    base = None
+                data = snapshot(symbol, frames.get(symbol), base, now, previous=data)
+                data["session_close"] = closing.isoformat() if session else None
+                state.set(f"candles:{symbol}", data)
+            except (BrokerError, ValueError, KeyError):
+                return jsonify(error="Candle data unavailable; will retry"), 502
+        prediction = state.get(f"prediction:{symbol}") or {}
+        quality = forecast_quality(cfg, state.get(f"model:{symbol}"), prediction, now)
+        return jsonify(**data, quality=quality,
+                       forecast=forecast_overlay(prediction, now, data.get("session_close")) if quality["ready"] else None)
+
     @app.get("/api/state")
     def state():
         selected = request.args.get("strategy", next(iter(contexts)))
@@ -144,16 +173,23 @@ def create_app(config, store, broker_factory=Alpaca):
                 # Old cached HOLDs did not distinguish a neutral outlook from ownership.
                 forecast = {**forecast, "action": "WAIT", "reason": "Waiting for a fresh decision with current position data"}
             symbols.append({"symbol": symbol, "position": position, "forecast": forecast,
+                            "quality": (forecast_quality(cfg, state_store.get(f"model:{symbol}"), forecast, pd.Timestamp.now(tz="UTC"))
+                                        if forecast and not cfg.loop else None),
                             "model": state_store.get(f"model:{symbol}"), "candidate": state_store.get(f"candidate:{symbol}"),
                             "research": state_store.get(f"research:{symbol}"),
                             "feedback": state_store.get(summary_key(cfg, symbol), {"captured": 0, "pending": 0, "resolved": 0, "excluded": 0, "scores": {}, "latest": []})})
-        process = psutil.Process()
-        rss = process.memory_info().rss
-        for child in process.children(recursive=True):
-            try:
-                rss += child.memory_info().rss
-            except psutil.NoSuchProcess:
-                pass
+        rss, cpu, resources_available = 0, None, False
+        try:
+            process = psutil.Process()
+            rss = process.memory_info().rss
+            for child in process.children(recursive=True):
+                try:
+                    rss += child.memory_info().rss
+                except psutil.Error:
+                    pass
+            cpu, resources_available = psutil.cpu_percent(), True
+        except (psutil.Error, OSError):
+            pass  # Resource telemetry may be unavailable in a restricted host.
         return jsonify(
             portfolio_mode=config.trading_mode,
             portfolio_engine=store.get("portfolio_engine"),
@@ -168,32 +204,29 @@ def create_app(config, store, broker_factory=Alpaca):
             any_entries_enabled=any(st.get("entries_enabled", False) for _, st in contexts.values()),
             allocation={**allocation(config, store), "budget": budget, "gross_fraction": config.gross_fraction,
                         "position_fraction": config.position_fraction} if parallel else None,
-            loop=loop_state(equity), manual=manual_state(account), crypto=crypto_state(),
+            loop=loop_state(equity), news_report=store.get("news_report"),
             at=utcnow(), mode="paper" if cfg.paper else "live", trading_mode=cfg.trading_mode, configured=cfg.configured,
-            # The crypto bots show their coin check instead of the stock scanner.
-            universe=({"symbols": active_symbols(cfg, state_store), "candidates": []} if cfg.crypto else
-                      state_store.get("universe", {"symbols": active_symbols(cfg, state_store), "candidates": []})),
-            scan_status=state_store.get("crypto_scan_status" if cfg.crypto else "scan_status",
-                                        {"status": "waiting" if cfg.universe_mode == "market" or cfg.crypto else "watchlist"}),
+            universe=state_store.get("universe", {"symbols": active_symbols(cfg, state_store), "candidates": []}),
+            scan_status=state_store.get("scan_status", {"status": "waiting" if cfg.universe_mode == "market" else "watchlist"}),
             entries_enabled=state_store.get("entries_enabled", False), engine=state_store.get("engine", {"status": "starting"}),
             account=account, training=state_store.get("training", {"status": "waiting for data"}),
             research_status=state_store.get("research_status", {"status": "waiting"}),
             symbols=symbols,
             orders=store.orders(50), events=state_store.history("decision", 30), errors=state_store.history("error", 10),
             training_history=state_store.history("training", 25), equity=store.history("equity", 100),
-            resources={"process_memory_mb": round(rss / 1024**2, 1), "host_cpu_percent": psutil.cpu_percent(),
+            resources={"process_memory_mb": round(rss / 1024**2, 1), "host_cpu_percent": cpu, "available": resources_available,
                        "training_memory_mb": cfg.training_memory_mb, "cpu_threads": 2, "gpu_memory_mb": 0},
             settings={"capital": cfg.sizing_capital(equity), "capital_fraction": cfg.capital_fraction, "capital_cap": cfg.capital,
                 "strategy_capital": cfg.sizing_capital(equity) * cfg.strategy_fraction, "position_fraction": cfg.position_fraction, "gross_fraction": cfg.gross_fraction,
                 "daytrade_strategies": cfg.daytrade_strategies,
                 "daily_loss": cfg.daily_loss, "stop_loss": cfg.effective_stop, "feed": cfg.feed,
                 "queue_daily_orders": cfg.queue_daily_orders,
-                "retrain_hours": cfg.retrain_hours, "validation_bars": 390 if cfg.intraday else cfg.validation_bars,
+                "retrain_hours": cfg.retrain_hours, "model_max_age_hours": cfg.model_max_age_hours, "validation_bars": 390 if cfg.intraday else cfg.validation_bars,
                 "universe_mode": cfg.universe_mode, "scan_candidates": cfg.scan_candidates,
                 "poll_seconds": config.poll_seconds, "daytrade_max_positions": cfg.daytrade_max_positions,
                 "daytrade_hold_minutes": cfg.daytrade_hold_minutes, "daytrade_close_minutes": cfg.daytrade_close_minutes,
                 "cost_bps": cfg.cost_bps, "llm_url": cfg.llm_url, "min_votes": cfg.min_votes,
-                "llm_models": cfg.llm_models, "llm_configured": bool(cfg.llm_key), "web_search": bool(cfg.brave_key)})
+                "llm_models": cfg.llm_models, "llm_configured": bool(cfg.llm_key)})
 
     @app.post("/api/control")
     def control():
@@ -215,7 +248,7 @@ def create_app(config, store, broker_factory=Alpaca):
                 return jsonify(error="Wait for a successful Alpaca account connection"), 409
             if store.get("account", {}).get("loss_halt"):
                 return jsonify(error="Daily loss halt is active"), 409
-            if selected in ("loop", "crypto_loop") and contexts[selected][1].get("halt"):
+            if selected in ("loop",) and contexts[selected][1].get("halt"):
                 return jsonify(error="Drawdown-Stopp aus risiko.py aktiv. Erst im Trading-Loop den Höchststand zurücksetzen."), 409
             for cfg, state in targets:
                 # A drawdown-halted trading-loop stays paused when enabling all bots.
@@ -266,31 +299,15 @@ def create_app(config, store, broker_factory=Alpaca):
                 return jsonify(error="Diese Strategie-Version gibt es nicht"), 404
             info = loop.version_info(cfg, path)
             if not info["tradable"]:
-                return jsonify(error=f"{version} kann nicht aktiviert werden: {info['note'] if info['status'] != 'gruen' else loop.risk_rules(cfg)['message']}"), 409
+                return jsonify(error=f"{version} kann nicht aktiviert werden: {info['note'] if info['status'] != 'bereit' else loop.risk_rules(cfg)['message']}"), 409
             bot = info["bot"]
-            if bot not in contexts:
-                return jsonify(error=f"{version} handelt Krypto; die Krypto-Bots sind ausgeschaltet (CRYPTO_ENABLED=false)"), 409
-            # Stock versions run in the trading-loop, coin versions in the crypto trading-loop.
             state = contexts[bot][1]
             active = loop.active_versions(state)
-            # A newer version of the same idea replaces the older one and takes over its positions.
-            replaced = [v for v in active if loop.idea(v) == info["idea"] and v != version]
-            for old in replaced:
-                del active[old]
             if version not in active and len(active) >= MAX_LOOP_STRATEGIES:
                 return jsonify(error=f"Höchstens {MAX_LOOP_STRATEGIES} Strategien gleichzeitig"), 409
             active[version] = {"version": version, "symbol": info["symbol"], "sha256": info["sha256"], "activated_at": utcnow()}
-            target = {loop.LIST: "die Aktienliste der Bots plus deine eigenen Aktien",
-                      loop.CRYPTO_LIST: "die Coins, die die Krypto-Sicherheitsregeln bestehen"}.get(info["symbol"], info["symbol"])
-            message = f"{version} handelt {target} im Paper-Modus" + (f" (ersetzt {', '.join(replaced)})" if replaced else "")
-            if info["symbol"] == loop.LIST:
-                message += ". Jede Aktie wird vor dem Kauf einzeln getestet; deine eigenen Aktien bekommen nur Signale"
-            elif info["symbol"] == loop.CRYPTO_LIST:
-                message += ". Jeder Coin wird vor dem Kauf einzeln getestet"
-            else:
-                owner = store.owner(info["symbol"])
-                if owner not in (None, bot):
-                    message += f". {info['symbol']} gehört gerade dem {NAMES.get(owner, owner)}; gekauft wird erst, wenn der Wert frei ist"
+            target = "die Aktienliste der Bots plus externe Aktien" if info["symbol"] == loop.LIST else info["symbol"]
+            message = f"{version} prüft {target} im Paper-Modus. Pro Aktie entscheidet die beste grüne aktive Version."
         elif action == "deactivate":
             bot = next((mode for mode, _, mode_state in loop_bots() if version in loop.active_versions(mode_state)), None)
             if not bot:
@@ -321,34 +338,5 @@ def create_app(config, store, broker_factory=Alpaca):
         store.event("control", {"action": f"loop_{action}", "strategy": bot, "version": version})
         return jsonify(ok=True, message=message)
 
-    @app.post("/api/manual/order")
-    def manual_order():
-        body = body_or_error()
-        if not parallel:
-            return jsonify(error="Selber traden gibt es nur mit TRADING_MODE=both"), 409
-        if not config.configured:
-            return jsonify(error="Configure Alpaca keys first"), 409
-        if body is None:
-            return jsonify(error="Expected a JSON object"), 400
-        try:
-            return jsonify(ok=True, message=manual.place(config, store, broker_factory(config), body))
-        except ValueError as exc:
-            return jsonify(error=str(exc)), 400
-        except BrokerError as exc:
-            return jsonify(error=f"Alpaca nicht erreichbar oder Symbol unbekannt ({exc})"), 502
-
-    @app.post("/api/manual/cancel")
-    def manual_cancel():
-        body = body_or_error()
-        if not parallel or not config.configured:
-            return jsonify(error="Selber traden ist nicht eingerichtet"), 409
-        if body is None:
-            return jsonify(error="Expected a JSON object"), 400
-        try:
-            return jsonify(ok=True, message=manual.cancel(store, broker_factory(config), body.get("order_id")))
-        except ValueError as exc:
-            return jsonify(error=str(exc)), 400
-        except BrokerError as exc:
-            return jsonify(error=f"Alpaca nicht erreichbar ({exc})"), 502
 
     return app

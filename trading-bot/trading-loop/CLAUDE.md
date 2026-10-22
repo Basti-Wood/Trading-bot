@@ -47,22 +47,19 @@ Antworte auf Deutsch, kurz und ohne Fachchinesisch. Der Nutzer kann nicht progra
 Rot, sobald eins zutrifft: Gesamtrendite 0 % oder weniger · maximaler Drawdown über `MAX_DRAWDOWN_PROZENT` · weniger als
 10 Trades (zu wenig, um etwas zu sagen). Sonst grün. So steht es in `urteil()` in `stresstest.py`.
 Bei `SYMBOL = "LISTE"` (Wunsch des Nutzers: Aktienliste der Bots plus eigene Aktien, `python liste.py`) gilt `urteil()` für jede
-Aktie einzeln; die Version ist grün, wenn mindestens `MIN_GRUENE_AKTIEN` (3) Aktien grün sind, bei kürzeren Listen alle. Der Bot
-kauft später nur Aktien, deren eigener Test grün ist, und testet neue Aktien der Liste selbst. Der Bot wiederholt den Stresstest
-jeden Tag ab 8:00 New Yorker Zeit für alle getesteten, unveränderten Versionen (das 5-Jahres-Fenster wandert mit), und im
-Dashboard gibt es einen Knopf zum Neutesten. Die Strategie-Dateien ändert er dabei nie. Eigene Aktien des Nutzers bekommen nur
-Signale. Die Agenten ändern `stresstest.py` nie. Will der Nutzer andere Kriterien, passt du `urteil()` auf seinen Wunsch an.
-Krypto: `SYMBOL = "BTC/USD"` (ein Coin) oder `SYMBOL = "KRYPTO"` (alle Coins, die die Sicherheitsregeln des Bots bestehen,
-`python liste.py`) handelt im Bot der Krypto-Trading-Loop rund um die Uhr. Für Coins rechnet der Stresstest 0,25 % Kosten pro
-Order (`KOSTEN_KRYPTO`). Bei `KRYPTO` gilt dieselbe Regel wie bei `LISTE`: jeder Coin einzeln, grün ab `MIN_GRUENE_AKTIEN` Coins.
-Tageskerzen bei Krypto sind UTC-Tage, auch am Wochenende.
+Aktie einzeln. Es gibt keine Mindestanzahl grüner Aktien und kein Listenurteil als Kaufhürde. Jede Aktie bekommt ihre
+Kennzahlen und ihr eigenes Grün/Rot im JSON-Bericht. Die letzte Zeile zählt nur die grünen Einzeltests. Der Bot vergleicht pro
+Aktie alle aktiven Versionen: höchste Rendite, dann kleinster absoluter Drawdown. Nur ein BUY dieser besten grünen Version kann
+kaufen. Ein niedriger bewertetes BUY überstimmt sie nicht. Eigene externe Aktien bekommen nur Signale. Der Bot wiederholt den
+Stresstest täglich ab 8:00 New Yorker Zeit und auf Wunsch im Dashboard, ohne Strategie-Dateien zu ändern.
 
 ## Im Trading-Bot (Standardweg für Live im Paper-Modus)
 Dieser Ordner liegt im Trading-Bot (`trading-bot/trading-loop`). Der Bot handelt Versionen aus diesem Ordner als dritten Bot
 „Trading-Loop“. Bot-Code (`../app`, `../dashboard`, `../tests`) änderst du nur, wenn der Nutzer es ausdrücklich verlangt.
 - `stresstest.py` schreibt dafür zusätzlich `berichte/<name>_vN.json` (Kennzahlen, Ergebnis, Prüfsumme der Datei, Werte aus
-  `risiko.py`). Einschalten lässt sich im Dashboard nur eine Version, die grün ist, seit dem Test unverändert ist und mit den
-  aktuellen Werten aus `risiko.py` getestet wurde. Nach jeder Änderung an einer Strategie-Datei also neu testen.
+  `risiko.py`). Einschalten lässt sich im Dashboard eine getestete Version, die seit dem Test unverändert ist und mit den
+  aktuellen Werten aus `risiko.py` getestet wurde. Das gilt auch für bisher rote Listenberichte. Nach Dateiänderungen neu testen.
+  Mehrere Versionen derselben Idee dürfen gleichzeitig aktiv sein; jede Aktie wählt ihre beste grüne Version separat.
 - Der Nutzer schaltet Versionen im Dashboard selbst ein und gibt dem Trading-Loop dort eine Gewichtung. Du schaltest nichts ein.
 - Sagt der Nutzer „Bring … live“, verweis ihn auf das Dashboard (Bereich Trading-Loop). `live.py` nur, wenn er ausdrücklich ein
   eigenes Skript will, und dann nie gleichzeitig mit dem Bot für dasselbe Alpaca-Konto.

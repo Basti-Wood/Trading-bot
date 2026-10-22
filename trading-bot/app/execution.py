@@ -3,34 +3,12 @@ from datetime import datetime, timezone
 import hashlib
 import math
 import time
-from . import crypto
 from .allocation import BOTS, bot_capital, bot_share
 from .broker import BrokerError
 from .store import utcnow
 
 TERMINAL = {"filled", "canceled", "expired", "rejected", "replaced", "done_for_day"}
 FAILED = {"rejected", "canceled", "expired"}
-
-
-def decimal(value, step):
-    """A price or quantity as text with exactly the decimals the coin's increment allows."""
-    digits = max(0, -math.floor(math.log10(step) + 1e-9))
-    return f"{round(value / step) * step:.{digits}f}"
-
-
-def down(value, step):
-    """Round down to the increment; the tolerance keeps 92.15 from becoming 92.14 through float error."""
-    return math.floor(value / step + 1e-9) * step
-
-
-def up(value, step):
-    return math.ceil(value / step - 1e-9) * step
-
-
-def price_step(asset, price):
-    """Coins above $1 are priced in cents (a multiple of any finer increment); cheaper coins need the full precision."""
-    tick = float(asset.get("price_increment") or .01)
-    return max(tick, .01) if price >= 1 else tick
 
 
 class Executor:
@@ -110,9 +88,8 @@ class Executor:
                         self.changed = True
                 return "Waiting for existing exit orders to cancel before closing"
             side = "sell"
-            # Alpaca accepts crypto orders only as gtc or ioc; coins trade around the clock.
             payload = {"symbol": symbol, "side": side, "qty": format(qty, ".9f").rstrip("0").rstrip("."),
-                       "type": "market", "time_in_force": "gtc" if cfg.crypto else "day"}
+                       "type": "market", "time_in_force": "day"}
         else:
             if action != "BUY":
                 return "No entry requested"
@@ -124,8 +101,7 @@ class Executor:
                 return "Position or pending order already exists"
             if cfg.coordinated and owned:
                 return "Waiting for confirmed flat position before releasing strategy ownership"
-            # The user's own pending orders (e.g. a resting limit buy) never block the bots.
-            if any(o["side"] == "buy" and o.get("strategy") != "manual" for o in self.store.unresolved_orders()):
+            if any(o["side"] == "buy" for o in self.store.unresolved_orders()):
                 return "An entry outcome is unresolved; waiting for reconciliation"
             if cfg.loop and not stop_fraction:
                 return "Stop-Loss aus risiko.py fehlt; Einstieg blockiert"
@@ -138,13 +114,11 @@ class Executor:
                 flat_since = self.store.get(f"flat_since:{symbol}", 0)
                 if time.time() - flat_since < cfg.daytrade_cooldown_minutes * 60:
                     return "Waiting for the day-trading cooldown after the last position closed"
-            if cfg.crypto and symbol not in crypto.symbols(self.store):
-                return "Coin hat die Krypto-Sicherheitsregeln nicht bestanden; kein Kauf"
             asset = self.broker.asset(symbol)
-            if not asset.get("tradable") or asset.get("status") != "active":
-                return "Asset is not tradable"
-            # Crypto buys at the current ask, and only while the spread is tight (checked by the broker).
-            price = (reference_price if queued_for_open else self.broker.quote(symbol)[1] if cfg.intraday or cfg.crypto
+            if (not asset.get("tradable") or asset.get("status") != "active"
+                    or asset.get("class", "us_equity") != "us_equity"):
+                return "Asset is not a tradable US stock or ETF"
+            price = (reference_price if queued_for_open else self.broker.quote(symbol)[1] if cfg.intraday
                      else self.broker.latest_price(symbol))
             if not isinstance(price, (int, float)) or not math.isfinite(price) or not 0 < price < 1000000:
                 return "Invalid reference price; entry blocked"
@@ -157,7 +131,7 @@ class Executor:
                         if not cfg.coordinated or self.store.owner(p["symbol"]) in BOTS)
             strategy_gross = sum(abs(float(p["market_value"])) for p in positions if self.store.get(f"owned:{p['symbol']}", False))
             # If any entry is pending, wait for a fresh account snapshot before allocating again.
-            if any(o["side"] == "buy" and not o.get("client_order_id", "").startswith("manual-") for o in orders):
+            if any(o["side"] == "buy" for o in orders):
                 return "Pending buy order; waiting for updated exposure"
             budget = min(strategy_capital * cfg.position_fraction, capital * cfg.gross_fraction - gross,
                          strategy_capital * cfg.gross_fraction - strategy_gross,
@@ -167,8 +141,6 @@ class Executor:
                 for field in ("daytrading_buying_power", "non_marginable_buying_power"):
                     if account.get(field) is not None:
                         budget = min(budget, float(account[field]))
-            if cfg.crypto:
-                return self.crypto_entry(symbol, asset, price, budget, stop_fraction, target_fraction, session)
             limit = math.ceil(price * (1.0005 if cfg.intraday else 1.002) * 100) / 100
             qty = math.floor(budget / limit)
             fractional = qty < 1
@@ -203,9 +175,7 @@ class Executor:
         # Include account/mode to prevent cross-account journal collisions, without exposing keys.
         scope = self.scope()
         base_id = f"ensemble-{scope}-{session}-{symbol}-{side}"
-        if cfg.crypto:
-            base_id = self.crypto_id(symbol, side, session)
-        elif cfg.loop:
+        if cfg.loop:
             # Distinct from daily IDs so both bots can trade a symbol on the same day.
             base_id = f"ensemble-{scope}-loop-{session}-{symbol}-{side}"
         if cfg.intraday:
@@ -236,58 +206,3 @@ class Executor:
 
     def scope(self):
         return hashlib.sha256((self.broker.base + self.config.api_key).encode()).hexdigest()[:8]
-
-    def crypto_id(self, symbol, side, session):
-        # Client order IDs carry no slash; each crypto bot has its own IDs.
-        return f"ensemble-{self.scope()}-{self.config.trading_mode.replace('_', '')}-{session}-{symbol.replace('/', '')}-{side}"
-
-    def crypto_entry(self, symbol, asset, ask, budget, stop_fraction, target_fraction, session):
-        cfg = self.config
-        budget = min(budget, crypto.position_cap(cfg, self.store, symbol))
-        tick = price_step(asset, ask)
-        step = float(asset.get("min_trade_increment") or 1e-9)
-        limit = up(ask * 1.002, tick)
-        qty = down(budget / limit, step)
-        if qty <= 0 or qty < float(asset.get("min_order_size") or 0) or qty * limit < 1:
-            return "Budget liegt unter Alpacas Mindestorder für diesen Coin"
-        if cfg.loop:
-            stop, target = stop_fraction, None
-        else:
-            stop = min(stop_fraction, cfg.effective_stop) if stop_fraction else cfg.effective_stop
-            target = target_fraction or cfg.effective_take_profit
-        # Immediate-or-cancel: the buy fills now near the ask or not at all, never resting for hours.
-        payload = {"symbol": symbol, "side": "buy", "qty": decimal(qty, step), "type": "limit",
-                   "limit_price": decimal(limit, tick), "time_in_force": "ioc",
-                   "client_order_id": self.crypto_id(symbol, "buy", session)}
-        result = self.send(payload, session)
-        if self.changed:
-            # Crypto orders carry no stop legs: the engine checks both levels every poll and adds a broker stop.
-            self.store.set(f"unbracketed:{symbol}", {"stop": stop, "target": target})
-            result += "; Stop-Loss folgt als eigene Order, sobald die Coins im Depot sind"
-        return result
-
-    def protect(self, symbol, position, orders, stop, session):
-        """Rest a GTC stop-limit sell for a crypto position; returns a status, or None if nothing was needed."""
-        if not stop or any(o["symbol"] == symbol and o["side"] == "sell" for o in orders):
-            return None
-        asset = self.broker.asset(symbol)
-        tick = price_step(asset, float(position["avg_entry_price"]) * (1 - stop))
-        step = float(asset.get("min_trade_increment") or 1e-9)
-        qty = down(float(position.get("qty_available") or position["qty"]), step)
-        trigger = down(float(position["avg_entry_price"]) * (1 - stop), tick)
-        limit = down(trigger * (1 - crypto.STOP_LIMIT_GAP), tick)
-        if qty <= 0 or limit <= 0:
-            return "Position zu klein für eine Stop-Order; der Bot überwacht den Stop selbst"
-        base = (f"ensemble-{self.scope()}-{self.config.trading_mode.replace('_', '')}-stop-{symbol.replace('/', '')}-"
-                + hashlib.sha256(f"{position['avg_entry_price']}:{qty}".encode()).hexdigest()[:6])
-        for attempt in range(5):
-            cid = base + (f"-r{attempt}" if attempt else "")
-            prior = self.store.order(cid)
-            if not prior or prior.get("status") not in FAILED:
-                break
-        else:
-            return "Stop-Order mehrfach abgelehnt; der Bot überwacht den Stop selbst. Position in Alpaca prüfen"
-        payload = {"symbol": symbol, "side": "sell", "qty": decimal(qty, step), "type": "stop_limit",
-                   "stop_price": decimal(trigger, tick), "limit_price": decimal(limit, tick), "time_in_force": "gtc",
-                   "client_order_id": cid}
-        return "Stop-Loss beim Broker: " + self.send(payload, session)

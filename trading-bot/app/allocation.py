@@ -1,25 +1,21 @@
 """Bot budget and per-bot weights, adjustable from the dashboard without a restart.
 
 The budget is the share of account equity (optionally capped in dollars) that the
-automatic traders may use together. Weights split that budget between them. Manual
-trades are outside the budget: they never consume a bot's allowance.
+automatic traders may use together. Weights split that budget between them.
+External holdings are observed and stay outside the bots' allowances.
 """
 import math
 
-BOTS = ("daily", "daytrade", "loop", "crypto", "crypto_loop")
-NAMES = {"daily": "Prediction-Bot", "daytrade": "Daytrading-Bot", "loop": "Trading-Loop",
-         "crypto": "Krypto-Prognose-Bot", "crypto_loop": "Krypto-Trading-Loop", "manual": "Selbst gehandelt"}
+BOTS = ("daily", "daytrade", "loop")
+NAMES = {"daily": "Prediction-Bot", "daytrade": "Daytrading-Bot", "loop": "Trading-Loop"}
 
 
 def allocation(config, store):
     saved = store.get("allocation") or {}
     share = config.daytrade_capital_share
     # Without saved settings the previous daily/day-trading split applies; newer bots start at 0.
-    weights = {"daily": round((1 - share) * 100), "daytrade": round(share * 100), "loop": 0, "crypto": 0, "crypto_loop": 0}
+    weights = {"daily": round((1 - share) * 100), "daytrade": round(share * 100), "loop": 0}
     weights.update({k: v for k, v in (saved.get("weights") or {}).items() if k in BOTS})
-    if not config.crypto_enabled:
-        # Switched-off crypto bots must not hold back part of the budget.
-        weights.update(crypto=0, crypto_loop=0)
     return {"capital_fraction": saved.get("capital_fraction", config.capital_fraction),
             "capital_cap": saved.get("capital_cap", config.capital),
             "weights": weights, "saved_at": saved.get("at")}
@@ -30,7 +26,7 @@ def validate(body):
     try:
         fraction = float(body["capital_fraction"])
         cap = float(body.get("capital_cap") or 0)
-        # A bot the dashboard does not send (e.g. crypto switched off) keeps weight 0.
+        # A bot the dashboard does not send keeps weight 0.
         weights = {bot: float(body["weights"].get(bot, 0)) for bot in BOTS}
     except (AttributeError, KeyError, TypeError, ValueError):
         raise ValueError("Budget, Obergrenze und Gewichtungen als Zahlen angeben")

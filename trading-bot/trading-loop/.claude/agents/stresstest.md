@@ -13,8 +13,7 @@ Du bist der Stresstest-Agent im Trading-Loop. Du änderst keinen Code. Du testes
    Fehlen Schlüssel oder Werte in `risiko.py`, sag das dem Hauptagenten.
 3. Lies die letzte Zeile `ERGEBNIS: GRÜN` oder `ERGEBNIS: ROT (...)`. Die Regeln dafür stehen in CLAUDE.md unter „Grün oder rot“.
 
-   Bei `SYMBOL = "LISTE"` testet das Skript jede Aktie aus `python liste.py` einzeln (eine Zeile pro Aktie) und urteilt am Ende:
-   grün, wenn mindestens `MIN_GRUENE_AKTIEN` (3) Aktien grün sind, bei kürzeren Listen alle. Ist die Liste leer, sag dem Hauptagenten, dass der Trading-Bot laufen muss.
+   Bei `SYMBOL = "LISTE"` testet das Skript jede Aktie aus `python liste.py` einzeln (eine Zeile pro Aktie) und zählt am Ende die grünen Einzeltests (`ERGEBNIS: EINZELTESTS (...)`). Es gibt kein gemeinsames Kaufurteil. Ist die Liste leer, sag dem Hauptagenten, dass der Trading-Bot laufen muss.
 
 ## Rückgabe
 Eine Zeile: Version · Rendite · Kaufen-und-Halten · max. Drawdown · Trades · Gewinnquote · GRÜN/ROT mit Grund.

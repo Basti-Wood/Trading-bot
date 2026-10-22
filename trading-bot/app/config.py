@@ -1,11 +1,11 @@
-﻿from dataclasses import dataclass
+from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
 import re
 
 
-CHILD_MODES = ("loop", "crypto", "crypto_loop")
+CHILD_MODES = ("loop",)
 
 
 def flag(name, default=False):
@@ -56,6 +56,8 @@ class Config:
     history_days: int = 1800
     max_bars: int = 1500
     retrain_hours: int = 24
+    # Expire each stock's trained model independently, even if its inputs are recent.
+    model_max_age_hours: int = 168
     training_timeout: int = 900
     training_memory_mb: int = 4096
     # Sizing follows the account: this share of current equity, optionally capped in dollars (0 = no cap).
@@ -74,43 +76,27 @@ class Config:
     validation_bars: int = 30
     llm_url: str = "https://ai.bastiwood.com/v1"
     llm_key: str = ""
-    llm_models: tuple = ("auto",)
-    brave_key: str = ""
+    llm_models: tuple = ()
     origins: tuple = ("https://trade.bastiwood.com",)
     # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
     loop_dir: Path = None
     loop_timeout: int = 300
-    # Crypto bots (prediction models and trading-loop strategies on Alpaca coins), only with TRADING_MODE=both.
-    crypto_enabled: bool = False
-    # Alpaca's crypto taker fee is 0.25 % per order (tier 1), more than the stock cost buffer.
-    crypto_cost_bps: float = 25
-    # Safety rules every coin must pass before a crypto bot may buy it (see app/crypto.py).
-    crypto_min_history_days: int = 730
-    crypto_min_dollar_volume: float = 3000
-    crypto_max_day_move: float = .35
-    crypto_max_month_gain: float = 1.
-    crypto_max_spread: float = .01
-    crypto_volume_share: float = .10
-    crypto_exclude: tuple = ()
-
     def __post_init__(self):
         if not self.symbols or len(self.symbols) > 50 or len(set(self.symbols)) != len(self.symbols):
             raise ValueError("Configure 1 to 50 unique US equity/ETF symbols")
-        # "loop" and the crypto bots are internal child strategies of TRADING_MODE=both, never standalone modes.
+        # "loop" is an internal child strategy of TRADING_MODE=both, never standalone modes.
         if self.trading_mode not in {"daily", "daytrade", "both", *CHILD_MODES} or self.universe_mode not in {"watchlist", "market"}:
             raise ValueError("TRADING_MODE must be daily/daytrade/both; UNIVERSE_MODE must be watchlist/market")
         if self.trading_mode in CHILD_MODES and not self.coordinated:
-            raise ValueError("The trading-loop and crypto strategies run only inside TRADING_MODE=both")
+            raise ValueError("The trading-loop strategies run only inside TRADING_MODE=both")
         if self.trading_mode in {"daytrade", "both", *CHILD_MODES} and not self.paper:
-            raise ValueError("The daytrade, trading-loop and crypto strategies are currently paper-only")
-        if any(not re.fullmatch(r"[A-Z0-9]{2,15}", s) for s in self.crypto_exclude):
-            raise ValueError("CRYPTO_EXCLUDE lists coin symbols without /USD, e.g. DOGE,SHIB")
+            raise ValueError("The daytrade and trading-loop strategies are currently paper-only")
         if any(not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", s) for s in self.symbols):
             raise ValueError("Only US equity/ETF symbols are supported")
         if self.feed not in {"iex", "sip"}:
             raise ValueError("ALPACA_DATA_FEED must be iex or sip")
-        if not self.llm_url.startswith(("http://", "https://")) or len(self.llm_models) > 2:
-            raise ValueError("Set an HTTP FreeLLM base URL and at most two LLM models")
+        if not self.llm_url.startswith(("http://", "https://")) or len(self.llm_models) > 1:
+            raise ValueError("Set an HTTP FreeLLM base URL and at most one Llama model")
         if not self.paper and not self.allow_live:
             raise ValueError("Live trading requires ALLOW_LIVE_TRADING=true as well as ALPACA_PAPER=false")
         if self.host not in {"127.0.0.1", "localhost", "::1"} and not self.password:
@@ -125,7 +111,7 @@ class Config:
                   "cost_bps": (1, 100), "edge_bps": (0, 100),
                   "training_memory_mb": (256, 4096), "training_timeout": (10, 1800),
                   "history_days": (400, 3000), "max_bars": (300, 2000),
-                  "retrain_hours": (12, 168), "port": (1, 65535), "feedback_weight": (1, 3),
+                  "retrain_hours": (12, 168), "model_max_age_hours": (12, 720), "port": (1, 65535), "feedback_weight": (1, 3),
                   "validation_bars": (20, 120), "scan_candidates": (1, 50),
                   "scan_interval_minutes": (15, 1440), "scan_min_price": (1, 10000),
                   "scan_min_dollar_volume": (100000, 10000000000),
@@ -135,10 +121,7 @@ class Config:
                   "daytrade_close_minutes": (5, 60), "daytrade_capital_share": (.05, .95),
                   "strategy_fraction": (.05, 1), "min_votes": (2, 4),
                   "daytrade_run_minutes": (5, 240), "daytrade_trail_trigger": (.001, .05),
-                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 600),
-                  "crypto_cost_bps": (1, 100), "crypto_min_history_days": (365, 1800),
-                  "crypto_min_dollar_volume": (0, 100000000), "crypto_max_day_move": (.05, 1),
-                  "crypto_max_month_gain": (.1, 10), "crypto_max_spread": (.001, .05), "crypto_volume_share": (.01, 1)}
+                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 600)}
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
@@ -157,13 +140,9 @@ class Config:
 
     @property
     def loop(self):
-        """Trades tested trading-loop strategy files (stocks or crypto)."""
-        return self.trading_mode in {"loop", "crypto_loop"}
+        """Trades tested trading-loop stock strategy files."""
+        return self.trading_mode == "loop"
 
-    @property
-    def crypto(self):
-        """Trades Alpaca coins around the clock instead of US stocks."""
-        return self.trading_mode in {"crypto", "crypto_loop"}
 
     @property
     def configured(self):
@@ -219,6 +198,7 @@ class Config:
             port=int(os.getenv("PORT", "1337")), feed=os.getenv("ALPACA_DATA_FEED", "iex"),
             history_days=int(os.getenv("HISTORY_DAYS", "1800")), max_bars=int(os.getenv("MAX_BARS", "1500")),
             retrain_hours=int(os.getenv("RETRAIN_HOURS", "24")),
+            model_max_age_hours=int(os.getenv("MODEL_MAX_AGE_HOURS", "168")),
             training_timeout=int(os.getenv("TRAINING_TIMEOUT_SECONDS", "900")),
             training_memory_mb=int(os.getenv("TRAINING_MEMORY_MB", "4096")),
             feedback_weight=float(os.getenv("FEEDBACK_SAMPLE_WEIGHT", "2")),
@@ -232,18 +212,8 @@ class Config:
             cost_bps=float(os.getenv("COST_BPS_PER_SIDE", "10")), edge_bps=float(os.getenv("MIN_EDGE_BPS", "10")),
             llm_url=os.getenv("FREELLM_BASE_URL", "https://ai.bastiwood.com/v1").rstrip("/"),
             llm_key=os.getenv("FREELLM_API_KEY", ""),
-            llm_models=tuple(s.strip() for s in os.getenv("FREELLM_MODELS", "auto").split(",") if s.strip()),
-            brave_key=os.getenv("BRAVE_SEARCH_API_KEY", ""),
+            llm_models=tuple(s.strip() for s in os.getenv("FREELLM_MODELS", "").split(",") if s.strip()),
             # Relative paths start at the trading-bot folder, whatever the working directory.
             loop_dir=(Path(__file__).resolve().parent.parent / os.getenv("TRADING_LOOP_DIR", "trading-loop")).resolve(),
             loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "300")),
-            crypto_enabled=flag("CRYPTO_ENABLED", True),
-            crypto_cost_bps=float(os.getenv("CRYPTO_COST_BPS_PER_SIDE", "25")),
-            crypto_min_history_days=int(os.getenv("CRYPTO_MIN_HISTORY_DAYS", "730")),
-            crypto_min_dollar_volume=float(os.getenv("CRYPTO_MIN_DOLLAR_VOLUME", "3000")),
-            crypto_max_day_move=float(os.getenv("CRYPTO_MAX_DAY_MOVE", ".35")),
-            crypto_max_month_gain=float(os.getenv("CRYPTO_MAX_MONTH_GAIN", "1")),
-            crypto_max_spread=float(os.getenv("CRYPTO_MAX_SPREAD", ".01")),
-            crypto_volume_share=float(os.getenv("CRYPTO_MAX_VOLUME_SHARE", ".10")),
-            crypto_exclude=tuple(s.strip().upper().removesuffix("/USD") for s in os.getenv("CRYPTO_EXCLUDE", "").split(",") if s.strip()),
             origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()))
