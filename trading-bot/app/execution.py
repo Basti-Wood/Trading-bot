@@ -115,8 +115,9 @@ class Executor:
                 if time.time() - flat_since < cfg.daytrade_cooldown_minutes * 60:
                     return "Waiting for the day-trading cooldown after the last position closed"
             asset = self.broker.asset(symbol)
-            if not asset.get("tradable") or asset.get("status") != "active":
-                return "Asset is not tradable"
+            if (not asset.get("tradable") or asset.get("status") != "active"
+                    or asset.get("class", "us_equity") != "us_equity"):
+                return "Asset is not a tradable US stock or ETF"
             price = (reference_price if queued_for_open else self.broker.quote(symbol)[1] if cfg.intraday
                      else self.broker.latest_price(symbol))
             if not isinstance(price, (int, float)) or not math.isfinite(price) or not 0 < price < 1000000:

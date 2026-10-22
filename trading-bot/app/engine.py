@@ -13,6 +13,7 @@ from .candles import snapshot
 from .execution import Executor
 from .decisions import position_context, position_decision
 from .models import train_worker, predict, strategy_signature
+from .prediction_quality import forecast_quality
 from .feedback import capture_forecast, resolve_outcomes
 from .daytrade import TREND_EXITS, baseline, best, bracket, exit_signal, fresh, playbook, session_open
 from . import loop
@@ -338,13 +339,7 @@ class Engine:
 
     def stale_forecast(self, forecast, now):
         meta = self.store.get(f"model:{forecast['symbol']}")
-        if not meta or meta.get("strategy_signature") != strategy_signature(self.config) or forecast.get("model_version") != meta["version"]:
-            return "Settings or model changed; awaiting a current forecast"
-        age = (now - pd.Timestamp(forecast["bar_at"])).total_seconds()
-        model_age = (now - pd.Timestamp(meta["data_through"])).total_seconds()
-        if not (300 <= age <= 390 if self.config.intraday else 0 <= age <= 7 * 86400) or not 0 <= model_age <= (3 if self.config.intraday else 14) * 86400:
-            return "Market data or model is too old for this horizon"
-        return None
+        return forecast_quality(self.config, meta, forecast, now)["reason"]
 
     def forecast_decision(self, forecast, now):
         if self.config.intraday:
@@ -490,7 +485,7 @@ class Engine:
             self.store.set("entries_enabled", False)
         loss_breach = loss_breach or self.store.get("loss_halt_day") == day
         self.store.set("account", {"equity": equity, "cash": float(account["cash"]), "buying_power": float(account["buying_power"]),
-            "daily_pnl": equity - prior, "positions": [{k: p.get(k) for k in ("symbol", "qty", "market_value", "unrealized_pl", "unrealized_plpc", "avg_entry_price")} for p in positions],
+            "daily_pnl": equity - prior, "positions": [{k: p.get(k, "us_equity" if k == "asset_class" else None) for k in ("symbol", "asset_class", "qty", "market_value", "unrealized_pl", "unrealized_plpc", "avg_entry_price")} for p in positions],
             "market_open": clock["is_open"], "loss_halt": loss_breach, "at": utcnow()})
         if time.time() - self.store.get("equity_sample", 0) >= 900:
             self.store.event("equity", {"equity": equity, "daily_pnl": equity - prior})

@@ -56,6 +56,8 @@ class Config:
     history_days: int = 1800
     max_bars: int = 1500
     retrain_hours: int = 24
+    # Expire each stock's trained model independently, even if its inputs are recent.
+    model_max_age_hours: int = 168
     training_timeout: int = 900
     training_memory_mb: int = 4096
     # Sizing follows the account: this share of current equity, optionally capped in dollars (0 = no cap).
@@ -109,7 +111,7 @@ class Config:
                   "cost_bps": (1, 100), "edge_bps": (0, 100),
                   "training_memory_mb": (256, 4096), "training_timeout": (10, 1800),
                   "history_days": (400, 3000), "max_bars": (300, 2000),
-                  "retrain_hours": (12, 168), "port": (1, 65535), "feedback_weight": (1, 3),
+                  "retrain_hours": (12, 168), "model_max_age_hours": (12, 720), "port": (1, 65535), "feedback_weight": (1, 3),
                   "validation_bars": (20, 120), "scan_candidates": (1, 50),
                   "scan_interval_minutes": (15, 1440), "scan_min_price": (1, 10000),
                   "scan_min_dollar_volume": (100000, 10000000000),
@@ -196,6 +198,7 @@ class Config:
             port=int(os.getenv("PORT", "1337")), feed=os.getenv("ALPACA_DATA_FEED", "iex"),
             history_days=int(os.getenv("HISTORY_DAYS", "1800")), max_bars=int(os.getenv("MAX_BARS", "1500")),
             retrain_hours=int(os.getenv("RETRAIN_HOURS", "24")),
+            model_max_age_hours=int(os.getenv("MODEL_MAX_AGE_HOURS", "168")),
             training_timeout=int(os.getenv("TRAINING_TIMEOUT_SECONDS", "900")),
             training_memory_mb=int(os.getenv("TRAINING_MEMORY_MB", "4096")),
             feedback_weight=float(os.getenv("FEEDBACK_SAMPLE_WEIGHT", "2")),

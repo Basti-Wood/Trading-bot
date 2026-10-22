@@ -133,7 +133,7 @@ function render(s) {
   $('toggle').textContent=parallel?(s.any_entries_enabled?'Alle Bots pausieren':'Alle Bots einschalten'):(s.entries_enabled?'Pause entries':`Enable ${s.mode} entries`); $('toggle').disabled=!s.configured;
   $('train').disabled=!s.configured||['running','starting'].includes(s.training.status);
   $('notice').textContent=!s.configured?'Setup needed: add Alpaca keys and a dashboard password to .env, then restart.':s.account?.loss_halt?'Daily loss limit reached. New entries are disabled; protective exits remain active.':`${(parallel?s.portfolio_engine?.message:null) || s.engine.message || s.engine.status} · ${s.settings.feed.toUpperCase()} data · ${s.account?.market_open?'Market open':'Market closed'} · Alpaca news · per-stock Llama reports`;
-  $('memory').textContent=`${s.resources.process_memory_mb.toFixed(0)} MB / 6 GB`; $('memory-bar').value=s.resources.process_memory_mb;
+  $('memory').textContent=s.resources.available===false?'Telemetry unavailable':`${s.resources.process_memory_mb.toFixed(0)} MB / 6 GB`; $('memory-bar').value=s.resources.process_memory_mb;
   $('train-memory').textContent=`${(s.resources.training_memory_mb/1024).toFixed(1)} GB`;
   $('training-status').textContent=`${s.training.status}${s.training.symbol?' · '+s.training.symbol:''}${s.training.model?' / '+s.training.model:''}`;
   $('training-log').innerHTML=s.training_history.slice(0,12).map(e=>`<div class="log-row"><time>${time(e.at)}</time><span>${escape(e.symbol||'')} ${escape(e.model||'')} · ${escape(e.message)}</span></div>`).join('');

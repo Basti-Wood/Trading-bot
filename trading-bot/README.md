@@ -206,3 +206,7 @@ Removed: the custom PyTorch LSTM, 10,000-agent genetic search, six old asset-bot
 * [FreeLLM proxy API reference](https://github.com/tashfeenahmed/freellmapi/blob/main/docs/en/api/01-rest-api.md)
 
 Scanner/data API references: [Alpaca assets](https://docs.alpaca.markets/us/docs/working-with-assets), [snapshots](https://alpaca.markets/learn/snapshot-api), [historical bars and timeframes](https://docs.alpaca.markets/us/reference/stockbars), and [broker protections](https://docs.alpaca.markets/us/docs/user-protection).
+
+The separate [AI bot review](docs/ai-bot-review.md) records the FreqAI and TradingAgents methods inspected and the local additions. `MODEL_MAX_AGE_HOURS` expires each stock's trained model independently; API state reports its quality status and age. News decisions retain their exact evidence cutoff and a reproducible source hash with model/prompt metadata. These checks preserve the existing per-stock vote counts and strategy ownership.
+
+Upgrade note: existing broker positions, orders and historical journal records are preserved. Positions owned by retired strategies are outside the rebuilt stock bots and receive no automated management from them. Review those positions directly at Alpaca. Existing `FREELLM_MODELS=auto` is treated as Llama discovery; an explicit installed model ID takes precedence.

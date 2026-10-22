@@ -10,6 +10,7 @@ from .allocation import BOTS, NAMES, allocation, bot_capital, bot_share, validat
 from .broker import Alpaca, BrokerError
 from .store import utcnow
 from .feedback import summary_key
+from .prediction_quality import forecast_quality
 from .universe import active_symbols
 from .portfolio import strategy_contexts
 from .decisions import position_context
@@ -148,7 +149,10 @@ def create_app(config, store, broker_factory=Alpaca):
                 state.set(f"candles:{symbol}", data)
             except (BrokerError, ValueError, KeyError):
                 return jsonify(error="Candle data unavailable; will retry"), 502
-        return jsonify(**data, forecast=forecast_overlay(state.get(f"prediction:{symbol}") or {}, now, data.get("session_close")))
+        prediction = state.get(f"prediction:{symbol}") or {}
+        quality = forecast_quality(cfg, state.get(f"model:{symbol}"), prediction, now)
+        return jsonify(**data, quality=quality,
+                       forecast=forecast_overlay(prediction, now, data.get("session_close")) if quality["ready"] else None)
 
     @app.get("/api/state")
     def state():
@@ -169,6 +173,8 @@ def create_app(config, store, broker_factory=Alpaca):
                 # Old cached HOLDs did not distinguish a neutral outlook from ownership.
                 forecast = {**forecast, "action": "WAIT", "reason": "Waiting for a fresh decision with current position data"}
             symbols.append({"symbol": symbol, "position": position, "forecast": forecast,
+                            "quality": (forecast_quality(cfg, state_store.get(f"model:{symbol}"), forecast, pd.Timestamp.now(tz="UTC"))
+                                        if forecast and not cfg.loop else None),
                             "model": state_store.get(f"model:{symbol}"), "candidate": state_store.get(f"candidate:{symbol}"),
                             "research": state_store.get(f"research:{symbol}"),
                             "feedback": state_store.get(summary_key(cfg, symbol), {"captured": 0, "pending": 0, "resolved": 0, "excluded": 0, "scores": {}, "latest": []})})
@@ -215,7 +221,7 @@ def create_app(config, store, broker_factory=Alpaca):
                 "daytrade_strategies": cfg.daytrade_strategies,
                 "daily_loss": cfg.daily_loss, "stop_loss": cfg.effective_stop, "feed": cfg.feed,
                 "queue_daily_orders": cfg.queue_daily_orders,
-                "retrain_hours": cfg.retrain_hours, "validation_bars": 390 if cfg.intraday else cfg.validation_bars,
+                "retrain_hours": cfg.retrain_hours, "model_max_age_hours": cfg.model_max_age_hours, "validation_bars": 390 if cfg.intraday else cfg.validation_bars,
                 "universe_mode": cfg.universe_mode, "scan_candidates": cfg.scan_candidates,
                 "poll_seconds": config.poll_seconds, "daytrade_max_positions": cfg.daytrade_max_positions,
                 "daytrade_hold_minutes": cfg.daytrade_hold_minutes, "daytrade_close_minutes": cfg.daytrade_close_minutes,

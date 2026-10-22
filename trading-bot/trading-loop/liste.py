@@ -45,7 +45,8 @@ def symbole():
             # Feste Watchlist statt Markt-Scan: die Bots beobachten diese Symbole.
             auswahl = [*(_lesen(con, "monitor_symbols") or []), *(_lesen(con, "daytrade:monitor_symbols") or [])]
         positionen = (_lesen(con, "account") or {}).get("positions", [])
-        eigene = [p["symbol"] for p in positionen if float(p.get("qty") or 0) > 0
+        eigene = [p["symbol"] for p in positionen if p.get("asset_class", "us_equity") == "us_equity"
+                  and float(p.get("qty") or 0) > 0
                   and _besitzer(con, p["symbol"]) not in BOTS]
     finally:
         con.close()

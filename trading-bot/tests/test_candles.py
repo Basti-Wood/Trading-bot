@@ -84,6 +84,24 @@ class CandleTests(TempCase):
         self.assertEqual(len(response.json['bars']), 15)
         self.assertEqual(broker.multi_bars.call_args.kwargs['end'], pd.Timestamp('2026-11-27T18:00:00Z'))
 
+    def test_endpoint_includes_only_current_matching_model_forecasts(self):
+        from app.models import strategy_signature
+        now = OPEN + pd.Timedelta(minutes=30, seconds=10)
+        pred = {'symbol':'SPY', 'trading_mode':'daytrade', 'model_version':'one',
+                'bar_at':(OPEN+pd.Timedelta(minutes=25)).isoformat(),
+                'last_close':100, 'expected_return':.01, 'eligible':True, 'models':[]}
+        self.store.set('candles:SPY',snapshot('SPY',self.frame,self.base,now))
+        self.store.set('prediction:SPY',pred)
+        meta = {'version':'one','strategy_signature':strategy_signature(self.cfg),
+                'data_through':pred['bar_at'],'created_at':(now-pd.Timedelta(hours=1)).isoformat()}
+        self.store.set('model:SPY',meta)
+        client=create_app(self.cfg,self.store).test_client()
+        with patch('app.web.pd.Timestamp.now',return_value=now):
+            data=client.get('/api/candles/SPY').json
+            self.assertEqual(data['forecast']['target_price'],101)
+            self.store.set('model:SPY',{**meta,'version':'two'})
+            self.assertIsNone(client.get('/api/candles/SPY').json['forecast'])
+
     def test_authentication_daily_mode_and_provider_errors(self):
         secured = create_app(replace(self.cfg, password='secret'), self.store).test_client()
         self.assertEqual(secured.get('/api/candles/SPY').status_code, 401)
