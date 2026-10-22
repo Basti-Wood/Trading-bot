@@ -80,7 +80,7 @@ class Config:
     origins: tuple = ("https://trade.bastiwood.com",)
     # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
     loop_dir: Path = None
-    loop_timeout: int = 300
+    loop_timeout: int = 900
     def __post_init__(self):
         if not self.symbols or len(self.symbols) > 50 or len(set(self.symbols)) != len(self.symbols):
             raise ValueError("Configure 1 to 50 unique US equity/ETF symbols")
@@ -121,7 +121,7 @@ class Config:
                   "daytrade_close_minutes": (5, 60), "daytrade_capital_share": (.05, .95),
                   "strategy_fraction": (.05, 1), "min_votes": (2, 4),
                   "daytrade_run_minutes": (5, 240), "daytrade_trail_trigger": (.001, .05),
-                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 600)}
+                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 1800)}
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
@@ -215,5 +215,5 @@ class Config:
             llm_models=tuple(s.strip() for s in os.getenv("FREELLM_MODELS", "").split(",") if s.strip()),
             # Relative paths start at the trading-bot folder, whatever the working directory.
             loop_dir=(Path(__file__).resolve().parent.parent / os.getenv("TRADING_LOOP_DIR", "trading-loop")).resolve(),
-            loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "300")),
+            loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "900")),
             origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()))

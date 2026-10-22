@@ -124,12 +124,17 @@ def catalogue(config):
     return sorted(versions, key=lambda v: (v["idea"], v["number"]))
 
 
-def retest_targets(config, version=None):
-    """One named version (any status), or every version due for the scheduled re-run."""
+def retest_targets(config, version=None, include_changed=False):
+    """One named version (any status), or every version due for a re-run.
+
+    The scheduled run skips edited files (they may be work in progress); "Alle neu testen" in the
+    dashboard includes them, so a strategy that gained PARAMETER can be tuned with one click.
+    """
     if version is not None:
         path = strategy_path(config, version)
         return [path.stem] if path else []
-    return [v["version"] for v in catalogue(config) if v["status"] in RETESTABLE]
+    due = (*RETESTABLE, "geaendert") if include_changed else RETESTABLE
+    return [v["version"] for v in catalogue(config) if v["status"] in due]
 
 
 def loop_python(config):

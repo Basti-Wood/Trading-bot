@@ -10,6 +10,8 @@ BB_TAGE = 20
 BB_BREITE = 2      # Standardabweichungen
 RSI_TAGE = 14
 RSI_GRENZE = 30
+# Selbst-Anpassung: der Stresstest wählt pro Aktie Werte aus diesen Listen (Walk-forward, siehe stresstest.py).
+PARAMETER = {"BB_TAGE": [10, 15, 20, 30], "BB_BREITE": [1.5, 2, 2.5], "RSI_GRENZE": [25, 30, 35]}
 
 
 def mittellinie(werte, tage):

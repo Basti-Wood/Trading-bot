@@ -275,7 +275,7 @@ class Engine:
             self.store.set("loop_retest_requested", None)
         else:
             self.store.set("loop_retest_day", today.date().isoformat())
-        versions = loop.retest_targets(self.config, (request or {}).get("version"))
+        versions = loop.retest_targets(self.config, (request or {}).get("version"), include_changed=bool(request))
         if not versions:
             return
         status = {"status": "running", "trigger": "manuell" if request else "täglich", "versions": versions,
