@@ -1,4 +1,4 @@
-"""Trading-loop bot, dashboard budget/weights and manual trading."""
+"""Trading-loop bot, dashboard budget/weights and stock selection."""
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
@@ -118,24 +118,21 @@ class LoopFolderTests(unittest.TestCase):
         (self.folder / "risiko.py").write_text("STOP_LOSS_PROZENT = True\nMAX_DRAWDOWN_PROZENT = 20\n", encoding="utf-8")
         self.assertFalse(loop.risk_rules(self.cfg)["ok"])
 
-    def test_only_green_unchanged_stock_versions_with_current_rules_are_tradable(self):
+    def test_tested_unchanged_stock_versions_with_current_rules_are_activatable(self):
         add_version(self.folder, "trend_v1", result="rot")
         green = add_version(self.folder, "trend_v2")
         add_version(self.folder, "trend_v3", result=None)
-        add_version(self.folder, "krypto_v1", symbol="BTC/USD")
-        add_version(self.folder, "coins_v1", symbol="KRYPTO")
         add_version(self.folder, "index_v1", symbol="^GSPC")
         add_version(self.folder, "alt_v1", stop=3)
         changed = add_version(self.folder, "edit_v1")
         changed.write_text(changed.read_text(encoding="utf-8") + "\n# edited\n", encoding="utf-8")
         catalogue = loop.catalogue(self.cfg)
         status = {v["version"]: (v["status"], v["tradable"]) for v in catalogue}
-        self.assertEqual(status, {"trend_v1": ("rot", False), "trend_v2": ("gruen", True), "trend_v3": ("ungetestet", False),
-                                  "krypto_v1": ("gruen", True), "coins_v1": ("gruen", True), "index_v1": ("nicht_handelbar", False),
+        self.assertEqual(status, {"trend_v1": ("bereit", True), "trend_v2": ("bereit", True), "trend_v3": ("ungetestet", False),
+                                  "index_v1": ("nicht_handelbar", False),
                                   "alt_v1": ("veraltet", False), "edit_v1": ("geaendert", False)})
-        # Coin versions belong to the crypto trading-loop, stock versions to the trading-loop.
         self.assertEqual({v["version"]: v["bot"] for v in catalogue if v["tradable"]},
-                         {"trend_v2": "loop", "krypto_v1": "crypto_loop", "coins_v1": "crypto_loop"})
+                         {"trend_v1": "loop", "trend_v2": "loop"})
         self.assertEqual(loop.strategy_path(self.cfg, "trend_v2"), green)
         for name in ("../risiko", "trend_v2.py", "TREND_V2", "..\\x_v1"):
             self.assertIsNone(loop.strategy_path(self.cfg, name))
@@ -175,12 +172,12 @@ class LoopFolderTests(unittest.TestCase):
             loop.evaluate(self.cfg, {**record, "sha256": loop.file_hash(path)}, {"AAA": bars(430)})
 
     @unittest.skipUnless(REAL_STRESSTEST.is_file(), "needs trading-loop/stresstest.py")
-    def test_list_verdict_needs_three_green_stocks_or_the_whole_short_list(self):
+    def test_list_summary_has_no_group_verdict(self):
         code = "import stresstest as s; print(s.listen_urteil(2, 21)); print(s.listen_urteil(3, 21)); print(s.listen_urteil(2, 2))"
         out = subprocess.run([sys.executable, "-c", code], cwd=self.folder, capture_output=True, text=True, encoding="utf-8",
                              env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-        self.assertEqual(out.stdout.splitlines(), ["ROT (nur 2 von 21 Aktien grün, nötig sind mindestens 3)",
-                                                   "GRÜN (3 von 21 Aktien grün)", "GRÜN (2 von 2 Aktien grün)"], out.stderr)
+        self.assertEqual(out.stdout.splitlines(), ["EINZELTESTS (2 von 21 Aktien grün)",
+                                                   "EINZELTESTS (3 von 21 Aktien grün)", "EINZELTESTS (2 von 2 Aktien grün)"], out.stderr)
 
     @unittest.skipUnless(REAL_STRESSTEST.is_file(), "needs trading-loop/stresstest.py")
     def test_retest_reruns_the_stress_test_and_rewrites_the_report(self):
@@ -285,7 +282,7 @@ class LoopEngineTests(PortfolioCase):
         self.activate(green=False)
         self.portfolio.cycle()
         self.broker.submit.assert_not_called()
-        self.assertIn("Stresstest für AAA ROT", self.loop.store.get("forecast:AAA")["reason"])
+        self.assertIn("Kein grüner Einzeltest für AAA", self.loop.store.get("forecast:AAA")["reason"])
 
     def test_list_version_trades_the_bots_list_but_never_the_users_holdings(self):
         self.cfg = replace(self.cfg, symbols=("AAA", "BBB"))
@@ -397,91 +394,6 @@ class LoopEngineTests(PortfolioCase):
         self.assertIsNone(self.loop.trainer)
 
 
-class ManualTradingTests(PortfolioCase):
-    def setUp(self):
-        super().setUp()
-        self.client = create_app(self.cfg, self.store, broker_factory=lambda cfg: self.broker).test_client()
-        self.headers = {"X-Bot-Control": "dashboard"}
-
-    def order(self, **body):
-        return self.client.post("/api/manual/order", json={"symbol": "MINE", "side": "buy", "type": "market", "qty": 3, **body},
-                                headers=self.headers)
-
-    def test_manual_buy_claims_symbol_so_bots_leave_it_alone(self):
-        response = self.order(stop_loss_pct=5, take_profit_pct=10)
-        self.assertEqual(response.status_code, 200, response.get_json())
-        payload = self.broker.submit.call_args.args[0]
-        self.assertTrue(payload["client_order_id"].startswith("manual-"))
-        self.assertEqual((payload["order_class"], payload["stop_loss"]["stop_price"], payload["take_profit"]["limit_price"]),
-                         ("bracket", "95.00", "110.00"))
-        self.assertEqual(self.store.owner("MINE"), "manual")
-        self.broker.positions.return_value = [{"symbol": "MINE", "qty": "3", "market_value": "300", "unrealized_plpc": "0"}]
-        result = self.daily.executor.execute("MINE", "BUY", "2026-10-15", self.broker.account(), self.broker.positions(), [])
-        self.assertIn("manual", result)
-        self.assertEqual(self.broker.submit.call_count, 1)
-
-    def test_manual_pending_order_and_holdings_do_not_block_or_consume_bot_budget(self):
-        self.store.reserve_order("manual-x", {"symbol": "MINE", "side": "buy", "status": "new", "strategy": "manual"}, strategy="manual")
-        positions = [{"symbol": "MINE", "qty": "40", "market_value": "4000"}, {"symbol": "EXT", "qty": "10", "market_value": "1000"}]
-        orders = [{"symbol": "MINE", "side": "buy", "id": "m", "client_order_id": "manual-x"}]
-        self.broker.order.return_value = {"id": "m", "status": "new"}
-        result = self.daily.executor.execute("BBB", "BUY", "2026-10-15", self.broker.account(), positions, orders)
-        self.assertIn("Alpaca order new", result)
-
-    def test_orders_on_bot_symbols_and_bad_input_are_refused(self):
-        self.loop.store.set("owned:AAA", True)
-        response = self.order(symbol="AAA")
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("Trading-Loop", response.get_json()["error"])
-        for bad in ({"qty": 0}, {"qty": None, "notional": None}, {"qty": 3, "notional": 50}, {"symbol": "bad sym"},
-                    {"type": "limit"}, {"qty": 1.5, "stop_loss_pct": 5}, {"side": "short"}, {"stop_loss_pct": 80}):
-            self.assertEqual(self.order(**bad).status_code, 400, bad)
-        self.assertEqual(self.order(qty=1000).status_code, 400)  # $100,000 > $10,000 cash: no credit.
-        self.broker.submit.assert_not_called()
-
-    def test_manual_sell_checks_holding_and_first_cancels_resting_protection(self):
-        self.assertEqual(self.order(side="sell").status_code, 400)
-        self.broker.positions.return_value = [{"symbol": "MINE", "qty": "3", "market_value": "300"}]
-        self.broker.open_orders.return_value = [{"symbol": "MINE", "side": "sell", "id": "stop-leg", "type": "stop"}]
-        response = self.order(side="sell")
-        self.assertIn("storniert", response.get_json()["message"])
-        self.broker.cancel.assert_called_once_with("stop-leg")
-        self.broker.open_orders.return_value = []
-        self.assertEqual(self.order(side="sell", qty=4).status_code, 400)
-        self.assertEqual(self.order(side="sell").status_code, 200)
-        self.assertEqual(self.broker.submit.call_args.args[0]["side"], "sell")
-
-    def test_cancel_only_non_bot_orders(self):
-        self.broker.order_by_id.return_value = {"symbol": "AAA", "client_order_id": "ensemble-abc"}
-        response = self.client.post("/api/manual/cancel", json={"order_id": "1234abcd-0000"}, headers=self.headers)
-        self.assertEqual(response.status_code, 400)
-        self.broker.order_by_id.return_value = {"symbol": "MINE", "client_order_id": "manual-abc"}
-        self.assertEqual(self.client.post("/api/manual/cancel", json={"order_id": "1234abcd-0000"}, headers=self.headers).status_code, 200)
-        self.broker.cancel.assert_called_once_with("1234abcd-0000")
-
-    def test_broker_errors_become_messages(self):
-        self.broker.asset.side_effect = BrokerError("HTTP 404", 404)
-        self.assertEqual(self.order().status_code, 502)
-
-    def test_sold_manual_symbol_is_released_and_holdings_are_watched(self):
-        self.store.set_owned("MINE", "manual", True)
-        self.broker.positions.return_value = [{"symbol": "MINE", "qty": "3", "market_value": "300", "unrealized_plpc": "-.08"}]
-        self.portfolio.cycle()
-        self.assertIn("MINE", self.daily.store.get("monitor_symbols"))
-        self.assertNotIn("MINE", self.daytrade.store.get("monitor_symbols"))
-        self.daily.store.set("forecast:MINE", {"votes": {"a": "SELL", "b": "SELL", "c": "SELL", "d": "HOLD"}})
-        state = self.client.get("/api/state").get_json()
-        mine = state["manual"]["positions"][0]
-        self.assertEqual((mine["symbol"], mine["owner"]), ("MINE", "manual"))
-        self.assertIn("Stop-Loss", mine["outlook"]["hint"])
-        self.broker.positions.return_value = []
-        self.portfolio.cycle()
-        self.assertEqual(self.store.owner("MINE"), "manual")
-        self.store.set("manual_flat:MINE", 0)
-        self.portfolio.cycle()
-        self.assertIsNone(self.store.owner("MINE"))
-
-
 class DashboardApiTests(PortfolioCase):
     def setUp(self):
         super().setUp()
@@ -499,20 +411,20 @@ class DashboardApiTests(PortfolioCase):
         loop_card = next(s for s in state["strategies"] if s["id"] == "loop")
         self.assertAlmostEqual(loop_card["capital_ceiling"], 1600)
 
-    def test_loop_activation_requires_green_version(self):
+    def test_loop_activation_allows_red_report_and_keeps_versions_of_same_idea(self):
         add_version(self.folder, "trend_v1", result="rot")
         add_version(self.folder, "trend_v2")
         post = lambda action, version: self.client.post("/api/loop", json={"action": action, "version": version}, headers=self.headers)
-        self.assertEqual(post("activate", "trend_v1").status_code, 409)
+        self.assertEqual(post("activate", "trend_v1").status_code, 200)
         self.assertEqual(post("activate", "../../etc_v1").status_code, 404)
         self.assertEqual(post("activate", "trend_v2").status_code, 200)
         self.assertEqual(self.loop.store.get("loop_strategies")["trend_v2"]["symbol"], "AAA")
         state = self.client.get("/api/state").get_json()["loop"]
-        self.assertEqual([v["active"] for v in state["versions"]], [False, True])
+        self.assertEqual([v["active"] for v in state["versions"]], [True, True])
         self.assertEqual(state["running"][0]["rows"][0]["symbol"], "AAA")
         add_version(self.folder, "trend_v3")
-        self.assertIn("ersetzt trend_v2", post("activate", "trend_v3").get_json()["message"])
-        self.assertEqual(list(self.loop.store.get("loop_strategies")), ["trend_v3"])
+        self.assertEqual(post("activate", "trend_v3").status_code, 200)
+        self.assertEqual(list(self.loop.store.get("loop_strategies")), ["trend_v1", "trend_v2", "trend_v3"])
         post("deactivate", "trend_v3")
         add_version(self.folder, "liste_v1", symbol="LISTE")
         self.assertIn("Aktienliste", post("activate", "liste_v1").get_json()["message"])
@@ -520,6 +432,85 @@ class DashboardApiTests(PortfolioCase):
         self.activate()
         self.assertEqual(post("deactivate", "trend_v2").status_code, 200)
         self.assertEqual(self.loop.store.get("loop_strategies"), {})
+
+class PerStockSelectionTests(PortfolioCase):
+    def score(self, version, symbol, *, profit=None, drawdown=None, green=None, signal=None):
+        saved = self.loop.store.get(f'loop_results:{version}')
+        item = saved['symbols'][symbol]
+        for key, value in [('rendite', profit), ('max_drawdown', drawdown), ('gruen', green)]:
+            if value is not None:
+                item['test'][key] = value
+        if signal is not None:
+            item['signal'] = signal
+        self.loop.store.set(f'loop_results:{version}', saved)
+
+    def test_green_stock_can_buy_despite_old_red_list_report(self):
+        self.activate(symbol='LISTE', results=['PAG', 'CCC'], version='list_v1')
+        report_file = self.folder / 'berichte/list_v1.json'
+        report = json.loads(report_file.read_text())
+        report.update(ergebnis='rot', urteil='old group gate: only 1/20 green')
+        report_file.write_text(json.dumps(report))
+        self.cfg = replace(self.cfg, symbols=('PAG', 'CCC'))
+        self.loop.config = replace(self.loop.config, symbols=('PAG', 'CCC'))
+        self.score('list_v1', 'CCC', green=False)
+        self.assertTrue(loop.version_info(self.cfg, self.folder / 'strategien/list_v1.py')['tradable'])
+        self.portfolio.cycle()
+        self.assertEqual(self.broker.submit.call_args.args[0]['symbol'], 'PAG')
+        self.assertEqual(self.loop.store.get('loop_owner:PAG'), 'list_v1')
+
+    def test_rank_is_per_stock_then_return_then_absolute_drawdown(self):
+        self.activate(symbol='LISTE', results=['AAA', 'BBB'], version='trend_v1')
+        self.activate(symbol='LISTE', results=['AAA', 'BBB'], version='trend_v2', keep=True)
+        self.activate(symbol='LISTE', results=['AAA', 'BBB'], version='other_v1', keep=True)
+        self.score('trend_v1', 'AAA', profit=20, drawdown=-12)
+        self.score('trend_v2', 'AAA', profit=20, drawdown=-5)
+        self.score('other_v1', 'AAA', profit=100, green=False)
+        self.score('other_v1', 'BBB', profit=30)
+        self.assertEqual(loop.combine(self.loop.store, 'AAA', self.loop.config)['version'], 'trend_v2')
+        self.assertEqual(loop.combine(self.loop.store, 'BBB', self.loop.config)['version'], 'other_v1')
+
+    def test_winner_without_buy_does_not_fall_back_to_lower_ranked_buy(self):
+        self.activate(version='other_v1')
+        self.activate(version='trend_v2', keep=True)
+        self.score('trend_v2', 'AAA', profit=25, signal='HOLD')
+        choice = loop.combine(self.loop.store, 'AAA', self.loop.config)
+        self.assertEqual((choice['version'], choice['signal']), ('trend_v2', 'HOLD'))
+        self.portfolio.cycle()
+        self.broker.submit.assert_not_called()
+
+    def test_changed_file_or_risk_report_cannot_buy_from_cached_results(self):
+        self.activate()
+        path = self.folder / 'strategien/trend_v2.py'
+        original = path.read_text()
+        path.write_text(original+'\n# changed')
+        self.portfolio.cycle()
+        self.broker.submit.assert_not_called()
+        path.write_text(original)
+        report_file = self.folder / 'berichte/trend_v2.json'
+        report = json.loads(report_file.read_text())
+        report['risiko']['stop_loss'] = 3
+        report_file.write_text(json.dumps(report))
+        self.portfolio.cycle()
+        self.broker.submit.assert_not_called()
+
+    def test_nonfinite_green_metrics_cannot_win(self):
+        self.activate(version='trend_v1')
+        saved = self.loop.store.get('loop_results:trend_v1')
+        saved['symbols']['AAA']['test']['rendite'] = None
+        self.loop.store.set('loop_results:trend_v1', saved)
+        self.assertEqual(loop.combine(self.loop.store, 'AAA')['signal'], 'HOLD')
+
+    def test_removed_routes_and_modes_are_unavailable_and_stock_rows_are_exposed(self):
+        self.activate()
+        client = create_app(self.cfg, self.store).test_client()
+        self.assertEqual(client.post('/api/manual/order', json={}, headers={'X-Bot-Control':'dashboard'}).status_code, 404)
+        state = client.get('/api/state').get_json()
+        self.assertEqual([s['id'] for s in state['strategies']], ['daily', 'daytrade', 'loop'])
+        self.assertNotIn('manual', state)
+        self.assertNotIn('crypto', state)
+        row = state['loop']['stocks'][0]
+        self.assertEqual((row['symbol'], row['version'], row['signal']), ('AAA', 'trend_v2', 'BUY'))
+        self.assertIn('trend_v2', row['views'])
 
 
 if __name__ == "__main__":

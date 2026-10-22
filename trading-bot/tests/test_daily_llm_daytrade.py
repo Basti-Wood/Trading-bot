@@ -15,64 +15,64 @@ def forecast(symbol, bar_at='2026-10-14T04:00:00Z'):
             'forecast_signal': 'BUY', 'expected_return': .01, 'models': models('BUY')}
 
 
-class BatchResearchTests(TempCase):
-    def research(self, content):
-        research = Research(replace(self.cfg, llm_models=('auto',)), self.store)
-        research.market_news = Mock(return_value={'SPY': [], 'QQQ': [], 'IWM': []})
-        research.news = Mock(side_effect=lambda symbol, alpaca, limit, first_id: (
-            [{'id': first_id, 'title': symbol, 'summary': '', 'published_at': 'now', 'url': 'https://x', 'provider': 'p'}], []))
-        response = Mock(ok=True)
-        response.json.return_value = {'model': 'routed', 'choices': [{'message': {'content': json.dumps(content)}}]}
-        research.http.post = Mock(return_value=response)
+class PerStockResearchTests(TempCase):
+    def research(self):
+        research = Research(replace(self.cfg, llm_models=('llama-test',)), self.store)
+        research.news = Mock(side_effect=lambda symbol, **kwargs: (
+            [{'id': 1, 'title': symbol, 'summary': '', 'published_at': 'now', 'url': 'https://x', 'provider': 'p'}], []))
+        research.overview = Mock(return_value={'status': 'ready', 'summary': 'Market news', 'source_ids': [1], 'sources': []})
+        def reply(*args, **kwargs):
+            stock = json.loads(kwargs['json']['messages'][1]['content'])['stocks'][0]
+            symbol = stock['symbol']
+            if symbol == 'QQQ':
+                raise ValueError('QQQ connection failed')
+            action = 'BUY' if symbol == 'SPY' else 'SELL'
+            response = Mock(ok=True)
+            response.json.return_value = {'model': 'llama-routed', 'choices': [{'message': {'content': json.dumps({'stocks': [
+                {'symbol': symbol, 'action': action, 'confidence': .9, 'rationale': symbol+' own summary', 'source_ids': [1]}]})}}]}
+            return response
+        research.http.post = Mock(side_effect=reply)
         return research
 
-    def test_one_request_returns_an_opinion_for_every_stock(self):
-        research = self.research({'stocks': [
-            {'symbol': 'SPY', 'action': 'BUY', 'confidence': .8, 'rationale': 'Upgrade', 'source_ids': [1]},
-            {'symbol': 'QQQ', 'action': 'SELL', 'confidence': .9, 'rationale': 'Miss', 'source_ids': [2]},
-            {'symbol': 'QQQ', 'action': 'BUY', 'confidence': .9, 'rationale': 'Duplicate', 'source_ids': [2]},
-            {'symbol': 'IWM', 'action': 'BUY', 'confidence': .9, 'rationale': 'Cites SPY news', 'source_ids': [1]},
-            {'symbol': 'TSLA', 'action': 'BUY', 'confidence': .9, 'rationale': 'Not asked', 'source_ids': [1]}]})
-        results = research.analyze_all([forecast('SPY'), forecast('QQQ'), forecast('IWM')])
-        research.http.post.assert_called_once()
-        sent = json.loads(research.http.post.call_args.kwargs['json']['messages'][1]['content'])
-        self.assertEqual([s['symbol'] for s in sent['stocks']], ['SPY', 'QQQ', 'IWM'])
-        self.assertEqual({s: r['action'] for s, r in results.items()}, {'SPY': 'BUY', 'QQQ': 'SELL', 'IWM': 'HOLD'})
-        self.assertEqual(self.store.get('research:SPY')['bar_at'], '2026-10-14T04:00:00Z')
-        self.assertIsNone(self.store.get('research:TSLA'))
-
-
-class ChunkedResearchTests(TempCase):
-    def test_requests_go_out_in_small_batches_and_a_failed_batch_only_affects_its_stocks(self):
-        symbols = [f'S{i}' for i in range(7)]
-        research = Research(replace(self.cfg, llm_models=('auto',)), self.store)
-        research.market_news = Mock(return_value={s: [] for s in symbols})
-        research.news = Mock(side_effect=lambda symbol, alpaca, limit, first_id: (
-            [{'id': first_id, 'title': symbol, 'summary': '', 'published_at': 'now', 'url': 'https://x', 'provider': 'p'}], []))
-        good = Mock(ok=True)
-        good.json.return_value = {'model': 'm', 'choices': [{'finish_reason': 'stop', 'message': {'content':
-            '<think>reasoning</think>\nHere you go: {"stocks": [{"symbol": "S5", "action": "BUY", "confidence": 0.9, "rationale": "Upgrade", "source_ids": [6]}]} Thanks'}}]}
-        empty = Mock(ok=True)
-        empty.json.side_effect = ValueError('Expecting value: line 1 column 1 (char 0)')
-        research.http.post = Mock(side_effect=[empty, good])
-        results = research.analyze_all([forecast(s) for s in symbols])
-        self.assertEqual(research.http.post.call_count, 2)
+    def test_one_request_per_stock_and_one_vote_without_cross_stock_failure(self):
+        research = self.research()
+        result = research.analyze_all([forecast(s) for s in ('SPY', 'QQQ', 'IWM')])
+        self.assertEqual(research.http.post.call_count, 3)
         sent = [json.loads(c.kwargs['json']['messages'][1]['content'])['stocks'] for c in research.http.post.call_args_list]
-        self.assertEqual([len(s) for s in sent], [5, 2])
-        self.assertEqual(results['S0']['status'], 'unavailable')
-        self.assertIn('non-JSON', results['S0']['message'])
-        self.assertEqual((results['S5']['status'], results['S5']['action']), ('ready', 'BUY'))
-        self.assertEqual((results['S6']['status'], results['S6']['action']), ('ready', 'HOLD'))
+        self.assertEqual([len(stocks) for stocks in sent], [1, 1, 1])
+        self.assertEqual([stocks[0]['symbol'] for stocks in sent], ['SPY', 'QQQ', 'IWM'])
+        self.assertEqual(result['SPY']['action'], 'BUY')
+        self.assertEqual(result['QQQ']['status'], 'unavailable')
+        self.assertEqual(result['IWM']['action'], 'SELL')
+        self.assertEqual(len(result['SPY']['opinions']), 1)
+        report = self.store.get('news_report')
+        self.assertEqual(set(report['stocks']), {'SPY', 'QQQ', 'IWM'})
+        self.assertEqual(report['overview']['summary'], 'Market news')
+        self.assertEqual(self.store.get('news_report:'+report['day']), report)
+        research.analyze_all([forecast('SPY'), forecast('QQQ'), forecast('IWM')])
+        self.assertEqual(research.http.post.call_count, 4) # only the failed stock retries
+        research.overview.assert_called_once()
 
-    def test_all_batches_failing_raises_for_a_retry(self):
-        research = Research(replace(self.cfg, llm_models=('auto',)), self.store)
-        research.market_news = Mock(return_value={'SPY': []})
-        research.news = Mock(return_value=([{'id': 1, 'title': 't', 'summary': '', 'published_at': 'now', 'url': 'https://x', 'provider': 'p'}], []))
-        cut = Mock(ok=True)
-        cut.json.return_value = {'choices': [{'finish_reason': 'length', 'message': {'content': '{"stocks": [{"symbol": "SPY"'}}]}
-        research.http.post = Mock(return_value=cut)
-        with self.assertRaisesRegex(ValueError, 'cut off'):
-            research.analyze_all([forecast('SPY')])
+    def test_cross_stock_or_duplicate_reply_cannot_cast_a_vote(self):
+        research = self.research()
+        research.ask = Mock(return_value=([{'symbol': 'OTHER', 'action': 'BUY'}], 'llama'))
+        self.assertEqual(research.analyze_all([forecast('SPY')])['SPY']['status'], 'unavailable')
+        own = {'symbol': 'SPY', 'action': 'BUY', 'confidence': .9, 'rationale': 'r', 'source_ids': [1]}
+        research.ask.return_value = ([own, own], 'llama')
+        self.assertEqual(research.analyze_all([forecast('SPY')])['SPY']['status'], 'unavailable')
+
+    def test_multi_stock_request_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            self.research().ask('llama', [{'symbol': 'SPY'}, {'symbol': 'QQQ'}])
+
+    def test_no_news_and_invalid_citations_abstain(self):
+        research = self.research()
+        research.news.return_value = ([], [])
+        research.news.side_effect = None
+        self.assertEqual(research.analyze_all([forecast('SPY')])['SPY']['action'], 'HOLD')
+        research.http.post.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'source'):
+            Research.validate({'action': 'BUY', 'confidence': .9, 'rationale': 'r', 'source_ids': [99]}, [{'id': 1}])
 
 
 class ResearchScheduleTests(TempCase):
@@ -81,6 +81,7 @@ class ResearchScheduleTests(TempCase):
         self.calls = []
         def analyze_all(research, forecasts):
             self.calls.append([f['symbol'] for f in forecasts])
+            return {f['symbol']: {'status': 'ready'} for f in forecasts}
         patcher = patch('app.engine.Research.analyze_all', analyze_all)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -100,14 +101,12 @@ class ResearchScheduleTests(TempCase):
         self.tick(engine, [forecast('SPY', '2026-10-15T04:00:00Z'), forecast('QQQ', '2026-10-15T04:00:00Z')])
         self.assertEqual(len(self.calls), 2)
 
-    def test_waits_briefly_for_all_forecasts_of_the_new_bar(self):
+    def test_new_stock_and_mixed_bars_are_scheduled_independently(self):
         engine = self.engine()
-        mixed = [forecast('SPY', '2026-10-15T04:00:00Z'), forecast('QQQ')]
-        self.tick(engine, mixed)
-        self.assertEqual(self.calls, [])
-        self.store.set('research_batch', {**self.store.get('research_batch'), 'first_seen': time.time() - 601})
-        self.tick(engine, mixed)
-        self.assertEqual(self.calls, [['SPY']])
+        self.tick(engine, [forecast('SPY')])
+        self.tick(engine, [forecast('SPY'), forecast('QQQ')])
+        self.tick(engine, [forecast('SPY', '2026-10-15T04:00:00Z'), forecast('QQQ')])
+        self.assertEqual(self.calls, [['SPY'], ['QQQ'], ['SPY']])
 
     def test_daytrade_never_calls_the_llm(self):
         engine = self.engine('daytrade')

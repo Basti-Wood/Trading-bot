@@ -9,12 +9,13 @@ import psutil
 import pandas as pd
 
 from .broker import Alpaca
+from .candles import snapshot
 from .execution import Executor
 from .decisions import position_context, position_decision
 from .models import train_worker, predict, strategy_signature
 from .feedback import capture_forecast, resolve_outcomes
 from .daytrade import TREND_EXITS, baseline, best, bracket, exit_signal, fresh, playbook, session_open
-from . import crypto, loop
+from . import loop
 from .research import Research, ballots, combine
 from .store import utcnow
 from .universe import active_symbols, monitored_symbols, scan, entries_ready, watched_symbols
@@ -125,10 +126,9 @@ class Engine:
             self.training_started = time.monotonic()
 
     def research_tick(self, forecasts):
-        if self.config.intraday or self.config.loop or self.config.crypto:
-            # Five-minute horizons decide on prediction models and setups only; stock news says nothing about coins.
+        if self.config.intraday or self.config.loop:
+            # Intraday entries use models and the playbook; daily news has its own horizon.
             status = ("not used by the trading-loop; tested strategy rules decide" if self.config.loop
-                      else "not used for crypto; the three prediction models decide" if self.config.crypto
                       else "not used for day trading; prediction models and setups decide")
             if self.store.get("research_status", {}).get("status") != status:
                 self.store.set("research_status", {"status": status})
@@ -140,40 +140,38 @@ class Engine:
             return
         if not forecasts:
             return
-        # One LLM request per completed daily bar covers every stock on the list.
-        latest = max(f["bar_at"] for f in forecasts)
-        current = [f for f in forecasts if f["bar_at"] == latest]
-        batch = self.store.get("research_batch") or {}
-        if batch.get("bar_at") != latest:
-            batch = {"bar_at": latest, "tries": 0, "at": 0, "first_seen": time.time(), "done": False}
-            self.store.set("research_batch", batch)
-        if batch["done"] or batch["tries"] >= 3 or time.time() - batch["at"] < 3600:
+        from .research import news_day
+        day = news_day()
+        due = []
+        for forecast in forecasts:
+            symbol = forecast["symbol"]
+            attempt = self.store.get(f"research_attempt:{symbol}") or {}
+            key = f"{day}:{forecast['bar_at']}"
+            if attempt.get("key") != key:
+                attempt = {"key": key, "tries": 0, "at": 0, "done": False}
+            if attempt.get("done") or attempt["tries"] >= 3 or time.time() - attempt["at"] < 3600:
+                continue
+            self.store.set(f"research_attempt:{symbol}", {**attempt, "tries": attempt["tries"] + 1, "at": time.time()})
+            due.append(forecast)
+        if not due:
             return
-        # Forecasts refresh one stock at a time; wait briefly so the single request includes them all.
-        if len(current) < len(forecasts) and time.time() - batch["first_seen"] < 600:
-            return
-        batch = {**batch, "tries": batch["tries"] + 1, "at": time.time()}
-        self.store.set("research_batch", batch)
         def work():
             try:
                 with self.research_lock if self.research_lock is not None else nullcontext():
                     if self.stop.is_set():
                         return
-                    Research(self.config, self.store).analyze_all(current)
-                self.store.set("research_batch", {**batch, "done": True, "symbols": [f["symbol"] for f in current]})
-            except Exception as exc:
-                # requests exceptions can contain URLs; never log headers or raw payloads.
-                message = str(exc)[:240] if isinstance(exc, ValueError) else "News/FreeLLM connection failed"
-                for forecast in current:
-                    self.store.set(f"research:{forecast['symbol']}", {"status": "unavailable", "at": utcnow(), "message": message})
-                self.store.event("research", {"status": "unavailable", "message": message, "attempt": batch["tries"]})
-            self.store.set("research_status", {"status": "idle", "at": utcnow()})
+                    results = Research(self.config, self.store).analyze_all(due)
+                for symbol, result in results.items():
+                    attempt = self.store.get(f"research_attempt:{symbol}") or {}
+                    self.store.set(f"research_attempt:{symbol}", {**attempt, "done": result.get("status") == "ready"})
+            except Exception:
+                self.store.event("research", {"status": "unavailable", "message": "News/FreeLLM connection failed"})
+            finally:
+                self.store.set("research_status", {"status": "idle", "at": utcnow()})
         self.research_thread = threading.Thread(target=work, name="news-research", daemon=True)
         self.research_thread.start()
 
     def scan_tick(self):
-        if self.config.trading_mode == "crypto":
-            return self.crypto_scan_tick()
         if self.config.coordinated and self.config.trading_mode != "daily" or self.config.loop:
             return
         if self.config.universe_mode != "market" or self.scan_thread and self.scan_thread.is_alive():
@@ -189,32 +187,6 @@ class Engine:
         self.scan_thread = threading.Thread(target=work, name="market-scanner", daemon=True)
         self.scan_thread.start()
 
-    def crypto_scan_tick(self):
-        """Hourly safety check of every Alpaca coin; the crypto trading-loop reads the same list."""
-        if self.scan_thread and self.scan_thread.is_alive() or time.time() - self.last_scan < crypto.SCAN_SECONDS:
-            return
-        self.last_scan = time.time()
-        self.scan_thread = threading.Thread(target=crypto.scan, args=(self.config, self.store, Alpaca(self.config), self.stop),
-                                            name="crypto-scanner", daemon=True)
-        self.scan_thread.start()
-
-    def protect_crypto(self, positions, orders, session):
-        """Alpaca has no stop legs for crypto: once coins arrive, rest a stop-limit sell at the broker."""
-        for position in positions:
-            symbol = position["symbol"]
-            if (not crypto.is_crypto(symbol) or float(position.get("qty") or 0) <= 0 or not self.store.get(f"owned:{symbol}", False)
-                    or self.store.get(f"exit_pending:{symbol}", False)):
-                continue
-            try:
-                status = self.executor.protect(symbol, position, orders, self.stop_limit(), session)
-            except Exception as exc:
-                status = f"Stop-Order nicht möglich ({str(exc)[:160]}); der Bot überwacht den Stop selbst"
-            if status and status != self.store.get(f"protect_status:{symbol}"):
-                self.store.set(f"protect_status:{symbol}", status)
-                self.store.event("decision", {"symbol": symbol, "action": "HOLD", "reason": status})
-            if self.executor.changed:
-                return True
-        return False
 
     def forecast_tick(self, symbols, day):
         if self.config.loop:
@@ -322,7 +294,7 @@ class Engine:
         self.retest_thread.start()
 
     def prediction(self, symbol):
-        return loop.combine(self.store, symbol) if self.config.loop else self.store.get(f"prediction:{symbol}")
+        return loop.combine(self.store, symbol, self.config) if self.config.loop else self.store.get(f"prediction:{symbol}")
 
     def loop_risk(self, equity, owned_any):
         """risiko.py: stop per trade and the maximum drawdown from the account's peak."""
@@ -383,9 +355,6 @@ class Engine:
         if stale:
             return "HOLD", stale
         signal, reason = combine(forecast, self.store.get(f"research:{forecast['symbol']}"), min_votes=self.config.min_votes)
-        # The forecast covers the UTC day after its candle, like the stock bots' next session.
-        if self.config.crypto and signal == "BUY" and forecast.get("target_session") not in self.sessions:
-            return "HOLD", "Kaufsignal gilt nicht für den aktuellen Krypto-Tag (UTC)"
         return signal, reason
 
     def daytrade_decision(self, forecast, now):
@@ -405,7 +374,7 @@ class Engine:
         models = f"models {buys} bullish / {sells} bearish" if votes else "prediction models abstain"
         return "BUY", f"{names} fired: {best(book)['reason']}; {models}"
 
-    def playbook_tick(self, symbols, now, is_open):
+    def playbook_tick(self, symbols, now, is_open, session_close=None):
         """Fetch one-minute bars for every symbol in one request and evaluate the playbook."""
         if not self.config.intraday or not is_open or self.playbook_thread and self.playbook_thread.is_alive():
             return
@@ -429,16 +398,26 @@ class Engine:
                         except ValueError as exc:
                             base = {"day": str(today), "error": str(exc)[:200]}
                         self.store.set(f"playbook_base:{symbol}", base)
-                minute = broker.multi_bars(symbols, "1Min", opening)
+                minute = broker.multi_bars(symbols, "1Min", opening, end=now)
+                closing = pd.Timestamp(session_close) if session_close else None
                 for symbol in symbols:
                     frame = minute.get(symbol)
                     if frame is not None:
-                        frame = frame[frame.index + pd.Timedelta(minutes=1) <= now]
+                        frame = frame[(frame.index + pd.Timedelta(minutes=1) <= now)
+                                      & (frame.index.tz_convert("America/New_York").date == today)]
+                        if closing is not None:
+                            frame = frame[frame.index + pd.Timedelta(minutes=1) <= closing]
                     try:
                         book = playbook(frame, self.store.get(f"playbook_base:{symbol}"), now, self.config)
                     except (ValueError, KeyError, IndexError, ZeroDivisionError) as exc:
                         book = {"signal": "HOLD", "signals": [], "at": now.isoformat(), "bar_at": None, "note": str(exc)[:200]}
                     self.store.set(f"playbook:{symbol}", book)
+                    base = self.store.get(f"playbook_base:{symbol}")
+                    if not base or base.get("day") != str(today):
+                        base = None
+                    data = snapshot(symbol, frame, base, now, self.store.get(f"candles:{symbol}"), book)
+                    data["session_close"] = closing.isoformat() if closing is not None else None
+                    self.store.set(f"candles:{symbol}", data)
             except Exception as exc:
                 self.store.event("error", {"message": "Day-trading playbook data failed: " + str(exc)[:200]})
         self.playbook_thread = threading.Thread(target=work, name="daytrade-playbook", daemon=True)
@@ -518,12 +497,9 @@ class Engine:
             self.store.set("equity_sample", time.time())
         now = pd.Timestamp(clock["timestamp"])
         local = now.tz_convert("America/New_York")
-        if self.config.crypto:
-            # Coins trade around the clock; days, order sessions and entries follow the UTC daily candle.
-            clock, day = {**clock, "is_open": True}, crypto.session(now)
         queue_session = self.queue_session(clock, now)
         self.sessions = {s for s in (day if clock["is_open"] else None, queue_session) if s}
-        entry_window = crypto.entry_window(now) if self.config.crypto else local.hour == 9 and 35 <= local.minute <= 59
+        entry_window = local.hour == 9 and 35 <= local.minute <= 59
         flatten = False
         if self.config.intraday:
             close = pd.Timestamp(clock["next_close"]) if clock.get("next_close") else None
@@ -621,8 +597,6 @@ class Engine:
                         self.store.set(f"exit_status:{symbol}", status)
                         self.store.event("decision", {"symbol": symbol, "action": "SELL", "reason": exit_reason + "; " + status, "risk_exit": True})
                         acted = bool(self.executor.changed)
-            if self.config.crypto and not acted:
-                acted = self.protect_crypto(positions, orders, day)
         if phase == "risk":
             return acted
         forecasts = []
@@ -700,7 +674,7 @@ class Engine:
         self.scan_tick()
         # Day trading also evaluates its setups for the user's own holdings (shown, never traded).
         watched = watched_symbols(self.config, self.store, positions) if self.config.intraday else []
-        self.playbook_tick(list(dict.fromkeys([*symbols, *watched])), now, clock["is_open"])
+        self.playbook_tick(list(dict.fromkeys([*symbols, *watched])), now, clock["is_open"], clock.get("next_close"))
         self.forecast_tick(symbols, day)
         self.research_tick(forecasts)
         self.store.set("engine", {"status": "running", "message": f"Monitoring {len(symbols)} symbols in {self.config.trading_mode} mode", "at": utcnow()})

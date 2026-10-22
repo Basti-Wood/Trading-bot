@@ -1,17 +1,13 @@
-"""Run the daily, intraday, trading-loop and crypto strategies under one account/order coordinator.
-
-The user's own (manual) trades share the account but sit outside the bots' budget.
-"""
+"""Coordinate three stock strategies under shared account/order limits."""
 from dataclasses import replace
 import threading
-import time
 
 from . import loop
 from .allocation import bot_share
 from .engine import Engine
 from .store import StrategyStore, utcnow
 
-STRATEGIES = ("daily", "daytrade", "loop", "crypto", "crypto_loop")
+STRATEGIES = ("daily", "daytrade", "loop")
 
 
 def strategy_contexts(config, store):
@@ -19,35 +15,13 @@ def strategy_contexts(config, store):
         return [(config, store)]
     contexts = []
     for mode in STRATEGIES:
-        if mode.startswith("crypto") and not config.crypto_enabled:
-            continue
         # strategy_fraction is the startup weight; sizing reads the live dashboard weights.
         cfg = replace(config, trading_mode=mode, coordinated=True)
-        if mode in {"loop", "crypto_loop"}:
+        if mode == "loop":
             # Per-symbol tests must see the stress test's window, not the prediction bot's training history.
             cfg = replace(cfg, history_days=loop.HISTORY_DAYS)
-        if mode.startswith("crypto"):
-            # Coins trade every day (about 1,830 daily candles in five years) and cost Alpaca's crypto fee.
-            cfg = replace(cfg, cost_bps=config.crypto_cost_bps, max_bars=2000)
         contexts.append((replace(cfg, strategy_fraction=max(.05, bot_share(cfg, store, mode))), StrategyStore(store, mode)))
     return contexts
-
-
-def release_manual(store, positions, orders):
-    """Hand a fully sold manual symbol back to the bots after two flat observations."""
-    for symbol in store.owned_symbols("manual"):
-        busy = (any(p["symbol"] == symbol and float(p.get("qty") or 0) for p in positions)
-                or any(o["symbol"] == symbol for o in orders)
-                or any(o["symbol"] == symbol and o.get("strategy") == "manual" for o in store.unresolved_orders()))
-        if busy:
-            store.set(f"manual_flat:{symbol}", None)
-            continue
-        seen = store.get(f"manual_flat:{symbol}")
-        if seen is None:
-            store.set(f"manual_flat:{symbol}", time.time())
-        elif time.time() - seen >= 15:
-            store.set_owned(symbol, "manual", False)
-            store.set(f"manual_flat:{symbol}", None)
 
 
 class PortfolioEngine:
@@ -118,11 +92,6 @@ class PortfolioEngine:
         account, clock = self.broker.account(), self.broker.clock()
         positions, orders = self.broker.positions(), self.broker.open_orders()
         snapshot = (account, clock, positions, orders, reconciled)
-        # Open orders that are not bot entries, for the dashboard's "trade yourself" view.
-        self.store.set("open_orders", [{k: o.get(k) for k in ("id", "client_order_id", "symbol", "side", "type", "qty",
-                                        "notional", "limit_price", "stop_price", "status", "submitted_at")}
-                                       for o in orders if not o.get("client_order_id", "").startswith("ensemble-")][:100])
-        release_manual(self.store, positions, orders)
         sequence = self.engines[self.turn:] + self.engines[:self.turn]
         self.turn = (self.turn + 1) % len(self.engines)
         acted, failed = False, []
@@ -141,7 +110,7 @@ class PortfolioEngine:
                     engine.store.event("error", {"message": str(exc)[:240]})
         self.store.set("portfolio_engine", {"status": "error" if failed else "running",
             "message": "Strategy error; check decision logs" if failed else
-                       f"Prediction, day trading, trading-loop{' and crypto' if self.config.crypto_enabled else ''} running together; shared account limits",
+                       "Prediction, day trading and trading-loop running together; shared account limits",
             "at": utcnow()})
 
     def run(self):

@@ -1,10 +1,6 @@
-"""Die Aktienliste der anderen Bots plus deine eigenen Aktien, und die Coin-Liste der Krypto-Bots.
+"""Die Aktienliste der Bots plus externe Aktien aus dem gemeinsamen Konto.
 
-Gelesen aus der Datenbank des Trading-Bots (nur lesen, nichts wird geändert). Strategien mit
-SYMBOL = "LISTE" werden im Stresstest auf genau dieser Liste getestet und im Bot darauf gehandelt,
-Strategien mit SYMBOL = "KRYPTO" auf den Coins, die die Sicherheitsregeln des Bots bestehen.
-
-  python liste.py
+Nur lesender Zugriff auf die Datenbank. SYMBOL = "LISTE" testet jede Aktie einzeln.
 """
 import datetime as dt
 import json
@@ -15,7 +11,7 @@ from pathlib import Path
 
 ORDNER = Path(__file__).resolve().parent
 BOT_DB = Path(os.getenv("TRADING_BOT_DB", ORDNER.parent / "data" / "bot.sqlite3"))
-BOTS = {"daily", "daytrade", "loop", "crypto", "crypto_loop"}
+BOTS = {"daily", "daytrade", "loop"}
 AKTIE = re.compile(r"[A-Z][A-Z0-9.\-]{0,9}")
 
 
@@ -37,18 +33,6 @@ def _verbinden():
     return sqlite3.connect(f"{BOT_DB.as_uri()}?mode=ro", uri=True, timeout=10)
 
 
-def krypto():
-    """(Coins, [], Stand der Prüfung): die Coins, die die Sicherheitsregeln der Krypto-Bots bestehen."""
-    con = _verbinden()
-    try:
-        stand = _lesen(con, "crypto_universe") or {}
-    finally:
-        con.close()
-    coins = [s for s in stand.get("symbols") or [] if re.fullmatch(r"[A-Z0-9]{2,15}/USD", s)]
-    if not coins:
-        raise SystemExit("Die Coin-Liste der Krypto-Bots ist leer. Starte den Trading-Bot mit CRYPTO_ENABLED=true; "
-                         "er prüft die Coins stündlich.")
-    return coins, [], stand.get("at")
 
 
 def symbole():
@@ -79,8 +63,3 @@ if __name__ == "__main__":
     liste, eigene, stand = symbole()
     print(f"{len(liste)} Aktien (Scan vom {_zeit(stand)}):")
     print(", ".join(f"{s} (deine)" if s in eigene else s for s in liste))
-    try:
-        coins, _, stand = krypto()
-        print(f"{len(coins)} Coins (Sicherheitsprüfung vom {_zeit(stand)}): {', '.join(coins)}")
-    except SystemExit as hinweis:
-        print(hinweis)

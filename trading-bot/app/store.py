@@ -169,8 +169,7 @@ class Store:
 
 class StrategyStore:
     """Strategy-local state over one account journal and ownership registry."""
-    SHARED = {"account", "account_scope", "loss_halt_day", "equity_sample", "universe", "scan_status", "allocation",
-              "crypto_universe", "crypto_scan_status"}
+    SHARED = {"account", "account_scope", "loss_halt_day", "equity_sample", "universe", "scan_status", "allocation"}
 
     def __init__(self, root, strategy):
         self.root, self.strategy = root, strategy

@@ -4,8 +4,6 @@ from urllib.parse import quote
 import requests
 import pandas as pd
 
-CRYPTO = "/v1beta3/crypto/us"
-
 
 class BrokerError(RuntimeError):
     def __init__(self, message, status=None):
@@ -40,22 +38,15 @@ class Alpaca:
     def clock(self):
         return self.request("GET", "/v2/clock")
 
-    @staticmethod
-    def pair(item):
-        """Alpaca reports crypto positions as BTCUSD but trades BTC/USD; the bot always uses BTC/USD."""
-        symbol = item.get("symbol") or ""
-        if item.get("asset_class") == "crypto" and "/" not in symbol and symbol.endswith("USD") and len(symbol) > 3:
-            return {**item, "symbol": symbol[:-3] + "/USD"}
-        return item
 
     def positions(self):
-        return [self.pair(p) for p in self.request("GET", "/v2/positions")]
+        return self.request("GET", "/v2/positions")
 
     def open_orders(self):
         orders = self.request("GET", "/v2/orders", params={"status": "open", "limit": 500, "nested": "false"})
         if len(orders) >= 500:
             raise BrokerError("Too many open account orders to reconcile safely")
-        return [self.pair(o) for o in orders]
+        return orders
 
     def asset(self, symbol):
         return self.request("GET", f"/v2/assets/{quote(symbol, safe='')}")
@@ -63,43 +54,6 @@ class Alpaca:
     def assets(self):
         return self.request("GET", "/v2/assets", params={"status": "active", "asset_class": "us_equity"})
 
-    def crypto_assets(self):
-        return self.request("GET", "/v2/assets", params={"status": "active", "asset_class": "crypto"})
-
-    def crypto_daily(self, symbols, start, now=None):
-        """Completed UTC-day candles for many coins in one paginated request: {symbol: frame}."""
-        now = pd.Timestamp(now or datetime.now(timezone.utc))
-        params = {"symbols": ",".join(symbols), "timeframe": "1Day", "start": pd.Timestamp(start).isoformat(),
-                  "end": now.isoformat(), "limit": 10000, "sort": "asc"}
-        rows, tokens = {}, set()
-        for _ in range(50):
-            result = self.request("GET", f"{CRYPTO}/bars", data=True, params=params)
-            for symbol, items in (result.get("bars") or {}).items():
-                rows.setdefault(symbol, []).extend(items)
-            token = result.get("next_page_token")
-            if not token:
-                break
-            if token in tokens:
-                raise BrokerError("Repeated market data pagination token")
-            tokens.add(token)
-            params["page_token"] = token
-        else:
-            raise BrokerError("Market data pagination limit exceeded")
-        frames = {}
-        for symbol, items in rows.items():
-            frame = pd.DataFrame(items).rename(columns={"t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
-            frame["timestamp"] = pd.to_datetime(frame.timestamp, utc=True)
-            frame = frame.set_index("timestamp").sort_index()
-            frame = frame[~frame.index.duplicated(keep="last")]
-            # Today's UTC candle is still forming; only closed days enter tests, training and signals.
-            frame = frame[frame.index + pd.Timedelta(days=1) <= now][["open", "high", "low", "close", "volume"]].astype(float)
-            frame = frame.tail(self.config.max_bars)
-            if frame.empty or frame.isna().any().any() or not (frame[["open", "high", "low", "close"]] > 0).all().all() or not (frame.volume >= 0).all():
-                continue
-            done = frame.index[-1] + pd.Timedelta(days=1)
-            frame.attrs.update(crypto=True, target_session=done.date().isoformat(), input_complete_at=done.isoformat())
-            frames[symbol] = frame
-        return frames
 
     def snapshots(self, symbols):
         return self.request("GET", "/v2/stocks/snapshots", data=True,
@@ -109,8 +63,6 @@ class Alpaca:
         return self.request("GET", "/v2/calendar", params={"start": str(start), "end": str(end)})
 
     def quote(self, symbol):
-        if "/" in symbol:
-            return self.crypto_quote(symbol)
         result = self.request("GET", f"/v2/stocks/{quote(symbol, safe='')}/quotes/latest", data=True,
                               params={"feed": self.config.feed})["quote"]
         age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(result["t"])).total_seconds()
@@ -119,15 +71,6 @@ class Alpaca:
             raise BrokerError(f"Stale, crossed or wide quote for {symbol}")
         return bid, ask
 
-    def crypto_quote(self, symbol):
-        result = (self.request("GET", f"{CRYPTO}/latest/quotes", data=True, params={"symbols": symbol}).get("quotes") or {}).get(symbol)
-        if not result:
-            raise BrokerError(f"No crypto quote for {symbol}")
-        age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(result["t"])).total_seconds()
-        bid, ask = float(result["bp"]), float(result["ap"])
-        if not -10 <= age <= 120 or not 0 < bid <= ask < 10000000 or (ask - bid) / ask > self.config.crypto_max_spread:
-            raise BrokerError(f"Stale, crossed or wide quote for {symbol}")
-        return bid, ask
 
     def order(self, client_id):
         return self.request("GET", "/v2/orders:by_client_order_id", params={"client_order_id": client_id})
@@ -143,11 +86,6 @@ class Alpaca:
 
     def bars(self, symbol, now=None):
         now = now or datetime.now(timezone.utc)
-        if "/" in symbol:
-            frame = self.crypto_daily([symbol], now - timedelta(days=self.config.history_days), now).get(symbol)
-            if frame is None:
-                raise BrokerError(f"No completed daily crypto bars for {symbol}")
-            return frame
         if self.config.intraday:
             return self.intraday_bars(symbol, now)
         # Session completion comes from the exchange calendar, including half-days.
@@ -261,7 +199,7 @@ class Alpaca:
         return frames
 
     def latest_price(self, symbol, max_age=120):
-        """Latest trade; max_age=None accepts an older trade (e.g. a manual order while the market is closed)."""
+        """Latest trade; optionally allow an older observed price."""
         result = self.request("GET", f"/v2/stocks/{quote(symbol, safe='')}/trades/latest", data=True, params={"feed": self.config.feed})
         trade = result["trade"]
         at = pd.Timestamp(trade["t"])

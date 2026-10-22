@@ -138,17 +138,17 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(Research.validate(json.dumps({**valid, "source_ids": []}), [{"id": 1}])["action"], "HOLD")
         self.assertEqual(Research.validate(json.dumps({**valid, "confidence": .5}), [{"id": 1}])["action"], "HOLD")
 
-    def test_proxy_uses_auto_and_records_returned_model(self):
-        cfg = Config(llm_key="secret")
+    def test_proxy_uses_llama_and_records_returned_model(self):
+        cfg = Config(llm_key="secret", llm_models=("llama-test",))
         research = Research(cfg, Mock())
         research.news = Mock(return_value=([{"id":1}], []))
         response = Mock(ok=True)
-        response.json.return_value = {"model":"routed-model", "choices":[{"message":{"content":json.dumps({"action":"BUY","confidence":.8,"rationale":"Evidence summary","source_ids":[1]})}}]}
+        response.json.return_value = {"model":"routed-model", "choices":[{"message":{"content":json.dumps({"stocks":[{"symbol":"SPY","action":"BUY","confidence":.8,"rationale":"Evidence summary","source_ids":[1]}]})}}]}
         research.http.post = Mock(return_value=response)
         result = research.analyze("SPY", {"last_close": 100, "horizon":"one day", "bar_at":"bar"})
         args = research.http.post.call_args
         self.assertEqual(args.args[0], "https://ai.bastiwood.com/v1/chat/completions")
-        self.assertEqual(args.kwargs["json"]["model"], "auto")
+        self.assertEqual(args.kwargs["json"]["model"], "llama-test")
         self.assertNotIn("tools", args.kwargs["json"])
         self.assertEqual(result["opinions"][0]["model"], "routed-model")
 
