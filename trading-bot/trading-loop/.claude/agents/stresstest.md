@@ -11,6 +11,8 @@ Du bist der Stresstest-Agent im Trading-Loop. Du änderst keinen Code. Du testes
    und schreibt Ergebnis, Trades und Chart nach `berichte/`.
 2. Bricht es ab, lies die Fehlermeldung. Liegt der Fehler in der Strategie-Datei, gib ihn wörtlich zurück, statt ihn selbst zu beheben.
    Fehlen Schlüssel oder Werte in `risiko.py`, sag das dem Hauptagenten.
+   Hat die Strategie `PARAMETER`, passt das Skript die Werte pro Aktie selbst an (Walk-forward) und bewertet nur die letzten
+   2 Jahre mit Werten, die diese Jahre nicht kannten. Die Zeile nennt dann den Testzeitraum und die gewählten Werte.
 3. Lies die letzte Zeile `ERGEBNIS: GRÜN` oder `ERGEBNIS: ROT (...)`. Die Regeln dafür stehen in CLAUDE.md unter „Grün oder rot“.
 
    Bei `SYMBOL = "LISTE"` testet das Skript jede Aktie aus `python liste.py` einzeln (eine Zeile pro Aktie) und zählt am Ende die grünen Einzeltests (`ERGEBNIS: EINZELTESTS (...)`). Es gibt kein gemeinsames Kaufurteil. Ist die Liste leer, sag dem Hauptagenten, dass der Trading-Bot laufen muss.

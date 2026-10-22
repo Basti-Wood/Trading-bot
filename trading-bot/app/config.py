@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 
-CHILD_MODES = ("loop",)
+CHILD_MODES = ("loop", "loop_day")
 
 
 def flag(name, default=False):
@@ -78,9 +78,12 @@ class Config:
     llm_key: str = ""
     llm_models: tuple = ()
     origins: tuple = ("https://trade.bastiwood.com",)
+    # Read-only API for an external assistant (e.g. a GPT Action); empty = disabled.
+    readonly_token: str = ""
+    readonly_daily_limit: int = 100
     # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
     loop_dir: Path = None
-    loop_timeout: int = 300
+    loop_timeout: int = 900
     def __post_init__(self):
         if not self.symbols or len(self.symbols) > 50 or len(set(self.symbols)) != len(self.symbols):
             raise ValueError("Configure 1 to 50 unique US equity/ETF symbols")
@@ -121,11 +124,16 @@ class Config:
                   "daytrade_close_minutes": (5, 60), "daytrade_capital_share": (.05, .95),
                   "strategy_fraction": (.05, 1), "min_votes": (2, 4),
                   "daytrade_run_minutes": (5, 240), "daytrade_trail_trigger": (.001, .05),
-                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 600)}
+                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 1800)}
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
                 raise ValueError(f"{name} must be between {lo} and {hi}")
+        if self.readonly_token and (len(self.readonly_token) < 32 or not re.fullmatch(r"[A-Za-z0-9_\-.~]+", self.readonly_token)
+                                    or self.readonly_token in {self.password, self.api_key, self.api_secret, self.llm_key}):
+            raise ValueError("READONLY_API_TOKEN must be at least 32 letters/digits (-_.~ allowed) and differ from every other secret")
+        if not 1 <= self.readonly_daily_limit <= 5000:
+            raise ValueError("READONLY_API_DAILY_LIMIT must be between 1 and 5000")
         if self.position_fraction > self.gross_fraction:
             raise ValueError("Position limit cannot exceed gross exposure limit")
         if self.daytrade_run_minutes < self.daytrade_hold_minutes:
@@ -140,8 +148,18 @@ class Config:
 
     @property
     def loop(self):
-        """Trades tested trading-loop stock strategy files."""
-        return self.trading_mode == "loop"
+        """Trades tested trading-loop stock strategy files (daily or intraday candles)."""
+        return self.trading_mode in {"loop", "loop_day"}
+
+    @property
+    def loop_intraday(self):
+        """The intraday trading-loop: strategy files with ZEITRAHMEN below one day."""
+        return self.trading_mode == "loop_day"
+
+    @property
+    def same_day(self):
+        """Strategies that trade inside one session and are flat before the close."""
+        return self.trading_mode in {"daytrade", "loop_day"}
 
 
     @property
@@ -215,5 +233,7 @@ class Config:
             llm_models=tuple(s.strip() for s in os.getenv("FREELLM_MODELS", "").split(",") if s.strip()),
             # Relative paths start at the trading-bot folder, whatever the working directory.
             loop_dir=(Path(__file__).resolve().parent.parent / os.getenv("TRADING_LOOP_DIR", "trading-loop")).resolve(),
-            loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "300")),
-            origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()))
+            loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "900")),
+            origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()),
+            readonly_token=os.getenv("READONLY_API_TOKEN", "").strip(),
+            readonly_daily_limit=int(os.getenv("READONLY_API_DAILY_LIMIT", "100")))

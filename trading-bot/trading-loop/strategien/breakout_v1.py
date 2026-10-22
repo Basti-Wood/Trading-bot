@@ -8,6 +8,8 @@ SYMBOL = "LISTE"   # Aktienliste der Bots plus eigene Aktien
 
 EINSTIEG_TAGE = 20   # Donchian-Hoch der vorherigen 20 Tage
 AUSSTIEG_TAGE = 10   # Donchian-Tief der vorherigen 10 Tage (zieht mit, wirkt als Trailing-Stop)
+# Selbst-Anpassung: der Stresstest wählt pro Aktie Werte aus diesen Listen (Walk-forward, siehe stresstest.py).
+PARAMETER = {"EINSTIEG_TAGE": [10, 20, 30, 40], "AUSSTIEG_TAGE": [5, 10, 15, 20], "VOLUMEN_TAGE": [10, 20]}
 VOLUMEN_TAGE = 20    # "hohes Volumen" = über dem Durchschnitt der vorherigen 20 Tage
 
 

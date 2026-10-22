@@ -217,7 +217,7 @@ class PortfolioCase(TempCase):
         self.cfg = replace(self.cfg, trading_mode="both", symbols=("SPY",), loop_dir=self.folder)
         self.store.set("allocation", {"capital_fraction": 1, "capital_cap": 0, "weights": {"daily": 50, "daytrade": 0, "loop": 50}})
         self.portfolio = PortfolioEngine(self.cfg, self.store)
-        self.daily, self.daytrade, self.loop = self.portfolio.engines
+        self.daily, self.daytrade, self.loop, self.loop_day = self.portfolio.engines
         self.broker = Mock(base="paper")
         self.broker.account.return_value = {"status": "ACTIVE", "equity": "10000", "last_equity": "10000",
                                             "cash": "10000", "buying_power": "10000"}
@@ -505,7 +505,7 @@ class PerStockSelectionTests(PortfolioCase):
         client = create_app(self.cfg, self.store).test_client()
         self.assertEqual(client.post('/api/manual/order', json={}, headers={'X-Bot-Control':'dashboard'}).status_code, 404)
         state = client.get('/api/state').get_json()
-        self.assertEqual([s['id'] for s in state['strategies']], ['daily', 'daytrade', 'loop'])
+        self.assertEqual([s['id'] for s in state['strategies']], ['daily', 'daytrade', 'loop', 'loop_day'])
         self.assertNotIn('manual', state)
         self.assertNotIn('crypto', state)
         row = state['loop']['stocks'][0]

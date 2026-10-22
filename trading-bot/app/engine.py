@@ -43,6 +43,7 @@ class Engine:
         self.playbook_thread = None
         self.last_playbook = None
         self.sessions = set()
+        self.market_open = False
         self.rules = None
         previous_mode = store.get("trading_mode", "daily")
         if not config.coordinated and store.get("parallel_enabled", False):
@@ -230,7 +231,10 @@ class Engine:
         self.forecast_thread.start()
 
     def loop_tick(self):
-        """Test and signal each activated version on its symbols, at most every 30 minutes."""
+        """Test and signal each activated version on its symbols: daily versions at most every 30 minutes,
+        intraday versions once per completed bar while the market is open."""
+        if self.config.loop_intraday:
+            return self.intraday_loop_tick()
         slot = int(time.time() // 1800)
         versions = loop.active_versions(self.store)
         plans = {v: loop.version_symbols(self.config, self.store, r) for v, r in versions.items()}
@@ -262,23 +266,75 @@ class Engine:
         self.forecast_thread = threading.Thread(target=work, name="trading-loop-signals", daemon=True)
         self.forecast_thread.start()
 
+    def intraday_loop_tick(self):
+        """Intraday-Loop: one bar request per timeframe, then each version on its symbols after every new bar."""
+        if not self.market_open:
+            return
+        now = pd.Timestamp.now(tz="UTC")
+        versions = {v: r for v, r in loop.active_versions(self.store).items() if r.get("timeframe") in loop.TIMEFRAMES}
+        plans = {v: loop.version_symbols(self.config, self.store, r) for v, r in versions.items()}
+        self.cached = {v: k for v, k in self.cached.items() if v in versions}
+        due = {}
+        for version, record in versions.items():
+            minutes = loop.TIMEFRAMES[record["timeframe"]]
+            # The bar that completed last; wait 20 seconds so the provider has published it.
+            key = ((now - pd.Timedelta(seconds=20)).floor(f"{minutes}min"), record["sha256"], tuple(plans[version]))
+            if self.cached.get(version) != key and time.time() - self.forecast_attempts.get(version, 0) >= 30:
+                due[version] = key
+        if not due:
+            return
+        def work():
+            broker = Alpaca(self.config)
+            frames = {}
+            start = now - pd.Timedelta(days=loop.INTRADAY_HISTORY_DAYS)
+            for timeframe in {versions[v]["timeframe"] for v in due}:
+                symbols = sorted({s for v in due if versions[v]["timeframe"] == timeframe for s in plans[v]})
+                try:
+                    data = broker.multi_bars(symbols, timeframe, start, end=now)
+                    minutes = loop.TIMEFRAMES[timeframe]
+                    # Completed bars only.
+                    frames[timeframe] = {s: f[f.index + pd.Timedelta(minutes=minutes) <= now] for s, f in data.items()}
+                except Exception as exc:
+                    frames[timeframe] = {}
+                    self.store.event("error", {"message": f"Intraday-Loop {timeframe}: " + str(exc)[:200]})
+            for version, key in due.items():
+                if self.stop.is_set():
+                    return
+                self.forecast_attempts[version] = time.time()
+                record = versions[version]
+                usable = {s: f for s, f in frames.get(record["timeframe"], {}).items() if s in plans[version] and len(f)}
+                try:
+                    self.store.set(f"loop_results:{version}", loop.evaluate(self.config, record, usable))
+                    self.cached[version] = key
+                    self.store.set(f"loop_error:{version}", None)
+                except Exception as exc:
+                    self.store.set(f"loop_error:{version}", {"message": str(exc)[:240], "at": utcnow()})
+                    self.store.event("error", {"message": str(exc)[:240]})
+        self.forecast_thread = threading.Thread(target=work, name="intraday-loop-signals", daemon=True)
+        self.forecast_thread.start()
+
     def retest_tick(self, now=None):
-        """Re-run stresstest.py when the dashboard asks, and once a day before the open."""
+        """Re-run stresstest.py when the dashboard asks and once a day before the open; the Intraday-Loop
+        also re-tunes its versions every INTRADAY_RETEST_MINUTES while the market is open."""
         if self.retest_thread and self.retest_thread.is_alive() or not loop.available(self.config):
             return
         request = self.store.get("loop_retest_requested")
         today = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York"))
         daily = today.hour >= loop.RETEST_HOUR and self.store.get("loop_retest_day") != today.date().isoformat()
-        if not (request or daily):
+        hourly = (self.config.loop_intraday and self.market_open
+                  and time.time() - self.store.get("loop_retest_last", 0) >= loop.INTRADAY_RETEST_MINUTES * 60)
+        if not (request or daily or hourly):
             return
         if request:
             self.store.set("loop_retest_requested", None)
-        else:
+        elif daily:
             self.store.set("loop_retest_day", today.date().isoformat())
-        versions = loop.retest_targets(self.config, (request or {}).get("version"))
+        self.store.set("loop_retest_last", time.time())
+        versions = loop.retest_targets(self.config, (request or {}).get("version"), include_changed=bool(request),
+                                       bot=None if (request or {}).get("version") else self.config.trading_mode)
         if not versions:
             return
-        status = {"status": "running", "trigger": "manuell" if request else "täglich", "versions": versions,
+        status = {"status": "running", "trigger": "manuell" if request else "täglich" if daily else "stündlich", "versions": versions,
                   "done": {}, "started_at": utcnow()}
         self.store.set("loop_retest", status)
         def work():
@@ -328,10 +384,20 @@ class Engine:
         signal, reason = forecast["signal"], forecast.get("reason", "")
         if signal != "BUY":
             return signal, reason
+        minutes = loop.TIMEFRAMES.get(forecast.get("timeframe"))
         if self.store.get("halt"):
             return "HOLD", "Drawdown-Stopp aus risiko.py aktiv; keine neuen Käufe"
         if not (self.rules or {}).get("ok"):
             return "HOLD", "risiko.py ist unvollständig; keine neuen Käufe"
+        if minutes:
+            # Intraday: a buy is valid only for the bar right after its signal bar, like the backtest's next open.
+            try:
+                age = (now - pd.Timestamp(forecast["bar_at"])).total_seconds() - minutes * 60
+            except (KeyError, TypeError, ValueError):
+                age = None
+            if age is None or not 0 <= age <= minutes * 60 + 60:
+                return "HOLD", "Kaufsignal gehört nicht zur zuletzt abgeschlossenen Kerze"
+            return signal, reason
         # A buy signal is valid only for the session right after its bar, like the backtest's next open.
         if forecast.get("target_session") not in self.sessions:
             return "HOLD", "Kaufsignal gilt nicht für die aktuelle Handelssitzung"
@@ -456,7 +522,7 @@ class Engine:
         return "Day-trading holding period ended" + ("; winner extension used up" if pnl > 0 and held >= cfg.daytrade_run_minutes else "")
 
     def queue_session(self, clock, now):
-        if self.config.intraday or not self.config.queue_daily_orders or clock["is_open"]:
+        if self.config.same_day or not self.config.queue_daily_orders or clock["is_open"]:
             return None
         try:
             opening = pd.Timestamp(clock["next_open"])
@@ -494,9 +560,10 @@ class Engine:
         local = now.tz_convert("America/New_York")
         queue_session = self.queue_session(clock, now)
         self.sessions = {s for s in (day if clock["is_open"] else None, queue_session) if s}
+        self.market_open = bool(clock["is_open"])
         entry_window = local.hour == 9 and 35 <= local.minute <= 59
         flatten = False
-        if self.config.intraday:
+        if self.config.same_day:
             close = pd.Timestamp(clock["next_close"]) if clock.get("next_close") else None
             valid_close = close is not None and close.tzinfo is not None and close.tz_convert("America/New_York").date() == local.date()
             remaining = (close - now).total_seconds() / 60 if valid_close else 0
@@ -517,7 +584,7 @@ class Engine:
                 if self.config.coordinated and not self.store.owns_order(order):
                     continue
                 record = self.store.order(order.get("client_order_id", "")) or {}
-                queued = record.get("queued_for_open", False) and not self.config.intraday
+                queued = record.get("queued_for_open", False) and not self.config.same_day
                 keep_queued, invalid_queue = False, False
                 if queued:
                     target = record.get("session")
@@ -530,7 +597,7 @@ class Engine:
                                      or order["symbol"] not in active_symbols(self.config, self.store)
                                      or not entries_ready(self.config, self.store))
                 expired = False
-                if self.config.intraday:
+                if self.config.same_day:
                     submitted = order.get("submitted_at") or order.get("created_at")
                     expired = not submitted or (now - pd.Timestamp(submitted)).total_seconds() > 60
                 if (not self.store.get("entries_enabled", False) or loss_breach
@@ -569,7 +636,8 @@ class Engine:
                     elif pnl_fraction <= -self.stop_limit():
                         exit_reason = "Position stop-loss reached" + (" (risiko.py)" if self.config.loop else "")
                     elif flatten:
-                        exit_reason = "Day-trading exit before market close"
+                        exit_reason = ("Intraday-Loop: flat vor Börsenschluss" if self.config.loop_intraday
+                                       else "Day-trading exit before market close")
                     elif halt:
                         exit_reason = "Maximaler Drawdown aus risiko.py erreicht; Position wird geschlossen"
                     elif self.config.loop and not loop.owner_version(self.store, symbol):
