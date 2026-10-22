@@ -141,6 +141,7 @@ function render(s) {
   $('orders').innerHTML=s.orders.map(o=>`<tr><td>${time(o.at)}</td><td>${escape(o.symbol)}</td><td>${escape(o.strategy||'daily')}</td><td>${signal(o.side.toUpperCase())}</td><td>${escape(o.qty)}</td><td>${escape(o.filled_qty??'—')}</td><td>${o.filled_avg_price?money(Number(o.filled_avg_price)):'—'}</td><td>${escape(o.status)}${o.queued_for_open?`<br><small>Queued for ${escape(o.session)} / limit ${money(Number(o.limit_price))}</small>`:o.limit_price?`<br><small>Limit ${money(Number(o.limit_price))}</small>`:''}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">No orders submitted.</td></tr>';
   $('positions').innerHTML=(s.account?.positions||[]).map(p=>`<div class="position"><b>${escape(p.symbol)}${p.strategy?` / ${escape(p.strategy)}`:''}</b><span>${escape(p.qty)} shares</span><span>${money(Number(p.market_value))}</span><span>${money(Number(p.unrealized_pl))} unrealized</span></div>`).join('') || 'No open positions.';
   $('updated').textContent=`LAST UPDATED ${time(s.at)}`;
+  renderReadonly(s.readonly);
   drawChart(s.equity); renderModels(); renderCandles(); renderForecast(); if(s.loop) renderLoopChart(s);
 }
 async function refresh() {const serial=++refreshSerial;try{const r=await fetch('/api/state'+(selectedStrategy?'?strategy='+encodeURIComponent(selectedStrategy):''));if(!r.ok)throw Error(`Dashboard request failed (${r.status})`);const snapshot=await r.json();if(serial===refreshSerial)render(snapshot);}catch(e){$('connection').textContent='OFFLINE';$('notice').textContent=e.message+' · displayed information may be stale.';}}
@@ -314,4 +315,10 @@ function drawLoopChart(d) {
   $('loop-chart-note').innerHTML=`${escape(d.strategy_reason||'')}. Entscheidung: ${signal(d.action)} <span class="muted">${escape(d.reason||'')}</span><br>${t.methode==='walk_forward'?`Selbst-Anpassung (Walk-forward)${t.angepasst?'':', Standardwerte blieben die besten'}. Test ${escape(t.zeitraum||'')} mit vorher gewählten Werten: ${pct(t.rendite)}, max. Drawdown ${pct(t.max_drawdown)}, ${escape(t.trades)} Trades → ${t.gruen?'GRÜN':'ROT'}${years?` (${escape(years)})`:''}.`:`Ohne Selbst-Anpassung (keine PARAMETER): Test ${pct(t.rendite)}, max. Drawdown ${pct(t.max_drawdown)}, ${escape(t.trades)} Trades → ${t.gruen?'GRÜN':'ROT'}.`}${params?`<br><span class="param-list">Live-Werte: ${params}</span>`:''} <span class="muted">· ${t.quelle==='bericht'?'aus dem täglichen Stresstest':'vom Bot selbst getestet'} · berechnet ${time(d.computed_at)}</span>`;
 }
 $('loop-chart-symbols').addEventListener('click',e=>{const b=e.target.closest('[data-loop-chart]');if(b){loopChartSymbol=b.dataset.loopChart;loopChartKey='';renderLoopChart(state);}});
+function renderReadonly(r) {
+  if(!r) return;
+  $('readonly-state').textContent=r.enabled?`AN · ${r.used_today}/${r.limit} HEUTE`:'AUS';
+  $('readonly-note').innerHTML=r.enabled?`Ein externer Assistent (z. B. ein GPT mit Action) kann mit dem Token aus <code>READONLY_API_TOKEN</code> nur lesen: Zusammenfassung, einzelne Aktien, Trades. Er kann nichts kaufen, verkaufen oder einstellen. Schema für den GPT-Builder: <code>${escape(r.schema_url)}</code>. Höchstens ${escape(r.limit)} Anfragen pro Tag.`:'Aus. Für einen GPT, der einmal am Tag nachschaut: <code>READONLY_API_TOKEN</code> in <code>.env</code> setzen (mindestens 32 zufällige Zeichen) und neu starten.';
+  $('readonly-log').innerHTML=(r.recent||[]).map(e=>`<div class="log-row"><time>${time(e.at)}</time><span>${e.status===200?'':'<b class="sell">abgelehnt</b> · '}${escape(e.path)}${e.agent?` · <span class="muted">${escape(e.agent)}</span>`:''}</span></div>`).join('')||(r.enabled?'<p class="empty">Noch keine Zugriffe.</p>':'');
+}
 refresh(); setInterval(refresh,5000);

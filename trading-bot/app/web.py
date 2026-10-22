@@ -3,7 +3,7 @@ import pandas as pd
 from pathlib import Path
 import psutil
 from flask import Flask, jsonify, request, send_from_directory
-from . import loop
+from . import loop, readonly
 from .candles import snapshot, forecast_overlay
 from .daytrade import NY, session_open
 from .allocation import BOTS, NAMES, allocation, bot_capital, bot_share, validate
@@ -97,10 +97,36 @@ def create_app(config, store, broker_factory=Alpaca):
     if not config.password:
         app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1", "[::1]"]
 
+    def readonly_access():
+        """Bearer-token access for an external assistant: GET only, /api/readonly/ only, counted per day."""
+        if request.path == "/api/readonly/openapi.json" and config.readonly_token:
+            return None  # The schema holds no data or secrets; GPT builders import it without a token.
+        if not config.readonly_token:
+            return jsonify(error="Read-only API is disabled; set READONLY_API_TOKEN"), 404
+        header = request.headers.get("Authorization", "")
+        token = header[7:] if header.startswith("Bearer ") else ""
+        if not hmac.compare_digest(token.encode(), config.readonly_token.encode()):
+            store.event("readonly", {"path": request.path[:80], "status": 401})
+            return jsonify(error="Missing or wrong read-only token"), 401, {"WWW-Authenticate": "Bearer"}
+        if request.method != "GET":
+            return jsonify(error="The read-only API only answers GET requests"), 405
+        day = readonly.day_key()
+        usage = store.get("readonly_usage") or {}
+        count = usage.get("count", 0) if usage.get("day") == day else 0
+        if count >= config.readonly_daily_limit:
+            return jsonify(error=f"Daily limit of {config.readonly_daily_limit} requests reached; try again tomorrow"), 429
+        store.set("readonly_usage", {"day": day, "count": count + 1})
+        store.event("readonly", {"path": request.full_path.rstrip("?")[:120], "status": 200,
+                                 "agent": (request.headers.get("User-Agent") or "")[:60]})
+        return None
+
     @app.before_request
     def secure():
         if request.path == "/healthz":
             return None
+        if request.path.startswith("/api/readonly/"):
+            # Never falls through to the dashboard login: this token cannot reach any other route.
+            return readonly_access()
         if config.password:
             auth = request.authorization
             if not auth or auth.username != "admin" or not hmac.compare_digest((auth.password or "").encode(), config.password.encode()):
@@ -169,6 +195,27 @@ def create_app(config, store, broker_factory=Alpaca):
         quality = forecast_quality(cfg, state.get(f"model:{symbol}"), prediction, now)
         return jsonify(**data, quality=quality,
                        forecast=forecast_overlay(prediction, now, data.get("session_close")) if quality["ready"] else None)
+
+    @app.get("/api/readonly/openapi.json")
+    def readonly_schema():
+        return jsonify(readonly.openapi(config))
+
+    @app.get("/api/readonly/summary")
+    def readonly_summary():
+        return jsonify(readonly.summary(config, store, contexts))
+
+    @app.get("/api/readonly/stocks/<symbol>")
+    def readonly_stock(symbol):
+        if not loop.STOCK.fullmatch(symbol):
+            return jsonify(error="Invalid stock symbol"), 400
+        return jsonify(readonly.stock(config, store, contexts, symbol))
+
+    @app.get("/api/readonly/trades")
+    def readonly_trades():
+        days = request.args.get("days", "7")
+        if not days.isdigit() or not 1 <= int(days) <= 30:
+            return jsonify(error="days must be 1 to 30"), 400
+        return jsonify(readonly.trades(store, int(days)))
 
     @app.get("/api/predictions/<symbol>")
     def predictions(symbol):
@@ -279,6 +326,11 @@ def create_app(config, store, broker_factory=Alpaca):
             allocation={**allocation(config, store), "budget": budget, "gross_fraction": config.gross_fraction,
                         "position_fraction": config.position_fraction} if parallel else None,
             loop=loop_state(equity), news_report=store.get("news_report"),
+            readonly={"enabled": bool(config.readonly_token), "limit": config.readonly_daily_limit,
+                      "used_today": (store.get("readonly_usage") or {}).get("count", 0)
+                      if (store.get("readonly_usage") or {}).get("day") == readonly.day_key() else 0,
+                      "schema_url": (config.origins[0] if config.origins else "") + "/api/readonly/openapi.json",
+                      "recent": store.history("readonly", 8)},
             at=utcnow(), mode="paper" if cfg.paper else "live", trading_mode=cfg.trading_mode, configured=cfg.configured,
             universe=state_store.get("universe", {"symbols": active_symbols(cfg, state_store), "candidates": []}),
             scan_status=state_store.get("scan_status", {"status": "waiting" if cfg.universe_mode == "market" else "watchlist"}),

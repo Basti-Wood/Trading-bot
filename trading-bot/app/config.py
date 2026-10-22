@@ -78,6 +78,9 @@ class Config:
     llm_key: str = ""
     llm_models: tuple = ()
     origins: tuple = ("https://trade.bastiwood.com",)
+    # Read-only API for an external assistant (e.g. a GPT Action); empty = disabled.
+    readonly_token: str = ""
+    readonly_daily_limit: int = 100
     # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
     loop_dir: Path = None
     loop_timeout: int = 900
@@ -126,6 +129,11 @@ class Config:
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
                 raise ValueError(f"{name} must be between {lo} and {hi}")
+        if self.readonly_token and (len(self.readonly_token) < 32 or not re.fullmatch(r"[A-Za-z0-9_\-.~]+", self.readonly_token)
+                                    or self.readonly_token in {self.password, self.api_key, self.api_secret, self.llm_key}):
+            raise ValueError("READONLY_API_TOKEN must be at least 32 letters/digits (-_.~ allowed) and differ from every other secret")
+        if not 1 <= self.readonly_daily_limit <= 5000:
+            raise ValueError("READONLY_API_DAILY_LIMIT must be between 1 and 5000")
         if self.position_fraction > self.gross_fraction:
             raise ValueError("Position limit cannot exceed gross exposure limit")
         if self.daytrade_run_minutes < self.daytrade_hold_minutes:
@@ -226,4 +234,6 @@ class Config:
             # Relative paths start at the trading-bot folder, whatever the working directory.
             loop_dir=(Path(__file__).resolve().parent.parent / os.getenv("TRADING_LOOP_DIR", "trading-loop")).resolve(),
             loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "900")),
-            origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()))
+            origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()),
+            readonly_token=os.getenv("READONLY_API_TOKEN", "").strip(),
+            readonly_daily_limit=int(os.getenv("READONLY_API_DAILY_LIMIT", "100")))

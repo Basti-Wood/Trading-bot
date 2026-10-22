@@ -204,6 +204,23 @@ Select the day-trading view and a monitored stock to see the dependency-free SVG
 
 The engine refreshes chart snapshots alongside its playbook polls. On a cold dashboard read, the endpoint fetches today's bars for a monitored stock. Empty sessions, missing baselines and stale forecasts are explicit: unavailable forecasts are `null`, never extrapolated. A current forecast starts at its completed five-minute input close, is accepted for 90 seconds and is omitted if its horizon crosses the session close. The endpoint uses the dashboard's existing authentication; it cannot create orders.
 
+## Read-only access for a GPT (or any assistant)
+
+An external assistant can check the bots, for example once a day, without being able to change anything. No WebSocket is needed: it calls plain HTTPS `GET` endpoints with its own bearer token.
+
+1. Create a token: `python -c "import secrets; print(secrets.token_urlsafe(32))"` and put it in `.env` as `READONLY_API_TOKEN=...`. Optionally set `READONLY_API_DAILY_LIMIT` (default 100 requests per New York day). Make sure `DASHBOARD_ORIGINS` is your public HTTPS address (default `https://trade.bastiwood.com`). Restart.
+2. In the ChatGPT GPT builder: *Configure → Actions → Create new action → Import from URL* `https://<your address>/api/readonly/openapi.json`. Authentication: *API Key*, auth type *Bearer*, paste the token.
+3. Instruct the GPT, e.g.: "Call getDailySummary once, then getStock for stocks with open positions or BUY/SELL decisions, and write me a short report."
+
+| Endpoint | Content |
+|---|---|
+| `GET /api/readonly/summary` | Account, positions (with owning bot), each bot's switch/weight/halt and current decision per stock (models' outlooks, or the trading-loop version, signal and walk-forward test), the daily Llama news report, orders of the last 24 h, latest errors |
+| `GET /api/readonly/stocks/{symbol}` | Everything every bot currently thinks about one stock, including each model's forecast accuracy so far and the news rationale/headlines, plus its last decisions |
+| `GET /api/readonly/trades?days=7` | Orders and fills of the last 1–30 days |
+| `GET /api/readonly/openapi.json` | The schema (no token needed; it holds no data) |
+
+The token only works on these routes and only for `GET`; it does not open the dashboard, and the dashboard password does not open these routes. Secrets (Alpaca/FreeLLM keys, passwords) are never included. Every access is logged and shown in the dashboard's *GPT-Lesezugriff* panel together with today's count; failed token attempts are logged too. Text fields named `*_text` hold news or model-written text and are marked as untrusted data, because news headlines could contain instructions aimed at an AI. To revoke access, remove or change `READONLY_API_TOKEN` and restart. A reverse proxy in front of the app must pass the `Authorization` header through and must not add its own login for `/api/readonly/`.
+
 ## Hardware limits
 
 The bot's forecasting workload is CPU-only: **0 GB GPU VRAM**, two native compute threads, one isolated training process at a time, maximum 4 GB training RSS, and a 15-minute training timeout. A separate watchdog checks worker resource usage every two seconds. Docker additionally enforces **2 CPUs and 6 GB total RAM**, with no swap expansion. This leaves ample memory on your 80 GB server and does not use the GTX 1060's 6 GB VRAM.
