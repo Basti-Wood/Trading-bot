@@ -96,6 +96,25 @@ class DashboardRoutingTests(Fixture):
             self.assertNotIn(secret, body)
 
 
+class ResumeAllTests(Fixture):
+    def test_trading212_not_ready_never_blocks_the_alpaca_bots(self):
+        cfg = replace(self.cfg, twelvedata_key="")
+        self.store.set("account", {"equity": 1000., "loss_halt": False})
+        client = create_app(cfg, self.store).test_client()
+        response = client.post("/api/control", json={"action": "resume"}, headers=HEADERS)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("TWELVEDATA_API_KEY", response.get_json()["warning"])
+        for mode in ("daily", "daytrade", "loop", "loop_day"):
+            self.assertTrue(StrategyStore(self.store, mode).get("entries_enabled"), mode)
+        self.assertFalse(context(cfg)[1].get("entries_enabled"))
+        state = client.get("/api/state").get_json()["trading212"]
+        self.assertIn("TWELVEDATA_API_KEY", state["ready_problem"])
+        # The Trading 212 switch itself still refuses with the same reason.
+        own = client.post("/api/trading212/control", json={"action": "resume"}, headers=HEADERS)
+        self.assertEqual(own.status_code, 409)
+        self.assertIn("TWELVEDATA_API_KEY", own.get_json()["error"])
+
+
 class MergeGuardTests(unittest.TestCase):
     def test_every_element_the_dashboard_script_uses_exists_in_the_page(self):
         script = (DASHBOARD / "app.js").read_text(encoding="utf-8")

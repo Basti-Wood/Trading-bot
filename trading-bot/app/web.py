@@ -42,7 +42,8 @@ def create_app(config, store, broker_factory=Alpaca):
                 "halt": secondary.get("halt"), "rules": loop.risk_rules(config),
                 "capital_fraction": config.trading212_capital_fraction, "capital_cap": config.trading212_capital_cap,
                 "allow_fx": config.trading212_allow_fx, "data_configured": bool(config.twelvedata_key),
-                "errors": secondary.get("data_errors", {}), "orders": secondary.orders(30)}
+                "errors": secondary.get("data_errors", {}), "orders": secondary.orders(30),
+                "ready_problem": secondary_resume_error()}
 
     def loop_bots():
         """The trading-loop bots: daily candles ("loop") and intraday candles ("loop_day")."""
@@ -404,6 +405,7 @@ def create_app(config, store, broker_factory=Alpaca):
         if not isinstance(selected, str) or selected not in {"all", *contexts}:
             return jsonify(error="Unknown strategy"), 400
         targets = list(contexts.values()) if selected == "all" else [contexts[selected]]
+        warning = None
         if action == "pause":
             for _, state in targets:
                 state.set("entries_enabled", False)
@@ -418,16 +420,18 @@ def create_app(config, store, broker_factory=Alpaca):
                 return jsonify(error="Daily loss halt is active"), 409
             if selected in LOOP_BOTS and contexts[selected][1].get("halt"):
                 return jsonify(error="Drawdown-Stopp aus risiko.py aktiv. Erst im Trading-Loop den Höchststand zurücksetzen."), 409
-            if selected == "all" and secondary:
-                error = secondary_resume_error()
-                if error:
-                    return jsonify(error=error), 409
             for cfg, state in targets:
                 # A drawdown-halted trading-loop stays paused when enabling all bots.
                 if not (cfg.loop and state.get("halt")):
                     state.set("entries_enabled", True)
             if selected == "all" and secondary:
-                secondary.set("entries_enabled", True)
+                # Trading 212 is a separate book: if it is not ready it stays paused, but it never
+                # keeps the Alpaca bots from starting.
+                error = secondary_resume_error()
+                if error:
+                    warning = f"Alpaca bots enabled. Trading 212 stays paused: {error}"
+                else:
+                    secondary.set("entries_enabled", True)
         elif action == "train":
             if not config.configured:
                 return jsonify(error="Alpaca credentials are required for training data"), 409
@@ -436,22 +440,35 @@ def create_app(config, store, broker_factory=Alpaca):
         else:
             return jsonify(error="Unknown action"), 400
         store.event("control", {"action": action, "strategy": selected})
-        return jsonify(ok=True)
+        return jsonify(ok=True, warning=warning)
 
     def secondary_resume_error():
+        # Setup problems first (waiting will not fix them), then the live connection state.
         if not config.trading212_configured:
-            return "Configure Trading 212 API key and secret first"
+            return "set TRADING212_API_KEY and TRADING212_API_SECRET in .env and restart"
         if not config.trading212_paper and not config.trading212_allow_live:
             return "Trading 212 live execution requires TRADING212_ALLOW_LIVE_TRADING=true"
+        if not config.twelvedata_key:
+            return ("set TWELVEDATA_API_KEY in .env (Trading 212 has no price history; Twelve Data supplies the "
+                    "non-US daily candles and quotes) and restart")
+        try:
+            mapped = trading212_mappings(config)
+        except BrokerError as exc:
+            return f"fix config/trading212-instruments.json: {exc}"
+        if not mapped:
+            return "map at least one listing in config/trading212-instruments.json (see docs/trading212.md)"
+        if not loop.risk_rules(config)["ok"]:
+            return "trading-loop risk rules in risiko.py are incomplete"
+        if secondary.get("halt"):
+            return "Trading 212 drawdown stop is active; reset its peak first"
+        engine = secondary.get("engine") or {}
         account = secondary.get("account") or {}
         if not account.get("at") or (pd.Timestamp.now(tz="UTC") - pd.Timestamp(account["at"])).total_seconds() > 90:
-            return "Wait for a fresh Trading 212 account connection"
-        if secondary.get("engine", {}).get("status") not in {"running"}:
-            return "Resolve the Trading 212 engine or order reconciliation error first"
-        if secondary.get("halt") or not loop.risk_rules(config)["ok"]:
-            return "Trading 212 drawdown stop or invalid trading-loop risk rules"
-        if not config.twelvedata_key:
-            return "Configure matching non-US candle and quote data first"
+            # Wrong keys or missing API permissions show up here as the engine's last message.
+            detail = engine.get("message") if engine.get("status") in {"error", "setup"} else None
+            return "no fresh Trading 212 account connection yet" + (f" ({detail})" if detail else "; wait a minute")
+        if engine.get("status") != "running":
+            return "resolve the Trading 212 engine or order reconciliation error first"
         return None
 
     @app.post("/api/trading212/control")

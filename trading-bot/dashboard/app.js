@@ -145,7 +145,7 @@ function render(s) {
   drawChart(s.equity); renderModels(); renderCandles(); renderForecast(); if(s.loop) renderLoopChart(s);
 }
 async function refresh() {const serial=++refreshSerial;try{const r=await fetch('/api/state'+(selectedStrategy?'?strategy='+encodeURIComponent(selectedStrategy):''));if(!r.ok)throw Error(`Dashboard request failed (${r.status})`);const snapshot=await r.json();if(serial===refreshSerial)render(snapshot);}catch(e){$('connection').textContent='OFFLINE';$('notice').textContent=e.message+' · displayed information may be stale.';}}
-async function control(action,strategy='all') {try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json','X-Bot-Control':'dashboard'},body:JSON.stringify({action,strategy})});const body=await r.json();if(!r.ok)throw Error(body.error||'Action failed');toast(action==='train'?'Retraining queued.':'Entry setting saved.');await refresh();}catch(e){toast(e.message);}}
+async function control(action,strategy='all') {try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json','X-Bot-Control':'dashboard'},body:JSON.stringify({action,strategy})});const body=await r.json();if(!r.ok)throw Error(body.error||'Action failed');toast(body.warning||(action==='train'?'Retraining queued.':'Entry setting saved.'));await refresh();}catch(e){toast(e.message);}}
 $('toggle').addEventListener('click',()=>control((state.portfolio_mode==='both'?state.any_entries_enabled:state.entries_enabled)?'pause':'resume'));
 $('train').addEventListener('click',()=>control('train',selectedStrategy||'all'));
 $('symbols').addEventListener('click',e=>{const b=e.target.closest('[data-symbol]');if(b){selected=b.dataset.symbol;renderModels();renderCandles();renderForecast();}});
@@ -345,6 +345,7 @@ function renderTrading212(s) {
   const account=t.account,code=account?.currency||'EUR';
   const budget=Math.min(Number(account?.equity||0)*t.capital_fraction,t.capital_cap||Infinity);
   $('t212-note').textContent=`${t.engine.message||t.engine.status} · Entries ${t.entries_enabled?'enabled':'paused'} · budget ${money(budget,code)} from this account only · ${t.allow_fx?'Foreign-currency orders allowed (FX fees may apply)':'Same-currency entries only'} · ${t.data_configured?'Market-data key configured':'Set TWELVEDATA_API_KEY and instrument mappings'}${t.halt?' · DRAWDOWN STOP ACTIVE':''}`;
+  if(t.ready_problem&&!t.entries_enabled) $('t212-note').textContent+=` · Noch nicht startklar: ${t.ready_problem}. Die Alpaca-Bots laufen davon unabhängig.`;
   $('t212-positions').innerHTML=(account?.positions||[]).map(p=>`<div class="position"><b>${escape(p.symbol)}</b><span>${escape(p.qty)} shares</span><span>${money(Number(p.market_value),p.currency)}</span><span>${money(Number(p.unrealized_pl),p.currency)} unrealized</span></div>`).join('')||'No open Trading 212 positions.';
 }
 async function trading212Control(action) {
