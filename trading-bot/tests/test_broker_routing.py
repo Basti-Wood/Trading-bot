@@ -126,6 +126,24 @@ class EngineErrorMessageTests(PortfolioCase):
         self.assertNotEqual((self.daily.store.get("engine") or {}).get("status"), "error")
 
 
+class ShippedInstrumentListTests(unittest.TestCase):
+    def test_shipped_trading212_list_is_valid_and_euro_only(self):
+        path = Path(__file__).resolve().parents[1] / "config" / "trading212-instruments.json"
+        data = mappings(Config(trading212_instruments=path))
+        self.assertGreaterEqual(len(data), 10)
+
+        def isin_check(isin):
+            digits = "".join(str(int(c, 36)) for c in isin[:-1])
+            total = sum(n // 10 + n % 10 for n in (int(d) * (2 if i % 2 == 0 else 1) for i, d in enumerate(reversed(digits))))
+            return (10 - total % 10) % 10 == int(isin[-1])
+
+        for ticker, spec in data.items():
+            self.assertTrue(isin_check(spec["isin"]), ticker)
+            # Same currency as a EUR account: no FX needed with TRADING212_ALLOW_FX=false.
+            self.assertEqual(spec["currency"], "EUR", ticker)
+            self.assertIn(spec["mic"], {"XETR", "XAMS", "XPAR"}, ticker)
+
+
 class MergeGuardTests(unittest.TestCase):
     def test_every_element_the_dashboard_script_uses_exists_in_the_page(self):
         script = (DASHBOARD / "app.js").read_text(encoding="utf-8")
