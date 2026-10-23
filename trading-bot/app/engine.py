@@ -127,6 +127,12 @@ class Engine:
             self.trainer.start()
             self.training_started = time.monotonic()
 
+    def research_attempt(self, symbol):
+        """Today's news-request record for a stock. Journals from the first bot version stored a bare
+        timestamp under this key; such a value counts as no attempt and is replaced on the next write."""
+        attempt = self.store.get(f"research_attempt:{symbol}")
+        return attempt if isinstance(attempt, dict) else {}
+
     def research_tick(self, forecasts):
         if self.config.intraday or self.config.loop:
             # Intraday entries use models and the playbook; daily news has its own horizon.
@@ -147,7 +153,7 @@ class Engine:
         due = []
         for forecast in forecasts:
             symbol = forecast["symbol"]
-            attempt = self.store.get(f"research_attempt:{symbol}") or {}
+            attempt = self.research_attempt(symbol)
             key = f"{day}:{forecast['bar_at']}"
             if attempt.get("key") != key:
                 attempt = {"key": key, "tries": 0, "at": 0, "done": False}
@@ -164,7 +170,7 @@ class Engine:
                         return
                     results = Research(self.config, self.store).analyze_all(due)
                 for symbol, result in results.items():
-                    attempt = self.store.get(f"research_attempt:{symbol}") or {}
+                    attempt = self.research_attempt(symbol)
                     self.store.set(f"research_attempt:{symbol}", {**attempt, "done": result.get("status") == "ready"})
             except Exception:
                 self.store.event("research", {"status": "unavailable", "message": "News/FreeLLM connection failed"})
