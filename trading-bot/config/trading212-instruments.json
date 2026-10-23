@@ -1,1 +1,22 @@
-{}
+{
+  "SAPd_EQ": {"symbol": "SAP", "mic": "XETR", "currency": "EUR", "isin": "DE0007164600"},
+  "SIEd_EQ": {"symbol": "SIE", "mic": "XETR", "currency": "EUR", "isin": "DE0007236101"},
+  "ALVd_EQ": {"symbol": "ALV", "mic": "XETR", "currency": "EUR", "isin": "DE0008404005"},
+  "DTEd_EQ": {"symbol": "DTE", "mic": "XETR", "currency": "EUR", "isin": "DE0005557508"},
+  "MUV2d_EQ": {"symbol": "MUV2", "mic": "XETR", "currency": "EUR", "isin": "DE0008430026"},
+  "IFXd_EQ": {"symbol": "IFX", "mic": "XETR", "currency": "EUR", "isin": "DE0006231004"},
+  "RHMd_EQ": {"symbol": "RHM", "mic": "XETR", "currency": "EUR", "isin": "DE0007030009"},
+  "MBGd_EQ": {"symbol": "MBG", "mic": "XETR", "currency": "EUR", "isin": "DE0007100000"},
+  "BASd_EQ": {"symbol": "BAS", "mic": "XETR", "currency": "EUR", "isin": "DE000BASF111"},
+  "DBKd_EQ": {"symbol": "DBK", "mic": "XETR", "currency": "EUR", "isin": "DE0005140008"},
+  "ASMLa_EQ": {"symbol": "ASML", "mic": "XAMS", "currency": "EUR", "isin": "NL0010273215"},
+  "MCp_EQ": {"symbol": "MC", "mic": "XPAR", "currency": "EUR", "isin": "FR0000121014"},
+  "TTEp_EQ": {"symbol": "TTE", "mic": "XPAR", "currency": "EUR", "isin": "FR0000120271"},
+  "AIRp_EQ": {"symbol": "AIR", "mic": "XPAR", "currency": "EUR", "isin": "NL0000235190"},
+  "SANp_EQ": {"symbol": "SAN", "mic": "XPAR", "currency": "EUR", "isin": "FR0000120578"},
+  "EUNLd_EQ": {"symbol": "EUNL", "mic": "XETR", "currency": "EUR", "isin": "IE00B4L5Y983"},
+  "VWCEd_EQ": {"symbol": "VWCE", "mic": "XETR", "currency": "EUR", "isin": "IE00BK5BQT80"},
+  "SXR8d_EQ": {"symbol": "SXR8", "mic": "XETR", "currency": "EUR", "isin": "IE00B5BMR087"},
+  "EXS1d_EQ": {"symbol": "EXS1", "mic": "XETR", "currency": "EUR", "isin": "DE0005933931"},
+  "IS3Nd_EQ": {"symbol": "IS3N", "mic": "XETR", "currency": "EUR", "isin": "IE00BKM4GZ66"}
+}

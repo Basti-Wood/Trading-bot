@@ -15,7 +15,7 @@
 
 .candle-chart{min-height:200px;overflow-x:auto}.candle-chart svg{width:100%;min-width:640px;height:auto}.candle-chart svg text{fill:var(--muted,#939ba7);font:11px system-ui}.candle-legend{display:flex;flex-wrap:wrap;gap:18px;font-size:12px;margin:12px 0}.candle-legend .vwap{color:#c4a572}.candle-legend .ema9{color:#6ca5da}.candle-legend .ema20{color:#b69ad7}.candle-legend .opening{color:#83b9a3}.candle-legend .noise{color:#d39462}.candle-legend .forecast{color:#e5cb86}#stock-news-report td:last-child{max-width:700px}details{font-size:12px;margin-top:8px}summary{cursor:pointer}
 
-.money-stats{grid-template-columns:repeat(3,minmax(0,1fr))}.money-stats .stat small{line-height:1.5}.money-stats .stat strong{font-variant-numeric:tabular-nums}#money-basis{margin-top:-8px;margin-bottom:26px}#trading212 .row-actions{flex-wrap:wrap;margin-bottom:20px}
-@media(max-width:900px){.money-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:560px){.money-stats{grid-template-columns:1fr}}
+.money-stats{grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:auto auto;grid-auto-flow:column}.money-stats .stat:nth-child(odd){border-bottom:1px solid var(--line)}.money-stats .stat small{line-height:1.5}.money-stats .stat strong{font-variant-numeric:tabular-nums}#money-basis{margin-top:-8px;margin-bottom:26px}#trading212 .row-actions{flex-wrap:wrap;margin-bottom:20px}
+@media(max-width:900px){.money-stats{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:560px){.money-stats{grid-template-columns:1fr;grid-template-rows:none;grid-auto-flow:row}}
 .symbol-tabs.wrap{flex-wrap:wrap;margin-bottom:6px}.forecast-panel{margin-bottom:22px}.candle-legend label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}.candle-legend .swatch{width:14px;height:4px}.param-list{font:11px monospace;color:#b0bfb5}.param-list b{color:var(--green);font-weight:500}

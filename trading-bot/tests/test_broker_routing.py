@@ -14,7 +14,7 @@ from app.store import StrategyStore
 from app.trading212 import mappings
 from app.trading212_engine import context
 from app.web import create_app
-from test_loop import make_loop_dir, add_version
+from test_loop import PortfolioCase, make_loop_dir, add_version
 from test_trading212 import Fixture, TICKER, SPEC
 
 DASHBOARD = Path(__file__).resolve().parents[1] / "dashboard"
@@ -94,6 +94,54 @@ class DashboardRoutingTests(Fixture):
         body = json.dumps(summary)
         for secret in ("alpaca-secret", "t212-key", "t212-secret", "data-key"):
             self.assertNotIn(secret, body)
+
+
+class ResumeAllTests(Fixture):
+    def test_trading212_not_ready_never_blocks_the_alpaca_bots(self):
+        cfg = replace(self.cfg, twelvedata_key="")
+        self.store.set("account", {"equity": 1000., "loss_halt": False})
+        client = create_app(cfg, self.store).test_client()
+        response = client.post("/api/control", json={"action": "resume"}, headers=HEADERS)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("TWELVEDATA_API_KEY", response.get_json()["warning"])
+        for mode in ("daily", "daytrade", "loop", "loop_day"):
+            self.assertTrue(StrategyStore(self.store, mode).get("entries_enabled"), mode)
+        self.assertFalse(context(cfg)[1].get("entries_enabled"))
+        state = client.get("/api/state").get_json()["trading212"]
+        self.assertIn("TWELVEDATA_API_KEY", state["ready_problem"])
+        # The Trading 212 switch itself still refuses with the same reason.
+        own = client.post("/api/trading212/control", json={"action": "resume"}, headers=HEADERS)
+        self.assertEqual(own.status_code, 409)
+        self.assertIn("TWELVEDATA_API_KEY", own.get_json()["error"])
+
+
+class EngineErrorMessageTests(PortfolioCase):
+    def test_a_failing_bot_is_named_with_its_error_and_the_others_keep_running(self):
+        self.loop_day.cycle = Mock(side_effect=BrokerError("Alpaca HTTP 403 for GET /v2/stocks/bars"))
+        self.portfolio.cycle()
+        message = self.store.get("portfolio_engine")["message"]
+        self.assertIn("Intraday-Loop: Alpaca HTTP 403 for GET /v2/stocks/bars", message)
+        self.assertIn("other bots keep running", message)
+        self.assertEqual(self.loop_day.store.get("engine")["status"], "error")
+        self.assertNotEqual((self.daily.store.get("engine") or {}).get("status"), "error")
+
+
+class ShippedInstrumentListTests(unittest.TestCase):
+    def test_shipped_trading212_list_is_valid_and_euro_only(self):
+        path = Path(__file__).resolve().parents[1] / "config" / "trading212-instruments.json"
+        data = mappings(Config(trading212_instruments=path))
+        self.assertGreaterEqual(len(data), 10)
+
+        def isin_check(isin):
+            digits = "".join(str(int(c, 36)) for c in isin[:-1])
+            total = sum(n // 10 + n % 10 for n in (int(d) * (2 if i % 2 == 0 else 1) for i, d in enumerate(reversed(digits))))
+            return (10 - total % 10) % 10 == int(isin[-1])
+
+        for ticker, spec in data.items():
+            self.assertTrue(isin_check(spec["isin"]), ticker)
+            # Same currency as a EUR account: no FX needed with TRADING212_ALLOW_FX=false.
+            self.assertEqual(spec["currency"], "EUR", ticker)
+            self.assertIn(spec["mic"], {"XETR", "XAMS", "XPAR"}, ticker)
 
 
 class MergeGuardTests(unittest.TestCase):

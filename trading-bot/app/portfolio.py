@@ -3,7 +3,7 @@ from dataclasses import replace
 import threading
 
 from . import loop
-from .allocation import bot_share
+from .allocation import NAMES, bot_share
 from .engine import Engine
 from .store import StrategyStore, utcnow
 
@@ -105,11 +105,13 @@ class PortfolioEngine:
                     acted = engine.cycle(snapshot=snapshot, phase=phase, allow_action=not acted) or acted
                 except Exception as exc:
                     acted = True  # An interrupted mutation may have reached Alpaca.
-                    failed.append(engine.config.trading_mode)
+                    failed.append((engine.config.trading_mode, str(exc)[:160]))
                     engine.store.set("engine", {"status": "error", "message": str(exc)[:240], "at": utcnow()})
                     engine.store.event("error", {"message": str(exc)[:240]})
         self.store.set("portfolio_engine", {"status": "error" if failed else "running",
-            "message": "Strategy error; check decision logs" if failed else
+            # Name the failing bot and its error; the other bots keep running.
+            "message": "Error in " + "; ".join(f"{NAMES.get(mode, mode)}: {message}" for mode, message in dict(failed).items())
+                       + " (other bots keep running)" if failed else
                        "Prediction, day trading and trading-loop running together; shared account limits",
             "at": utcnow()})
 
