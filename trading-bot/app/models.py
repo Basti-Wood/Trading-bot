@@ -174,16 +174,22 @@ def train_worker(config, symbols=None):
     store = store_for_config(config)
     try:
         broker = Alpaca(config)
-        failures = []
+        failures, reasons = [], {}
+        targets = list(symbols if symbols is not None else active_symbols(config, store))
         with threadpool_limits(limits=2):
-            for symbol in (symbols if symbols is not None else active_symbols(config, store)):
+            for symbol in targets:
                 try:
                     store.set(f"training_attempt:{symbol}", time.time())
                     train_symbol(config, store, symbol, broker.bars(symbol))
                 except Exception as exc:
                     failures.append(symbol)
+                    reasons[symbol] = str(exc)[:160]
                     store.event("training", {"symbol": symbol, "message": str(exc)[:300]})
-        store.set("training", {"status": "partial failure" if failures else "complete", "failed_symbols": failures, "at": utcnow()})
+        # Stocks that cannot be trained (e.g. too little history) are skipped; the others keep trading.
+        message = (f"{len(failures)} of {len(targets)} stocks not trained, e.g. {failures[0]}: {reasons[failures[0]]}"
+                   if failures else None)
+        store.set("training", {"status": "partial failure" if failures else "complete", "failed_symbols": failures,
+                               "message": message, "at": utcnow()})
     except Exception as exc:
         store.set("training", {"status": "failed", "message": str(exc)[:300], "at": utcnow()})
 

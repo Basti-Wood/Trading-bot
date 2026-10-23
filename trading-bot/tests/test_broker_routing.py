@@ -181,3 +181,21 @@ class MergeGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyJournalTests(unittest.TestCase):
+    def test_old_timestamp_research_attempts_do_not_stop_the_prediction_bot(self):
+        import tempfile
+        from app.engine import Engine
+        from app.store import Store
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = Config(data_dir=Path(folder), api_key="k", api_secret="s", llm_key="llm", symbols=("SPY",), universe_mode="watchlist")
+            store = Store(cfg.data_dir)
+            store.set("research_attempt:SPY", 1760000000.0)  # Written by the first bot version.
+            engine = Engine(cfg, store)
+            with patch("app.engine.Research") as research:
+                research.return_value.analyze_all.return_value = {"SPY": {"status": "ready"}}
+                engine.research_tick([{"symbol": "SPY", "bar_at": "2026-10-23T04:00:00+00:00"}])
+                engine.research_thread.join(5)
+            attempt = store.get("research_attempt:SPY")
+            self.assertEqual((attempt["tries"], attempt["done"]), (1, True))
