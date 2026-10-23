@@ -18,3 +18,4 @@
 .money-stats{grid-template-columns:repeat(3,minmax(0,1fr))}.money-stats .stat small{line-height:1.5}.money-stats .stat strong{font-variant-numeric:tabular-nums}#money-basis{margin-top:-8px;margin-bottom:26px}#trading212 .row-actions{flex-wrap:wrap;margin-bottom:20px}
 @media(max-width:900px){.money-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:560px){.money-stats{grid-template-columns:1fr}}
+.symbol-tabs.wrap{flex-wrap:wrap;margin-bottom:6px}.forecast-panel{margin-bottom:22px}.candle-legend label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}.candle-legend .swatch{width:14px;height:4px}.param-list{font:11px monospace;color:#b0bfb5}.param-list b{color:var(--green);font-weight:500}

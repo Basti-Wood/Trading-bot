@@ -17,6 +17,7 @@ from .portfolio import strategy_contexts
 from .decisions import position_context
 from .accounts import overview_state
 from .trading212_engine import context as trading212_context
+from .trading212 import mappings as trading212_mappings
 
 MAX_LOOP_STRATEGIES = 10
 LOOP_BOTS = ("loop", "loop_day")
@@ -27,7 +28,7 @@ DAILY_LOOKBACK_DAYS = 140
 def create_app(config, store, broker_factory=Alpaca):
     contexts = {cfg.trading_mode: (cfg, state) for cfg, state in strategy_contexts(config, store)}
     parallel = config.trading_mode == "both"
-    secondary = trading212_context(config)[1] if config.trading212_enabled else None
+    secondary_cfg, secondary = trading212_context(config) if config.trading212_enabled else (None, None)
 
     def secondary_state():
         if secondary is None:
@@ -83,7 +84,9 @@ def create_app(config, store, broker_factory=Alpaca):
                 for mode, _, mode_state in loop_bots()}
         return {"available": loop.available(cfg), "folder": str(cfg.loop_dir or ""), "rules": loop.risk_rules(cfg),
                 "versions": versions, "running": running,
-                "stocks": [{**r, "broker": "alpaca"} for r in loop_stock_rows(cfg, state, running)] + (secondary.get("stocks", []) if secondary else []),
+                "stocks": [{**row, "broker": "alpaca"} for mode, mode_cfg, mode_state in loop_bots()
+                           for row in loop_stock_rows(mode, mode_cfg, mode_state, [v for v in running if v["bot"] == mode])]
+                          + [{**row, "bot": "trading212", "timeframe": "1Day"} for row in (secondary.get("stocks", []) if secondary else [])],
                 "errors": loop.errors(cfg), "halt": next((h for h in halts if h), None),
                 "peak": peak, "drawdown": (peak - equity) / peak * 100 if peak and equity else None,
                 "entries_enabled": state.get("entries_enabled", False), "bots": bots,
@@ -218,20 +221,20 @@ def create_app(config, store, broker_factory=Alpaca):
 
     @app.get("/api/readonly/summary")
     def readonly_summary():
-        return jsonify(readonly.summary(config, store, contexts))
+        return jsonify(readonly.summary(config, store, contexts, secondary=secondary, money=overview_state(config, store)))
 
     @app.get("/api/readonly/stocks/<symbol>")
     def readonly_stock(symbol):
-        if not loop.STOCK.fullmatch(symbol):
+        if not loop.INSTRUMENT.fullmatch(symbol):
             return jsonify(error="Invalid stock symbol"), 400
-        return jsonify(readonly.stock(config, store, contexts, symbol))
+        return jsonify(readonly.stock(config, store, contexts, symbol, secondary=secondary))
 
     @app.get("/api/readonly/trades")
     def readonly_trades():
         days = request.args.get("days", "7")
         if not days.isdigit() or not 1 <= int(days) <= 30:
             return jsonify(error="days must be 1 to 30"), 400
-        return jsonify(readonly.trades(store, int(days)))
+        return jsonify(readonly.trades(store, int(days), secondary=secondary))
 
     @app.get("/api/predictions/<symbol>")
     def predictions(symbol):
@@ -268,14 +271,20 @@ def create_app(config, store, broker_factory=Alpaca):
 
     @app.get("/api/loop/chart/<symbol>")
     def loop_chart(symbol):
-        if not loop.STOCK.fullmatch(symbol):
-            return jsonify(error="Invalid stock symbol"), 400
         bot = request.args.get("bot", "loop")
-        if bot not in LOOP_BOTS:
+        if bot not in (*LOOP_BOTS, "trading212"):
             return jsonify(error="Unknown trading-loop bot"), 400
-        if bot not in contexts:
+        # Alpaca books take US symbols; Trading 212 takes its own broker tickers (e.g. SIEd_EQ).
+        if not (loop.INSTRUMENT if bot == "trading212" else loop.STOCK).fullmatch(symbol):
+            return jsonify(error="Invalid stock symbol"), 400
+        if bot == "trading212":
+            if secondary is None:
+                return jsonify(error="Trading 212 is not enabled"), 409
+            cfg, state = secondary_cfg, secondary
+        elif bot not in contexts:
             return jsonify(error="Der Trading-Loop läuft nur mit TRADING_MODE=both"), 409
-        cfg, state = contexts[bot]
+        else:
+            cfg, state = contexts[bot]
         choice = loop.combine(state, symbol, cfg)
         active = loop.active_versions(state)
         # The deciding version, else any active version that evaluated this stock.
@@ -285,7 +294,15 @@ def create_app(config, store, broker_factory=Alpaca):
             item = (results.get("symbols") or {}).get(symbol)
             if results.get("sha256") == active[version]["sha256"] and item and item.get("chart"):
                 decision = state.get(f"forecast:{symbol}") or {}
-                return jsonify(symbol=symbol, bot=bot, version=version, deciding=version == choice.get("version"),
+                currency = "USD"
+                if bot == "trading212":
+                    try:
+                        code = (trading212_mappings(config).get(symbol) or {}).get("currency", "")
+                    except BrokerError:
+                        code = ""
+                    # GBX (pence) prices are shown as pence, never as dollars.
+                    currency = code.upper() if len(code) == 3 and code.upper() != "GBX" else None
+                return jsonify(symbol=symbol, bot=bot, version=version, deciding=version == choice.get("version"), currency=currency,
                                chart=item["chart"], test=item.get("test"), signal=item.get("signal"),
                                strategy_reason=item.get("reason"), reason=choice.get("reason"),
                                action=decision.get("action", "WAIT"), computed_at=results.get("at"))
@@ -541,12 +558,17 @@ def create_app(config, store, broker_factory=Alpaca):
                 return jsonify(error="Diese Strategie-Version gibt es nicht"), 404
             if any(s.get("loop_retest_requested") or (s.get("loop_retest") or {}).get("status") == "running" for _, _, s in loop_bots()):
                 return jsonify(error="Es läuft schon ein Stresstest. Warte, bis er fertig ist."), 409
-            if not loop.retest_targets(cfg, version):
-                return jsonify(error="Keine getestete, unveränderte Version zum Neutesten"), 409
-            state.set("loop_retest_requested", {"version": version, "at": utcnow()})
-            if secondary:
+            # A named version is tested by its own bot; "all" asks each bot for its own versions.
+            owners = [loop.version_info(cfg, path)["bot"]] if path else [m for m, _, _ in loop_bots()]
+            targets = [m for m in owners if m in contexts and loop.retest_targets(cfg, version, include_changed=True, bot=None if path else m)]
+            if not targets:
+                return jsonify(error="Keine getestete Version zum Neutesten"), 409
+            for mode in targets:
+                contexts[mode][1].set("loop_retest_requested", {"version": version, "at": utcnow()})
+            if secondary and "loop" in targets:
+                # Trading 212 runs the daily versions on its own listings; refresh its signals too.
                 secondary.set("retest_requested", True)
-            store.event("control", {"action": "loop_retest", "strategy": "loop", "version": version})
+            store.event("control", {"action": "loop_retest", "strategy": ",".join(targets), "version": version})
             return jsonify(ok=True, message=f"{version or 'Alle getesteten Versionen'}: Stresstest startet. Das dauert ein paar Minuten.")
         else:
             return jsonify(error="Unknown action"), 400

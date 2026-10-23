@@ -80,13 +80,13 @@ class Alpaca:
         return self.request("GET", f"/v2/orders/{quote(order_id, safe='')}")
 
     def submit(self, payload):
-        # Enforce routing at the network boundary, including direct callers.
+        # Enforce routing at the network boundary, including direct callers. OTC stays excluded, as in the scanner.
         symbol = payload.get("symbol", "")
         if not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", symbol):
             raise BrokerError("Alpaca only accepts US-listed stock symbols", 422)
         asset = self.asset(symbol)
         if (asset.get("class") != "us_equity" or asset.get("exchange") not in
-                {"NYSE", "NASDAQ", "AMEX", "ARCA", "BATS", "NYSEARCA", "OTC"}):
+                {"NYSE", "NASDAQ", "AMEX", "ARCA", "BATS", "NYSEARCA"}):
             raise BrokerError("Alpaca routing requires a verified US stock listing", 422)
         return self.request("POST", "/v2/orders", json=payload)
 

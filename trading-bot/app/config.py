@@ -83,7 +83,7 @@ class Config:
     readonly_daily_limit: int = 100
     # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
     loop_dir: Path = None
-    loop_timeout: int = 300
+    loop_timeout: int = 900
     trading212_enabled: bool = False
     trading212_key: str = ""
     trading212_secret: str = ""
@@ -149,7 +149,8 @@ class Config:
             if not math.isfinite(value) or not lo <= value <= hi:
                 raise ValueError(f"{name} must be between {lo} and {hi}")
         if self.readonly_token and (len(self.readonly_token) < 32 or not re.fullmatch(r"[A-Za-z0-9_\-.~]+", self.readonly_token)
-                                    or self.readonly_token in {self.password, self.api_key, self.api_secret, self.llm_key}):
+                                    or self.readonly_token in {self.password, self.api_key, self.api_secret, self.llm_key,
+                                                               self.trading212_key, self.trading212_secret, self.twelvedata_key}):
             raise ValueError("READONLY_API_TOKEN must be at least 32 letters/digits (-_.~ allowed) and differ from every other secret")
         if not 1 <= self.readonly_daily_limit <= 5000:
             raise ValueError("READONLY_API_DAILY_LIMIT must be between 1 and 5000")
@@ -257,7 +258,7 @@ class Config:
             llm_models=tuple(s.strip() for s in os.getenv("FREELLM_MODELS", "").split(",") if s.strip()),
             # Relative paths start at the trading-bot folder, whatever the working directory.
             loop_dir=(Path(__file__).resolve().parent.parent / os.getenv("TRADING_LOOP_DIR", "trading-loop")).resolve(),
-            loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "300")),
+            loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "900")),
             trading212_enabled=flag("TRADING212_ENABLED"),
             trading212_key=os.getenv("TRADING212_API_KEY", "").strip(),
             trading212_secret=os.getenv("TRADING212_API_SECRET", "").strip(),
@@ -269,4 +270,6 @@ class Config:
             trading212_allow_fx=flag("TRADING212_ALLOW_FX"),
             twelvedata_key=os.getenv("TWELVEDATA_API_KEY", "").strip(),
             reporting_currency=os.getenv("REPORTING_CURRENCY", "EUR").strip().upper(),
-            origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()))
+            origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()),
+            readonly_token=os.getenv("READONLY_API_TOKEN", "").strip(),
+            readonly_daily_limit=int(os.getenv("READONLY_API_DAILY_LIMIT", "100")))
