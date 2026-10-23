@@ -25,6 +25,7 @@ from .store import utcnow
 
 VERSION = re.compile(r"[a-z0-9_]{1,60}_v\d{1,3}")
 STOCK = re.compile(r"[A-Z][A-Z0-9.\-]{0,9}")
+INSTRUMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}")
 LIST = "LISTE"
 RULES = {"STOP_LOSS_PROZENT": "stop_loss", "MAX_DRAWDOWN_PROZENT": "max_drawdown"}
 BOT_ROOT = Path(__file__).resolve().parent.parent
@@ -131,11 +132,9 @@ def version_info(config, path, rules=None):
         status, note = "veraltet", "Getestet mit anderen Werten aus risiko.py; erst neu testen"
     else:
         status, note = "bereit", "Getestet; jede Aktie entscheidet einzeln"
-    if not (symbol == LIST or isinstance(symbol, str) and STOCK.fullmatch(symbol)):
-        status, note = "nicht_handelbar", "Nur US-Aktien und ETFs werden unterstützt"
-    elif timeframe != DAILY and timeframe not in TIMEFRAMES:
-        status, note = "nicht_handelbar", f"ZEITRAHMEN muss {', '.join(TIMEFRAMES)} sein (oder fehlen für Tageskerzen)"
-    return {**info, "status": status, "note": note, "tradable": status == "bereit" and rules["ok"], "bot": bot_for(timeframe)}
+    if not (symbol == LIST or isinstance(symbol, str) and INSTRUMENT.fullmatch(symbol)):
+        status, note = "nicht_handelbar", "Nur Aktien und ETFs mit gültiger Instrument-ID werden unterstützt"
+    return {**info, "status": status, "note": note, "tradable": status == "bereit" and rules["ok"], "bot": "loop"}
 
 
 def catalogue(config):
@@ -229,7 +228,8 @@ def version_symbols(config, store, record, positions=None):
     else:
         symbols = [record["symbol"]]
     owned = [s for s in store.owned_symbols() if owner_version(store, s) == record["version"]]
-    return list(dict.fromkeys([*symbols, *owned]))
+    # This context belongs to Alpaca; Trading 212 evaluates its own verified IDs.
+    return [s for s in dict.fromkeys([*symbols, *owned]) if STOCK.fullmatch(s)]
 
 
 def owner_version(store, symbol):
@@ -244,7 +244,7 @@ def owner_version(store, symbol):
 
 def daily_frame(bars):
     """Bot bars (UTC, lowercase) to the backtesting.py layout used by stresstest.py."""
-    zone = "America/New_York"
+    zone = bars.attrs.get("market_timezone", "America/New_York")
     frame = bars[["open", "high", "low", "close", "volume"]].rename(columns=str.capitalize)
     index = frame.index.tz_convert(zone) if frame.index.tz is not None else frame.index
     frame.index = index.normalize().tz_localize(None) if index.tz is not None else index.normalize()
@@ -293,13 +293,8 @@ def evaluate(config, record, frames):
         if bars is None:
             continue
         close = float(bars["close"].iloc[-1])
-        bar_at = bars.index[-1]
-        if minutes:
-            # The last completed regular-session bar the strategy saw (bot frames may hold extended hours).
-            bar_at = converted[symbol].index[-1].tz_localize("America/New_York").tz_convert("UTC")
-            close = float(converted[symbol]["Close"].iloc[-1])
-        results[symbol] = {**item, "bar_at": bar_at.isoformat(), "target_session": bars.attrs.get("target_session"),
-                           "timeframe": record.get("timeframe", DAILY),
+        results[symbol] = {**item, "bar_at": bars.index[-1].isoformat(), "target_session": bars.attrs.get("target_session"),
+                           "market_timezone": bars.attrs.get("market_timezone", "America/New_York"),
                            "last_close": close if math.isfinite(close) else None}
     return {"version": record["version"], "sha256": record["sha256"], "symbols": results, "at": utcnow()}
 
@@ -357,4 +352,4 @@ def ranking(entry):
 
 
 def _source(item):
-    return {k: item.get(k) for k in ("bar_at", "target_session", "last_close", "to", "timeframe")}
+    return {k: item.get(k) for k in ("bar_at", "target_session", "last_close", "to", "market_timezone")}

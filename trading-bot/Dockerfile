@@ -5,6 +5,7 @@ COPY requirements.lock.txt .
 RUN pip install --no-cache-dir -r requirements.lock.txt
 COPY app ./app
 COPY dashboard ./dashboard
+COPY config ./config
 COPY run.py .
 EXPOSE 1337
 CMD ["python", "run.py"]
