@@ -344,7 +344,7 @@ function renderTrading212(s) {
   $('t212-toggle').disabled=!t.configured;
   const account=t.account,code=account?.currency||'EUR';
   const budget=Math.min(Number(account?.equity||0)*t.capital_fraction,t.capital_cap||Infinity);
-  $('t212-note').textContent=`${t.engine.message||t.engine.status} · Entries ${t.entries_enabled?'enabled':'paused'} · budget ${money(budget,code)} from this account only · ${t.allow_fx?'Foreign-currency orders allowed (FX fees may apply)':'Same-currency entries only'} · ${t.data_configured?'Market-data key configured':'Set TWELVEDATA_API_KEY and instrument mappings'}${t.halt?' · DRAWDOWN STOP ACTIVE':''}`;
+  $('t212-note').textContent=`${t.engine.message||t.engine.status} · Entries ${t.entries_enabled?'enabled':'paused'} · budget ${money(budget,code)} from this account only · ${t.allow_fx?'Foreign-currency orders allowed (FX fees may apply)':'Same-currency entries only'} · Kursdaten: ${t.data_source==='yahoo'?'Yahoo Finance (kostenlos)':'Twelve Data'+(t.data_configured?'':' – TWELVEDATA_API_KEY fehlt')} · ${t.mappings?.error?`Liste ${escape(t.mappings.file)}: ${escape(t.mappings.error)}`:`${t.mappings?.count??0} Werte aus ${escape(t.mappings?.file||'')} geladen`}${t.halt?' · DRAWDOWN STOP ACTIVE':''}`;
   if(t.ready_problem&&!t.entries_enabled) $('t212-note').textContent+=` · Noch nicht startklar: ${t.ready_problem}. Die Alpaca-Bots laufen davon unabhängig.`;
   $('t212-positions').innerHTML=(account?.positions||[]).map(p=>`<div class="position"><b>${escape(p.symbol)}</b><span>${escape(p.qty)} shares</span><span>${money(Number(p.market_value),p.currency)}</span><span>${money(Number(p.unrealized_pl),p.currency)} unrealized</span></div>`).join('')||'No open Trading 212 positions.';
 }

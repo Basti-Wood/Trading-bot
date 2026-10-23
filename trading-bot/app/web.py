@@ -41,7 +41,9 @@ def create_app(config, store, broker_factory=Alpaca):
                 "account": secondary.get("account"), "stocks": secondary.get("stocks", []),
                 "halt": secondary.get("halt"), "rules": loop.risk_rules(config),
                 "capital_fraction": config.trading212_capital_fraction, "capital_cap": config.trading212_capital_cap,
-                "allow_fx": config.trading212_allow_fx, "data_configured": bool(config.twelvedata_key),
+                "allow_fx": config.trading212_allow_fx, "data_source": config.trading212_data_source,
+                "data_configured": config.trading212_data_source == "yahoo" or bool(config.twelvedata_key),
+                "mappings": mapping_state(),
                 "errors": secondary.get("data_errors", {}), "orders": secondary.orders(30),
                 "ready_problem": secondary_resume_error()}
 
@@ -427,11 +429,14 @@ def create_app(config, store, broker_factory=Alpaca):
             if selected == "all" and secondary:
                 # Trading 212 is a separate book: if it is not ready it stays paused, but it never
                 # keeps the Alpaca bots from starting.
-                error = secondary_resume_error()
-                if error:
-                    warning = f"Alpaca bots enabled. Trading 212 stays paused: {error}"
+                blocker, missing = secondary_blocker(), secondary_resume_error()
+                if blocker:
+                    warning = f"Alpaca bots enabled. Trading 212 stays paused: {blocker}"
                 else:
+                    # Switched on together with the others; anything still missing blocks single buys.
                     secondary.set("entries_enabled", True)
+                    if missing:
+                        warning = f"All bots enabled. Trading 212 cannot buy yet: {missing}"
         elif action == "train":
             if not config.configured:
                 return jsonify(error="Alpaca credentials are required for training data"), 409
@@ -442,25 +447,34 @@ def create_app(config, store, broker_factory=Alpaca):
         store.event("control", {"action": action, "strategy": selected})
         return jsonify(ok=True, warning=warning)
 
-    def secondary_resume_error():
-        # Setup problems first (waiting will not fix them), then the live connection state.
+    def secondary_blocker():
+        """Reasons Trading 212 entries may not be switched on at all."""
         if not config.trading212_configured:
             return "set TRADING212_API_KEY and TRADING212_API_SECRET in .env and restart"
         if not config.trading212_paper and not config.trading212_allow_live:
             return "Trading 212 live execution requires TRADING212_ALLOW_LIVE_TRADING=true"
-        if not config.twelvedata_key:
-            return ("set TWELVEDATA_API_KEY in .env (Trading 212 has no price history; Twelve Data supplies the "
-                    "non-US daily candles and quotes) and restart")
-        try:
-            mapped = trading212_mappings(config)
-        except BrokerError as exc:
-            return f"fix config/trading212-instruments.json: {exc}"
-        if not mapped:
-            return "map at least one listing in config/trading212-instruments.json (see docs/trading212.md)"
-        if not loop.risk_rules(config)["ok"]:
-            return "trading-loop risk rules in risiko.py are incomplete"
         if secondary.get("halt"):
             return "Trading 212 drawdown stop is active; reset its peak first"
+        return None
+
+    def secondary_resume_error():
+        """First thing still missing before Trading 212 can buy; switching on is still allowed unless it is a blocker.
+        The engine checks data, mappings and connection again before every single order."""
+        blocker = secondary_blocker()
+        if blocker:
+            return blocker
+        if config.trading212_data_source == "twelvedata" and not config.twelvedata_key:
+            return "set TWELVEDATA_API_KEY in .env, or TRADING212_DATA_SOURCE=yahoo for free European data, and restart"
+        mapped = mapping_state()
+        if mapped["error"]:
+            return f"fix {mapped['file']}: {mapped['error']}"
+        if not mapped["count"]:
+            return f"map at least one listing in {mapped['file']} (see docs/trading212.md)"
+        if not loop.risk_rules(config)["ok"]:
+            return "trading-loop risk rules in risiko.py are incomplete"
+        daily_versions = loop.active_versions(contexts["loop"][1]) if "loop" in contexts else {}
+        if not any(record.get("symbol") == loop.LIST for record in daily_versions.values()):
+            return "switch on a daily Trading-Loop version (SYMBOL = \"LISTE\"); Trading 212 runs those on its listings"
         engine = secondary.get("engine") or {}
         account = secondary.get("account") or {}
         if not account.get("at") or (pd.Timestamp.now(tz="UTC") - pd.Timestamp(account["at"])).total_seconds() > 90:
@@ -471,6 +485,17 @@ def create_app(config, store, broker_factory=Alpaca):
             return "resolve the Trading 212 engine or order reconciliation error first"
         return None
 
+    def mapping_state():
+        """Whether the instrument file was found and loaded, for the dashboard."""
+        path = config.trading212_instruments
+        shown = str(path.relative_to(Path(__file__).resolve().parent.parent)) if path and path.is_relative_to(Path(__file__).resolve().parent.parent) else str(path)
+        if not path or not path.is_file():
+            return {"file": shown, "count": 0, "error": "file not found"}
+        try:
+            return {"file": shown, "count": len(trading212_mappings(config)), "error": None}
+        except BrokerError as exc:
+            return {"file": shown, "count": 0, "error": str(exc)}
+
     @app.post("/api/trading212/control")
     def secondary_control():
         if secondary is None:
@@ -480,10 +505,14 @@ def create_app(config, store, broker_factory=Alpaca):
         if action == "pause":
             secondary.set("entries_enabled", False)
         elif action == "resume":
-            error = secondary_resume_error()
+            error = secondary_blocker()
             if error:
                 return jsonify(error=error), 409
             secondary.set("entries_enabled", True)
+            missing = secondary_resume_error()
+            if missing:
+                store.event("control", {"broker": "trading212", "action": action})
+                return jsonify(ok=True, warning=f"Trading 212 enabled, but it cannot buy yet: {missing}")
         elif action == "retest":
             secondary.set("retest_requested", True)
         elif action == "reset_peak":

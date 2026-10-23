@@ -123,6 +123,10 @@ class Config:
     trading212_capital_cap: float = 0.
     trading212_allow_fx: bool = False
     twelvedata_key: str = ""
+    # Non-US candles/prices: "yahoo" (free, covers European exchanges) or "twelvedata" (paid plans for Europe).
+    trading212_data_source: str = "yahoo"
+    # Free European prices can lag a few minutes; older prices never size an order.
+    trading212_max_quote_age: int = 1200
     reporting_currency: str = "EUR"
     def __post_init__(self):
         if self.trading212_enabled and self.trading_mode != "both" and not self.coordinated:
@@ -131,6 +135,10 @@ class Config:
             raise ValueError("REPORTING_CURRENCY must be a three-letter currency code")
         if not math.isfinite(self.trading212_capital_fraction) or not .01 <= self.trading212_capital_fraction <= 1:
             raise ValueError("TRADING212_CAPITAL_FRACTION must be between .01 and 1")
+        if self.trading212_data_source not in {"yahoo", "twelvedata"}:
+            raise ValueError("TRADING212_DATA_SOURCE must be yahoo or twelvedata")
+        if not 60 <= self.trading212_max_quote_age <= 3600:
+            raise ValueError("TRADING212_MAX_QUOTE_AGE_SECONDS must be between 60 and 3600")
         if not math.isfinite(self.trading212_capital_cap) or not 0 <= self.trading212_capital_cap <= 10000000:
             raise ValueError("TRADING212_CAPITAL_CAP must be between 0 and 10000000 in account currency")
         if not self.symbols or len(self.symbols) > 50 or len(set(self.symbols)) != len(self.symbols):
@@ -299,6 +307,8 @@ class Config:
             trading212_capital_cap=float(os.getenv("TRADING212_CAPITAL_CAP", "0")),
             trading212_allow_fx=flag("TRADING212_ALLOW_FX"),
             twelvedata_key=os.getenv("TWELVEDATA_API_KEY", "").strip(),
+            trading212_data_source=env_value("TRADING212_DATA_SOURCE", "yahoo").lower(),
+            trading212_max_quote_age=int(env_value("TRADING212_MAX_QUOTE_AGE_SECONDS", "1200")),
             reporting_currency=os.getenv("REPORTING_CURRENCY", "EUR").strip().upper(),
             origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()),
             readonly_token=env_value("READONLY_API_TOKEN"),

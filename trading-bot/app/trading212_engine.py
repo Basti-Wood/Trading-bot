@@ -12,7 +12,20 @@ from . import loop
 from .broker import BrokerError
 from .execution import TERMINAL
 from .store import Store, StrategyStore, utcnow
-from .trading212 import Trading212, MarketData, mappings, number
+from .trading212 import Trading212, market_data, mappings, number
+
+
+# Entries run during the whole regular session: from ENTRY_DELAY after the open until CLOSE_BUFFER
+# before the close. A buy that has not filled after BUY_TIMEOUT is canceled and may be tried again.
+ENTRY_DELAY = pd.Timedelta(minutes=5)
+CLOSE_BUFFER = pd.Timedelta(minutes=30)
+BUY_TIMEOUT = pd.Timedelta(minutes=15)
+
+
+def entry_window(session, now):
+    opening, close = session["opening"], session["close"]
+    return bool(session["open"] and opening is not None and close is not None
+                and now - opening >= ENTRY_DELAY and close - now >= CLOSE_BUFFER)
 
 
 def context(config):
@@ -26,7 +39,7 @@ class Trading212Engine:
         self.config, self.root = config, root
         self.cfg, self.store = context(config)
         self.source = StrategyStore(root, "loop")
-        self.broker, self.data = broker or Trading212(config), data or MarketData(config)
+        self.broker, self.data = broker or Trading212(config), data or market_data(config)
         self.stop = threading.Event()
         self.thread = self.signals_thread = None
         self.last_signals = 0
@@ -231,8 +244,11 @@ class Trading212Engine:
             if not record or order["side"] != "buy" or order["status"] == "pending_cancel":
                 continue
             session = self.broker.session_for(order["symbol"], now)
-            opening = session["opening"]
-            expired = (not session["open"] or opening is None or now - opening >= pd.Timedelta(hours=1))
+            try:
+                age = now - pd.Timestamp(order.get("created_at"))
+            except (TypeError, ValueError):
+                age = None
+            expired = not entry_window(session, now) or age is None or age >= BUY_TIMEOUT
             if not self.store.get("entries_enabled", False) or self.store.get("halt") or expired:
                 self.broker.cancel(order["id"])
                 acted = True
@@ -315,7 +331,6 @@ class Trading212Engine:
                     elif position and owned:
                         action = "HOLD"
                     elif choice["signal"] == "BUY":
-                        minutes = (now - opening).total_seconds() / 60 if opening is not None else -1
                         if not self.store.get("entries_enabled", False):
                             reason = "Trading 212 entries are paused"
                         elif not rules["ok"] or self.store.get("halt"):
@@ -324,8 +339,12 @@ class Trading212Engine:
                             reason = "Waiting for order reconciliation and broker stop protection"
                         elif any(o["side"] == "buy" for o in [*orders, *self.store.unresolved_orders()]):
                             reason = "A buy is still pending; waiting for a fresh filled-position snapshot"
-                        elif not session["open"] or not valid_day or not 5 <= minutes < 60:
-                            reason = "Waiting for a fresh next-session signal and the exchange entry window"
+                        elif not session["open"]:
+                            reason = "Exchange closed; this listing trades again at its next session"
+                        elif not valid_day:
+                            reason = "Waiting for the signal from the latest completed daily candle"
+                        elif not entry_window(session, now):
+                            reason = "Outside the entry window (5 minutes after the open until 30 minutes before the close)"
                         elif not acted and symbol not in pending:
                             price = self.data.quote(instrument, spec, pd.Timestamp.now(tz="UTC"))
                             fx = self.data.execution_fx(instrument["currencyCode"], account["currency"], pd.Timestamp.now(tz="UTC"))
@@ -343,7 +362,9 @@ class Trading212Engine:
                                 qty = min(qty, math.floor(number(max_qty, nonnegative=True)))
                             if qty > 0:
                                 action = "BUY"
-                                acted = self.send(symbol, "buy", qty, "limit", f"entry:{target}:{choice.get('bar_at')}",
+                                # One intent per signal and 15-minute slot: an expired, unfilled buy may retry later.
+                                slot = now.floor("15min").isoformat()
+                                acted = self.send(symbol, "buy", qty, "limit", f"entry:{target}:{choice.get('bar_at')}:{slot}",
                                                   price=round(price, 2), version=choice["version"])
                                 reason = choice["reason"] + "; order intent journaled; acceptance is not a fill"
                             else:
