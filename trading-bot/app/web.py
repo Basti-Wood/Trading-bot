@@ -14,6 +14,8 @@ from .prediction_quality import forecast_quality
 from .universe import active_symbols
 from .portfolio import strategy_contexts
 from .decisions import position_context
+from .accounts import overview_state
+from .trading212_engine import context as trading212_context
 
 MAX_LOOP_STRATEGIES = 10
 
@@ -21,6 +23,21 @@ MAX_LOOP_STRATEGIES = 10
 def create_app(config, store, broker_factory=Alpaca):
     contexts = {cfg.trading_mode: (cfg, state) for cfg, state in strategy_contexts(config, store)}
     parallel = config.trading_mode == "both"
+    secondary = trading212_context(config)[1] if config.trading212_enabled else None
+
+    def secondary_state():
+        if secondary is None:
+            return {"enabled": False, "configured": False}
+        return {"enabled": True, "configured": config.trading212_configured,
+                "mode": "paper" if config.trading212_paper else "live",
+                "live_execution_allowed": config.trading212_allow_live,
+                "entries_enabled": secondary.get("entries_enabled", False),
+                "engine": secondary.get("engine", {"status": "starting"}),
+                "account": secondary.get("account"), "stocks": secondary.get("stocks", []),
+                "halt": secondary.get("halt"), "rules": loop.risk_rules(config),
+                "capital_fraction": config.trading212_capital_fraction, "capital_cap": config.trading212_capital_cap,
+                "allow_fx": config.trading212_allow_fx, "data_configured": bool(config.twelvedata_key),
+                "errors": secondary.get("data_errors", {}), "orders": secondary.orders(30)}
 
     def loop_bots():
         """The stock trading-loop dashboard context."""
@@ -56,7 +73,9 @@ def create_app(config, store, broker_factory=Alpaca):
             peaks.append(mode_state.get("equity_peak"))
         peak = max((p for p in peaks if p), default=None)
         return {"available": loop.available(cfg), "folder": str(cfg.loop_dir or ""), "rules": loop.risk_rules(cfg),
-                "versions": versions, "running": running, "stocks": loop_stock_rows(cfg, state, running), "errors": loop.errors(cfg), "halt": next((h for h in halts if h), None),
+                "versions": versions, "running": running,
+                "stocks": [{**r, "broker": "alpaca"} for r in loop_stock_rows(cfg, state, running)] + (secondary.get("stocks", []) if secondary else []),
+                "errors": loop.errors(cfg), "halt": next((h for h in halts if h), None),
                 "peak": peak, "drawdown": (peak - equity) / peak * 100 if peak and equity else None,
                 "entries_enabled": state.get("entries_enabled", False),
                 "retest": state.get("loop_retest"), "retest_requested": bool(state.get("loop_retest_requested")),
@@ -190,7 +209,14 @@ def create_app(config, store, broker_factory=Alpaca):
             cpu, resources_available = psutil.cpu_percent(), True
         except (psutil.Error, OSError):
             pass  # Resource telemetry may be unavailable in a restricted host.
+        money_overview = overview_state(config, store)
+        secondary_info = secondary_state()
+        ledger = [{**r, "broker": "alpaca", "currency": "USD"} for r in store.orders(50)]
+        if secondary:
+            ledger.extend(secondary.orders(50))
+        ledger.sort(key=lambda r: r.get("at", ""), reverse=True)
         return jsonify(
+            money=money_overview, trading212=secondary_info,
             portfolio_mode=config.trading_mode,
             portfolio_engine=store.get("portfolio_engine"),
             strategies=[{"id": c.trading_mode, "name": NAMES.get(c.trading_mode, c.trading_mode),
@@ -201,7 +227,7 @@ def create_app(config, store, broker_factory=Alpaca):
                          "halt": st.get("halt") if c.loop else None,
                          "engine": st.get("engine", {"status": "starting"}),
                          "training": st.get("training", {"status": "waiting"})} for c, st in contexts.values()],
-            any_entries_enabled=any(st.get("entries_enabled", False) for _, st in contexts.values()),
+            any_entries_enabled=any(st.get("entries_enabled", False) for _, st in contexts.values()) or bool(secondary and secondary.get("entries_enabled", False)),
             allocation={**allocation(config, store), "budget": budget, "gross_fraction": config.gross_fraction,
                         "position_fraction": config.position_fraction} if parallel else None,
             loop=loop_state(equity), news_report=store.get("news_report"),
@@ -212,7 +238,7 @@ def create_app(config, store, broker_factory=Alpaca):
             account=account, training=state_store.get("training", {"status": "waiting for data"}),
             research_status=state_store.get("research_status", {"status": "waiting"}),
             symbols=symbols,
-            orders=store.orders(50), events=state_store.history("decision", 30), errors=state_store.history("error", 10),
+            orders=ledger[:50], events=state_store.history("decision", 30), errors=state_store.history("error", 10),
             training_history=state_store.history("training", 25), equity=store.history("equity", 100),
             resources={"process_memory_mb": round(rss / 1024**2, 1), "host_cpu_percent": cpu, "available": resources_available,
                        "training_memory_mb": cfg.training_memory_mb, "cpu_threads": 2, "gpu_memory_mb": 0},
@@ -241,6 +267,8 @@ def create_app(config, store, broker_factory=Alpaca):
         if action == "pause":
             for _, state in targets:
                 state.set("entries_enabled", False)
+            if selected == "all" and secondary:
+                secondary.set("entries_enabled", False)
         elif action == "resume":
             if not config.configured:
                 return jsonify(error="Configure Alpaca keys first"), 409
@@ -250,10 +278,16 @@ def create_app(config, store, broker_factory=Alpaca):
                 return jsonify(error="Daily loss halt is active"), 409
             if selected in ("loop",) and contexts[selected][1].get("halt"):
                 return jsonify(error="Drawdown-Stopp aus risiko.py aktiv. Erst im Trading-Loop den Höchststand zurücksetzen."), 409
+            if selected == "all" and secondary:
+                error = secondary_resume_error()
+                if error:
+                    return jsonify(error=error), 409
             for cfg, state in targets:
                 # A drawdown-halted trading-loop stays paused when enabling all bots.
                 if not (cfg.loop and state.get("halt")):
                     state.set("entries_enabled", True)
+            if selected == "all" and secondary:
+                secondary.set("entries_enabled", True)
         elif action == "train":
             if not config.configured:
                 return jsonify(error="Alpaca credentials are required for training data"), 409
@@ -263,6 +297,53 @@ def create_app(config, store, broker_factory=Alpaca):
             return jsonify(error="Unknown action"), 400
         store.event("control", {"action": action, "strategy": selected})
         return jsonify(ok=True)
+
+    def secondary_resume_error():
+        if not config.trading212_configured:
+            return "Configure Trading 212 API key and secret first"
+        if not config.trading212_paper and not config.trading212_allow_live:
+            return "Trading 212 live execution requires TRADING212_ALLOW_LIVE_TRADING=true"
+        account = secondary.get("account") or {}
+        if not account.get("at") or (pd.Timestamp.now(tz="UTC") - pd.Timestamp(account["at"])).total_seconds() > 90:
+            return "Wait for a fresh Trading 212 account connection"
+        if secondary.get("engine", {}).get("status") not in {"running"}:
+            return "Resolve the Trading 212 engine or order reconciliation error first"
+        if secondary.get("halt") or not loop.risk_rules(config)["ok"]:
+            return "Trading 212 drawdown stop or invalid trading-loop risk rules"
+        if not config.twelvedata_key:
+            return "Configure matching non-US candle and quote data first"
+        return None
+
+    @app.post("/api/trading212/control")
+    def secondary_control():
+        if secondary is None:
+            return jsonify(error="Set TRADING212_ENABLED=true first"), 409
+        body = request.get_json(silent=True)
+        action = body.get("action") if isinstance(body, dict) else None
+        if action == "pause":
+            secondary.set("entries_enabled", False)
+        elif action == "resume":
+            error = secondary_resume_error()
+            if error:
+                return jsonify(error=error), 409
+            secondary.set("entries_enabled", True)
+        elif action == "retest":
+            secondary.set("retest_requested", True)
+        elif action == "reset_peak":
+            secondary.set("entries_enabled", False)
+            secondary.set("halt", None)
+            secondary.set("equity_peak", None)
+        else:
+            return jsonify(error="Unknown Trading 212 action"), 400
+        store.event("control", {"broker": "trading212", "action": action})
+        return jsonify(ok=True)
+
+    @app.get("/api/trading212/instruments")
+    def secondary_instruments():
+        query = request.args.get("q", "").casefold()
+        items = secondary.get("instruments", []) if secondary else []
+        return jsonify(items=[i for i in items if query in (i["ticker"] + " " + i["name"]).casefold()][:100],
+                       total=len(items), message="Verified non-US exchange listings; map exact ticker, MIC, currency and ISIN for market data")
 
     def body_or_error():
         body = request.get_json(silent=True)
@@ -320,6 +401,10 @@ def create_app(config, store, broker_factory=Alpaca):
             for _, _, mode_state in loop_bots():
                 mode_state.set("halt", None)
                 mode_state.set("equity_peak", None)
+            if secondary:
+                secondary.set("entries_enabled", False)
+                secondary.set("halt", None)
+                secondary.set("equity_peak", None)
             store.event("control", {"action": "loop_reset_peak", "strategy": "loop"})
             return jsonify(ok=True, message="Höchststand zurückgesetzt. Einstiege bleiben pausiert, bis du sie einschaltest.")
         elif action == "retest":
@@ -330,6 +415,8 @@ def create_app(config, store, broker_factory=Alpaca):
             if not loop.retest_targets(cfg, version):
                 return jsonify(error="Keine getestete, unveränderte Version zum Neutesten"), 409
             state.set("loop_retest_requested", {"version": version, "at": utcnow()})
+            if secondary:
+                secondary.set("retest_requested", True)
             store.event("control", {"action": "loop_retest", "strategy": "loop", "version": version})
             return jsonify(ok=True, message=f"{version or 'Alle getesteten Versionen'}: Stresstest startet. Das dauert ein paar Minuten.")
         else:

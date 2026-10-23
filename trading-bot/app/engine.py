@@ -485,6 +485,7 @@ class Engine:
             self.store.set("entries_enabled", False)
         loss_breach = loss_breach or self.store.get("loss_halt_day") == day
         self.store.set("account", {"equity": equity, "cash": float(account["cash"]), "buying_power": float(account["buying_power"]),
+            "broker": "alpaca", "currency": account.get("currency", "USD"), "mode": "paper" if self.config.paper else "live",
             "daily_pnl": equity - prior, "positions": [{k: p.get(k, "us_equity" if k == "asset_class" else None) for k in ("symbol", "asset_class", "qty", "market_value", "unrealized_pl", "unrealized_plpc", "avg_entry_price")} for p in positions],
             "market_open": clock["is_open"], "loss_halt": loss_breach, "at": utcnow()})
         if time.time() - self.store.get("equity_sample", 0) >= 900:

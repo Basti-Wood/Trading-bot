@@ -81,7 +81,26 @@ class Config:
     # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
     loop_dir: Path = None
     loop_timeout: int = 300
+    trading212_enabled: bool = False
+    trading212_key: str = ""
+    trading212_secret: str = ""
+    trading212_paper: bool = True
+    trading212_allow_live: bool = False
+    trading212_instruments: Path = None
+    trading212_capital_fraction: float = 1.
+    trading212_capital_cap: float = 0.
+    trading212_allow_fx: bool = False
+    twelvedata_key: str = ""
+    reporting_currency: str = "EUR"
     def __post_init__(self):
+        if self.trading212_enabled and self.trading_mode != "both" and not self.coordinated:
+            raise ValueError("Trading 212's trading-loop requires TRADING_MODE=both")
+        if not re.fullmatch(r"[A-Z]{3}", self.reporting_currency):
+            raise ValueError("REPORTING_CURRENCY must be a three-letter currency code")
+        if not math.isfinite(self.trading212_capital_fraction) or not .01 <= self.trading212_capital_fraction <= 1:
+            raise ValueError("TRADING212_CAPITAL_FRACTION must be between .01 and 1")
+        if not math.isfinite(self.trading212_capital_cap) or not 0 <= self.trading212_capital_cap <= 10000000:
+            raise ValueError("TRADING212_CAPITAL_CAP must be between 0 and 10000000 in account currency")
         if not self.symbols or len(self.symbols) > 50 or len(set(self.symbols)) != len(self.symbols):
             raise ValueError("Configure 1 to 50 unique US equity/ETF symbols")
         # "loop" is an internal child strategy of TRADING_MODE=both, never standalone modes.
@@ -147,6 +166,11 @@ class Config:
     @property
     def configured(self):
         return all(v and not v.lower().startswith(("your_", "changeme")) for v in (self.api_key, self.api_secret))
+
+    @property
+    def trading212_configured(self):
+        return self.trading212_enabled and all(v and not v.lower().startswith(("your_", "changeme"))
+                                              for v in (self.trading212_key, self.trading212_secret))
 
     @property
     def threshold(self):
@@ -216,4 +240,15 @@ class Config:
             # Relative paths start at the trading-bot folder, whatever the working directory.
             loop_dir=(Path(__file__).resolve().parent.parent / os.getenv("TRADING_LOOP_DIR", "trading-loop")).resolve(),
             loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "300")),
+            trading212_enabled=flag("TRADING212_ENABLED"),
+            trading212_key=os.getenv("TRADING212_API_KEY", "").strip(),
+            trading212_secret=os.getenv("TRADING212_API_SECRET", "").strip(),
+            trading212_paper=flag("TRADING212_PAPER", True),
+            trading212_allow_live=flag("TRADING212_ALLOW_LIVE_TRADING"),
+            trading212_instruments=(Path(__file__).resolve().parent.parent / os.getenv("TRADING212_INSTRUMENTS_FILE", "config/trading212-instruments.json")).resolve(),
+            trading212_capital_fraction=float(os.getenv("TRADING212_CAPITAL_FRACTION", "1")),
+            trading212_capital_cap=float(os.getenv("TRADING212_CAPITAL_CAP", "0")),
+            trading212_allow_fx=flag("TRADING212_ALLOW_FX"),
+            twelvedata_key=os.getenv("TWELVEDATA_API_KEY", "").strip(),
+            reporting_currency=os.getenv("REPORTING_CURRENCY", "EUR").strip().upper(),
             origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()))

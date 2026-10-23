@@ -12,6 +12,8 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:1337:1337"
     volumes:
       - ./data:/app/data
+      # Non-secret, explicit broker-to-data listing mappings.
+      - ./config:/app/config:ro
       # Strategies, reports, risiko.py and fehler.db; read-only, the bot never changes them.
       - ./trading-loop:/app/trading-loop:ro
     extra_hosts:

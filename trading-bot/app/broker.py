@@ -1,6 +1,7 @@
 """Alpaca REST boundary. Never retry an order submission blindly."""
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+import re
 import requests
 import pandas as pd
 
@@ -79,7 +80,38 @@ class Alpaca:
         return self.request("GET", f"/v2/orders/{quote(order_id, safe='')}")
 
     def submit(self, payload):
+        # Enforce routing at the network boundary, including direct callers.
+        symbol = payload.get("symbol", "")
+        if not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", symbol):
+            raise BrokerError("Alpaca only accepts US-listed stock symbols", 422)
+        asset = self.asset(symbol)
+        if (asset.get("class") != "us_equity" or asset.get("exchange") not in
+                {"NYSE", "NASDAQ", "AMEX", "ARCA", "BATS", "NYSEARCA", "OTC"}):
+            raise BrokerError("Alpaca routing requires a verified US stock listing", 422)
         return self.request("POST", "/v2/orders", json=payload)
+
+    def cash_flows(self, since):
+        """External funding since the performance baseline; never count funding as profit."""
+        params = {"after": since, "direction": "asc", "page_size": 100,
+                  "activity_types": "CSD,CSW,ACATC,ACATS,JNLC,JNLS"}
+        rows, seen = [], set()
+        for _ in range(100):
+            page = self.request("GET", "/v2/account/activities", params=params)
+            for row in page:
+                kind = row.get("activity_type")
+                if kind in {"ACATS", "JNLS"}:
+                    raise BrokerError("Securities transfers need a valued performance adjustment")
+                if kind in {"CSD", "CSW", "ACATC", "JNLC"}:
+                    rows.append({"at": row.get("transaction_time") or row.get("date"),
+                                 "amount": float(row["net_amount"]), "currency": "USD"})
+            if len(page) < 100:
+                return rows
+            token = page[-1]["id"]
+            if token in seen:
+                break
+            seen.add(token)
+            params["page_token"] = token
+        raise BrokerError("Incomplete Alpaca funding history; return calculation unavailable")
 
     def cancel(self, order_id):
         return self.request("DELETE", f"/v2/orders/{quote(order_id, safe='')}")

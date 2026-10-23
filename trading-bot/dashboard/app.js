@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const money = value => value == null ? '—' : new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:2}).format(value);
+const money = (value, currency='USD') => value == null ? '—' : new Intl.NumberFormat('en-US',{style:'currency',currency,maximumFractionDigits:2}).format(value);
 const percent = value => value == null ? '—' : `${value > 0 ? '+' : ''}${(value*100).toFixed(2)}%`;
 const time = value => value ? new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
 const signal = value => `<span class="pill ${{BUY:'buy',SELL:'sell',HOLD:'hold',WAIT:'hold',BULLISH:'buy',BEARISH:'sell',NEUTRAL:'hold'}[value] || ''}">${escape(value)}</span>`;
@@ -103,7 +103,7 @@ function renderLoop(s) {
     (l.retest_requested?'Stresstest startet gleich…':rt?.status==='running'?`Stresstest läuft (${rt.trigger}): ${rt.current||''} · ${done.length} von ${rt.versions.length} fertig.`:
      rt?`Letzter Lauf (${rt.trigger}) ${time(rt.at||rt.started_at)}: ${rt.status==='fertig'?`${done.length} Version${done.length===1?'':'en'} getestet`:rt.status}${rt.message?' · '+rt.message:''}${failed.length?' · '+failed.map(([v,r])=>`${v}: ${r}`).join(' · '):''}`:'');
   const testCell=t=>t?`<span class="pill ${t.gruen?'buy':'sell'}">${t.gruen?'GRÜN':'ROT'}</span><br><small class="muted">${pct(t.rendite)} · DD ${pct(t.max_drawdown)} · ${escape(t.trades)} Trades</small>`:'—';
-  $('loop-running').innerHTML=`<div class="table-wrap"><table><thead><tr><th>Aktie</th><th>Beste grüne Version / Besitzer</th><th>Einzeltest</th><th>Strategie-Signal</th><th>Entscheidung</th></tr></thead><tbody>${(l.stocks||[]).map(r=>`<tr><td>${escape(r.symbol)}</td><td>${escape(r.version||'—')}${r.owner?`<br><small>Besitzer: ${escape(r.owner)}</small>`:''}</td><td>${testCell(r.test)}</td><td>${signal(r.signal||'HOLD')}</td><td>${signal(r.action||'WAIT')}<br><small class="muted">${escape(r.reason)}</small><details><summary>Alle Versionen</summary>${Object.entries(r.views||{}).map(([v,i])=>`<div>${escape(v)}: ${escape(i.signal||i.error||'—')} · ${pct(i.test?.rendite)} · DD ${pct(i.test?.max_drawdown)} · ${i.test?.gruen?'GRÜN':'ROT'}</div>`).join('')}</details></td></tr>`).join('')||'<tr><td colspan="5" class="empty">Aktiviere getestete Versionen und gib dem Trading-Loop eine Gewichtung über 0.</td></tr>'}</tbody></table></div>` + l.running.map(v=>`<div class="loop-version section-title"><span><b>${escape(v.version)}</b> · ${v.green}/${v.rows.length} Einzeltests grün · ${v.computed_at?time(v.computed_at):'wird berechnet…'}${v.error?` · ${escape(v.error.message)}`:''}</span><button data-loop="deactivate" data-version="${escape(v.version)}">Abschalten</button></div>`).join('');
+  $('loop-running').innerHTML=`<div class="table-wrap"><table><thead><tr><th>Broker / Aktie</th><th>Beste grüne Version / Besitzer</th><th>Einzeltest</th><th>Strategie-Signal</th><th>Entscheidung</th></tr></thead><tbody>${(l.stocks||[]).map(r=>`<tr><td><small>${r.broker==='trading212'?'Trading 212':'Alpaca'}</small><br>${escape(r.symbol)}</td><td>${escape(r.version||'—')}${r.owner?`<br><small>Besitzer: ${escape(r.owner)}</small>`:''}</td><td>${testCell(r.test)}</td><td>${signal(r.signal||'HOLD')}</td><td>${signal(r.action||'WAIT')}<br><small class="muted">${escape(r.reason)}</small><details><summary>Alle Versionen</summary>${Object.entries(r.views||{}).map(([v,i])=>`<div>${escape(v)}: ${escape(i.signal||i.error||'—')} · ${pct(i.test?.rendite)} · DD ${pct(i.test?.max_drawdown)} · ${i.test?.gruen?'GRÜN':'ROT'}</div>`).join('')}</details></td></tr>`).join('')||'<tr><td colspan="5" class="empty">Aktiviere getestete Versionen und gib dem Trading-Loop eine Gewichtung über 0.</td></tr>'}</tbody></table></div>` + l.running.map(v=>`<div class="loop-version section-title"><span><b>${escape(v.version)}</b> · ${v.green}/${v.rows.length} Einzeltests grün · ${v.computed_at?time(v.computed_at):'wird berechnet…'}${v.error?` · ${escape(v.error.message)}`:''}</span><button data-loop="deactivate" data-version="${escape(v.version)}">Abschalten</button></div>`).join('');
   $('loop-versions').innerHTML=l.versions.map(v=>{const r=v.report||{},[label,tone]=LOOP_STATUS[v.status]||[v.status,'hold'];return `<tr><td>${escape(v.version)}</td><td>${v.symbol==='LISTE'?`Liste (${escape(r.gruen_anzahl??'—')}/${escape(r.anzahl??'—')} grün)`:escape(v.symbol||'—')}</td><td>${pct(r.rendite)}</td><td>${pct(r.kaufen_halten)}</td><td>${pct(r.max_drawdown)}</td><td>${escape(r.trades??'—')}</td><td><span class="pill ${tone}">${escape(label)}</span><br><small class="muted">${escape(v.note)}</small></td><td><div class="row-actions">${v.active?`<button data-loop="deactivate" data-version="${escape(v.version)}">Abschalten</button>`:v.tradable?`<button data-loop="activate" data-version="${escape(v.version)}">Einschalten</button>`:''}<button data-loop="retest" data-version="${escape(v.version)}" ${testing?'disabled':''}>Neu testen</button></div></td></tr>`;}).join('')||'<tr><td colspan="8" class="empty">Keine Strategie-Versionen gefunden.</td></tr>';
   $('loop-errors').innerHTML=l.errors.map(e=>`<div class="log-row"><time>${escape(e.datum)}</time><span><b>${escape(e.strategie)} v${escape(e.version)}</b>${e.verlust_trades!=null?` · ${escape(e.verlust_trades)} Verlust-Trades`:''} · ${escape(e.problem)} → ${escape(e.aenderung)}${e.ergebnis?` (danach ${escape(e.ergebnis)})`:''}</span></div>`).join('')||'<p class="empty">Noch keine Fehler gespeichert.</p>';
 }
@@ -137,10 +137,10 @@ function render(s) {
   $('train-memory').textContent=`${(s.resources.training_memory_mb/1024).toFixed(1)} GB`;
   $('training-status').textContent=`${s.training.status}${s.training.symbol?' · '+s.training.symbol:''}${s.training.model?' / '+s.training.model:''}`;
   $('training-log').innerHTML=s.training_history.slice(0,12).map(e=>`<div class="log-row"><time>${time(e.at)}</time><span>${escape(e.symbol||'')} ${escape(e.model||'')} · ${escape(e.message)}</span></div>`).join('');
-  $('orders').innerHTML=s.orders.map(o=>`<tr><td>${time(o.at)}</td><td>${escape(o.symbol)}</td><td>${escape(o.strategy||'daily')}</td><td>${signal(o.side.toUpperCase())}</td><td>${escape(o.qty)}</td><td>${escape(o.filled_qty??'—')}</td><td>${o.filled_avg_price?money(Number(o.filled_avg_price)):'—'}</td><td>${escape(o.status)}${o.queued_for_open?`<br><small>Queued for ${escape(o.session)} / limit ${money(Number(o.limit_price))}</small>`:o.limit_price?`<br><small>Limit ${money(Number(o.limit_price))}</small>`:''}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">No orders submitted.</td></tr>';
+  $('orders').innerHTML=s.orders.map(o=>`<tr><td>${time(o.at)}</td><td><small>${o.broker==='trading212'?'Trading 212':'Alpaca'}</small><br>${escape(o.symbol)}</td><td>${escape(o.strategy||'daily')}</td><td>${signal(o.side.toUpperCase())}</td><td>${escape(o.qty)}</td><td>${escape(o.filled_qty??'—')}</td><td>${o.filled_avg_price?money(Number(o.filled_avg_price),o.currency||'USD'):'—'}</td><td>${escape(o.status)}${o.queued_for_open?`<br><small>Queued for ${escape(o.session)} / limit ${money(Number(o.limit_price),o.currency||'USD')}</small>`:o.limit_price?`<br><small>Limit ${money(Number(o.limit_price),o.currency||'USD')}</small>`:''}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">No orders submitted.</td></tr>';
   $('positions').innerHTML=(s.account?.positions||[]).map(p=>`<div class="position"><b>${escape(p.symbol)}${p.strategy?` / ${escape(p.strategy)}`:''}</b><span>${escape(p.qty)} shares</span><span>${money(Number(p.market_value))}</span><span>${money(Number(p.unrealized_pl))} unrealized</span></div>`).join('') || 'No open positions.';
   $('updated').textContent=`LAST UPDATED ${time(s.at)}`;
-  drawChart(s.equity); renderModels(); renderCandles();
+  renderMoney(s); renderTrading212(s); drawChart(s.equity); renderModels(); renderCandles();
 }
 async function refresh() {const serial=++refreshSerial;try{const r=await fetch('/api/state'+(selectedStrategy?'?strategy='+encodeURIComponent(selectedStrategy):''));if(!r.ok)throw Error(`Dashboard request failed (${r.status})`);const snapshot=await r.json();if(serial===refreshSerial)render(snapshot);}catch(e){$('connection').textContent='OFFLINE';$('notice').textContent=e.message+' · displayed information may be stale.';}}
 async function control(action,strategy='all') {try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json','X-Bot-Control':'dashboard'},body:JSON.stringify({action,strategy})});const body=await r.json();if(!r.ok)throw Error(body.error||'Action failed');toast(action==='train'?'Retraining queued.':'Entry setting saved.');await refresh();}catch(e){toast(e.message);}}
@@ -205,4 +205,36 @@ function drawCandles(data) {
   for(let i=0;i<5;i++) {const t=first+(end-first)*i/4;svg+=`<text x="${x(t)}" y="405" text-anchor="middle">${escape(new Date(t).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hour12:false}))}</text>`;}
   $('candles').innerHTML=svg+'</svg>';
 }
+function renderMoney(s) {
+  const m=s.money; if(!m)return;
+  $('combined-money').textContent=money(m.combined.equity,m.combined.currency);
+  $('combined-percent').textContent=percent(m.combined.return_fraction);
+  $('combined-percent').className=(m.combined.return_fraction||0)<0?'sell':'buy';
+  $('combined-money-note').textContent=`${m.combined.message}${m.combined.fx_dates?.length?' · FX '+m.combined.fx_dates.join(', '):''}`;
+  for(const broker of ['alpaca','trading212']) {
+    const b=m[broker];
+    $(broker+'-money').textContent=money(b.equity,b.currency||'USD');
+    $(broker+'-percent').textContent=percent(b.return_fraction);
+    $(broker+'-percent').className=(b.return_fraction||0)<0?'sell':'buy';
+    $(broker+'-money-note').textContent=b.status==='disabled'?'Disabled':`${b.mode?.toUpperCase()||''} · ${b.stale?'CACHED / ':''}${b.status} · cash ${money(b.cash,b.currency||'USD')} · ${time(b.at)}`;
+    $(broker+'-percent-note').textContent=b.return_error|| (b.since?'Since '+time(b.since):'Waiting for a complete funding-history snapshot');
+  }
+  $('money-basis').textContent='Money = total account equity (cash + holdings). '+m.return_basis+'. Percentages measure returns, not account allocation. Demo and live balances are never combined.';
+}
+function renderTrading212(s) {
+  const t=s.trading212; $('trading212').hidden=!t?.enabled; if(!t?.enabled)return;
+  $('t212-state').textContent=`${t.mode.toUpperCase()} · ${t.engine.status.toUpperCase()}`;
+  $('t212-toggle').textContent=t.entries_enabled?'Pause Trading 212 entries':'Enable Trading 212 entries';
+  $('t212-toggle').disabled=!t.configured;
+  const account=t.account,code=account?.currency||'EUR';
+  const budget=Math.min(Number(account?.equity||0)*t.capital_fraction,t.capital_cap||Infinity);
+  $('t212-note').textContent=`${t.engine.message||t.engine.status} · Entries ${t.entries_enabled?'enabled':'paused'} · budget ${money(budget,code)} from this account only · ${t.allow_fx?'Foreign-currency orders allowed (FX fees may apply)':'Same-currency entries only'} · ${t.data_configured?'Market-data key configured':'Set TWELVEDATA_API_KEY and instrument mappings'}${t.halt?' · DRAWDOWN STOP ACTIVE':''}`;
+  $('t212-positions').innerHTML=(account?.positions||[]).map(p=>`<div class="position"><b>${escape(p.symbol)}</b><span>${escape(p.qty)} shares</span><span>${money(Number(p.market_value),p.currency)}</span><span>${money(Number(p.unrealized_pl),p.currency)} unrealized</span></div>`).join('')||'No open Trading 212 positions.';
+}
+async function trading212Control(action) {
+  try {await api('/api/trading212/control',{action});toast('Trading 212 setting saved.');await refresh();} catch(err){toast(err.message);}
+}
+$('t212-toggle').addEventListener('click',()=>trading212Control(state?.trading212?.entries_enabled?'pause':'resume'));
+$('t212-retest').addEventListener('click',()=>trading212Control('retest'));
+$('t212-reset').addEventListener('click',()=>{if(confirm('Reset the Trading 212 drawdown peak? Entries will stay paused.'))trading212Control('reset_peak');});
 refresh(); setInterval(refresh,5000);
