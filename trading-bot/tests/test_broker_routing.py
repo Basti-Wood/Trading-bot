@@ -117,8 +117,18 @@ class MergeGuardTests(unittest.TestCase):
         self.assertEqual(Config().loop_timeout, 900)
 
     def test_secrets_may_not_double_as_the_readonly_token(self):
-        with self.assertRaises(ValueError):
-            Config(readonly_token="k" * 40, trading212_key="k" * 40)
+        cfg = Config(readonly_token="k" * 40, trading212_key="k" * 40)
+        self.assertEqual(cfg.readonly_token, "")
+        self.assertIn("TRADING212_API_KEY", cfg.readonly_problem)
+        self.assertNotIn("k" * 40, cfg.readonly_problem)
+
+    def test_quotes_around_env_values_are_removed(self):
+        env = {"READONLY_API_TOKEN": '"' + "z" * 40 + '"', "TRADING212_API_KEY": "'abc'", "TRADING212_API_SECRET": " def ",
+               "TRADING212_ENABLED": "false", "TRADING_MODE": "both"}
+        with patch.dict(os.environ, env):
+            cfg = Config.from_env()
+        self.assertEqual((cfg.readonly_token, cfg.readonly_problem), ("z" * 40, ""))
+        self.assertEqual((cfg.trading212_key, cfg.trading212_secret), ("abc", "def"))
 
 
 if __name__ == "__main__":

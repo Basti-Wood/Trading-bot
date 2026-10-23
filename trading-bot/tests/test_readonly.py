@@ -70,9 +70,20 @@ class ReadonlyApiTests(PortfolioCase):
         client = create_app(replace(self.cfg, readonly_token=""), self.store).test_client()
         self.assertEqual(client.get("/api/readonly/summary", headers=BEARER).status_code, 404)
         self.assertEqual(client.get("/api/readonly/openapi.json").status_code, 404)
-        for token in ("short", "x" * 31, "has space" + "x" * 30, "dashboard-secret-but-long-enough-0123456789"):
-            with self.assertRaises(ValueError, msg=token):
-                Config(readonly_token=token, password="dashboard-secret-but-long-enough-0123456789")
+        password = "dashboard-secret-but-long-enough-0123456789"
+        cases = {"short": "5 characters long", "x" * 31: "31 characters long", "has space" + "x" * 30: "found ' '",
+                 '"' + "q" * 40 + '"': 'found "', password: "not the same as DASHBOARD_PASSWORD"}
+        for token, reason in cases.items():
+            # An unusable token switches off only the read-only API; the bot itself still starts.
+            cfg = Config(readonly_token=token, password=password)
+            self.assertEqual(cfg.readonly_token, "", token)
+            self.assertIn(reason, cfg.readonly_problem)
+            self.assertNotIn(password, cfg.readonly_problem)
+            client = create_app(replace(self.cfg, readonly_token=token, password=password), self.store).test_client()
+            self.assertEqual(client.get("/api/readonly/summary", headers={"Authorization": "Bearer " + token}).status_code, 404)
+        state = create_app(replace(self.cfg, readonly_token="short"), self.store).test_client().get(
+            "/api/state", auth=("admin", "dashboard-secret")).get_json()["readonly"]
+        self.assertEqual((state["enabled"], state["problem"]), (False, "READONLY_API_TOKEN is 5 characters long; it needs at least 32"))
 
 
 if __name__ == "__main__":

@@ -317,8 +317,8 @@ function drawLoopChart(d) {
 $('loop-chart-symbols').addEventListener('click',e=>{const b=e.target.closest('[data-loop-chart]');if(b){loopChartSymbol=b.dataset.loopChart;loopChartKey='';renderLoopChart(state);}});
 function renderReadonly(r) {
   if(!r) return;
-  $('readonly-state').textContent=r.enabled?`AN · ${r.used_today}/${r.limit} HEUTE`:'AUS';
-  $('readonly-note').innerHTML=r.enabled?`Ein externer Assistent (z. B. ein GPT mit Action) kann mit dem Token aus <code>READONLY_API_TOKEN</code> nur lesen: Zusammenfassung, einzelne Aktien, Trades. Er kann nichts kaufen, verkaufen oder einstellen. Schema für den GPT-Builder: <code>${escape(r.schema_url)}</code>. Höchstens ${escape(r.limit)} Anfragen pro Tag.`:'Aus. Für einen GPT, der einmal am Tag nachschaut: <code>READONLY_API_TOKEN</code> in <code>.env</code> setzen (mindestens 32 zufällige Zeichen) und neu starten.';
+  $('readonly-state').textContent=r.enabled?`AN · ${r.used_today}/${r.limit} HEUTE`:r.problem?'AUS · TOKEN UNGÜLTIG':'AUS';
+  $('readonly-note').innerHTML=r.enabled?`Ein externer Assistent (z. B. ein GPT mit Action) kann mit dem Token aus <code>READONLY_API_TOKEN</code> nur lesen: Zusammenfassung, einzelne Aktien, Trades. Er kann nichts kaufen, verkaufen oder einstellen. Schema für den GPT-Builder: <code>${escape(r.schema_url)}</code>. Höchstens ${escape(r.limit)} Anfragen pro Tag.`:r.problem?`<b class="sell">Aus, weil der Token in .env nicht passt:</b> ${escape(r.problem)}. Der Rest des Bots läuft normal. Neuen Token erzeugen: <code>python -c "import secrets; print(secrets.token_urlsafe(32))"</code>, in <code>.env</code> eintragen, neu starten.`:'Aus. Für einen GPT, der einmal am Tag nachschaut: <code>READONLY_API_TOKEN</code> in <code>.env</code> setzen (mindestens 32 zufällige Zeichen) und neu starten.';
   $('readonly-log').innerHTML=(r.recent||[]).map(e=>`<div class="log-row"><time>${time(e.at)}</time><span>${e.status===200?'':'<b class="sell">abgelehnt</b> · '}${escape(e.path)}${e.agent?` · <span class="muted">${escape(e.agent)}</span>`:''}</span></div>`).join('')||(r.enabled?'<p class="empty">Noch keine Zugriffe.</p>':'');
 }
 function renderMoney(s) {
