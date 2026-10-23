@@ -46,12 +46,30 @@ Antworte auf Deutsch, kurz und ohne Fachchinesisch. Der Nutzer kann nicht progra
 ## Grün oder rot
 Rot, sobald eins zutrifft: Gesamtrendite 0 % oder weniger · maximaler Drawdown über `MAX_DRAWDOWN_PROZENT` · weniger als
 10 Trades (zu wenig, um etwas zu sagen). Sonst grün. So steht es in `urteil()` in `stresstest.py`.
+
 Bei `SYMBOL = "LISTE"` (Wunsch des Nutzers: Aktienliste der Bots plus eigene Aktien, `python liste.py`) gilt `urteil()` für jede
 Aktie einzeln. Es gibt keine Mindestanzahl grüner Aktien und kein Listenurteil als Kaufhürde. Jede Aktie bekommt ihre
 Kennzahlen und ihr eigenes Grün/Rot im JSON-Bericht. Die letzte Zeile zählt nur die grünen Einzeltests. Der Bot vergleicht pro
 Aktie alle aktiven Versionen: höchste Rendite, dann kleinster absoluter Drawdown. Nur ein BUY dieser besten grünen Version kann
 kaufen. Ein niedriger bewertetes BUY überstimmt sie nicht. Eigene externe Aktien bekommen nur Signale. Der Bot wiederholt den
 Stresstest täglich ab 8:00 New Yorker Zeit und auf Wunsch im Dashboard, ohne Strategie-Dateien zu ändern.
+
+## Selbst-Anpassung (Wunsch des Nutzers)
+Jede Strategie bekommt `PARAMETER = {"NAME": [Werte, ...]}` für ihre eigenen Konstanten (höchstens 10 Werte pro Name, nur
+Konstanten, aus denen keine andere Konstante berechnet wird; der Standardwert gehört in die Liste). Der Stresstest wählt dann pro
+Aktie selbst: Für jedes der letzten 2 Jahre sucht er die besten Werte nur in den Jahren davor und handelt damit das unbekannte Jahr.
+Grün oder rot entscheidet nur dieses Ergebnis der letzten 2 Jahre (gleiche Regeln, mindestens 4 Trades statt 10). Die Werte für den
+Live-Handel wählt er über alle 5 Jahre. Der Bot passt jeden Morgen neu an. Die Datei selbst ändert sich nie; die gewählten Werte
+stehen im Bericht (`parameter`, `standard`, `test.jahre`). Ohne `PARAMETER` gilt wie bisher der 5-Jahres-Test. Der Kritiker
+darf keine Listen wählen, die nur die Vergangenheit schönrechnen: wenige, übliche Werte rund um die Idee des Nutzers.
+
+## Intraday-Strategien (Intraday-Loop)
+Will der Nutzer innerhalb eines Tages handeln, bekommt die Strategie `ZEITRAHMEN = "5Min"` (oder `"15Min"`, `"30Min"`, `"1Hour"`).
+Der Stresstest lädt dann rund 60 Handelstage dieser Kerzen (reguläre Handelszeit, New Yorker Uhrzeit) und schließt jede Position
+10 Minuten vor Börsenschluss, nie über Nacht. Grün oder rot entscheiden immer die letzten 20 Handelstage mit vorher angepassten
+Werten (mindestens 10 Trades). Im Bot handelt sie der Intraday-Loop: Signal nach jeder abgeschlossenen Kerze, stündlich neu
+angepasst. Indikatoren, die pro Tag neu starten (z. B. VWAP), rechnen pro Datum (`self.data.index.normalize()`), Beispiel:
+`strategien/intraday_trend_v1.py`. Ohne `ZEITRAHMEN` bleibt alles wie oben (Tageskerzen, Trading-Loop).
 
 ## Im Trading-Bot (Standardweg für Live im Paper-Modus)
 Dieser Ordner liegt im Trading-Bot (`trading-bot/trading-loop`). Der Bot handelt Versionen aus diesem Ordner als dritten Bot

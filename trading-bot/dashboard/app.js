@@ -54,13 +54,13 @@ function renderModels() {
   $('feedback-scores').innerHTML=Object.entries(feedback.scores||{}).map(([id,s])=>`<tr><td>${escape(names[id]||id)}</td><td>${escape(s.observations)}</td><td>${(s.mae*100).toFixed(3)} percentage points</td><td>${(s.direction_accuracy*100).toFixed(1)}%</td></tr>`).join('') || '<tr><td colspan="4" class="empty">Scores appear after the forecast horizon completes.</td></tr>';
   $('feedback-latest').innerHTML=(feedback.latest||[]).map(e=>`<div class="log-row"><time>${time(e.bar_at)}</time><span>Predicted ${percent(e.expected_return)} · observed ${percent(e.actual_return)} · model ${escape(e.model_version)}</span></div>`).join('');
 }
-const BOT_TEXT={daily:'Drei Prognose-Modelle plus eine News-Stimme pro Aktie.',daytrade:'Regelbasierte Setups auf Minutenkerzen. Schließt vor Börsenschluss.',loop:'Wählt pro Aktie die beste grüne aktive Version nach Rendite, dann Drawdown.'};
-const BOT_NAMES={daily:'Prediction-Bot',daytrade:'Daytrading-Bot',loop:'Trading-Loop'};
+const BOT_TEXT={daily:'Drei Prognose-Modelle plus eine News-Stimme pro Aktie.',daytrade:'Regelbasierte Setups auf Minutenkerzen. Schließt vor Börsenschluss.',loop:'Tageskerzen: wählt pro Aktie die beste grüne aktive Version nach Rendite, dann Drawdown.',loop_day:'Intraday-Kerzen: Signal nach jeder Kerze, stündlich neu angepasst, vor Börsenschluss flat.'};
+const BOT_NAMES={daily:'Prediction-Bot',daytrade:'Daytrading-Bot',loop:'Trading-Loop',loop_day:'Intraday-Loop'};
 const allocBots=()=>(state?.strategies||[]).map(st=>st.id).filter(id=>id in BOT_NAMES);
 const pct = value => value == null ? '—' : `${value > 0 ? '+' : ''}${Number(value).toFixed(1)} %`;
 let allocDirty=false;
 function traderCards(s) {
-  const bots=(s.strategies||[]).map(st=>`<article class="panel trader-card"><div class="top section-title"><span class="number">${escape(st.name.toUpperCase())}</span><span class="pill">${st.halt?'DRAWDOWN-STOPP':st.entries_enabled?'EINSTIEGE AN':'PAUSIERT'}</span></div><span class="amount">${money(st.capital_ceiling)}</span><span class="small muted">Gewichtung ${st.weight ?? '—'} · ${Math.round(st.capital_fraction*100)} % vom Bot-Budget · investiert höchstens ${money(st.gross_ceiling)}</span><p class="small muted">${escape(BOT_TEXT[st.id]||'')}</p><span class="small muted">${escape(st.engine.status)}${!st.id.endsWith('loop')?` / Training: ${escape(st.training.status)}`:''}</span><div class="strategy-actions">${st.id.endsWith('loop')?'<a class="button" href="#loop">Strategien</a>':`<button data-view="${escape(st.id)}" aria-pressed="${st.id===selectedStrategy}">${st.id===selectedStrategy?'Prognosen sichtbar':'Prognosen ansehen'}</button>`}<button data-strategy="${escape(st.id)}" data-action="${st.entries_enabled?'pause':'resume'}" ${!s.configured?'disabled':''}>${st.entries_enabled?'Einstiege pausieren':'Einstiege einschalten'}</button></div></article>`);
+  const bots=(s.strategies||[]).map(st=>`<article class="panel trader-card"><div class="top section-title"><span class="number">${escape(st.name.toUpperCase())}</span><span class="pill">${st.halt?'DRAWDOWN-STOPP':st.entries_enabled?'EINSTIEGE AN':'PAUSIERT'}</span></div><span class="amount">${money(st.capital_ceiling)}</span><span class="small muted">Gewichtung ${st.weight ?? '—'} · ${Math.round(st.capital_fraction*100)} % vom Bot-Budget · investiert höchstens ${money(st.gross_ceiling)}</span><p class="small muted">${escape(BOT_TEXT[st.id]||'')}</p><span class="small muted">${escape(st.engine.status)}${!st.id.startsWith('loop')?` / Training: ${escape(st.training.status)}`:''}</span><div class="strategy-actions">${st.id.startsWith('loop')?'<a class="button" href="#loop">Strategien</a>':`<button data-view="${escape(st.id)}" aria-pressed="${st.id===selectedStrategy}">${st.id===selectedStrategy?'Prognosen sichtbar':'Prognosen ansehen'}</button>`}<button data-strategy="${escape(st.id)}" data-action="${st.entries_enabled?'pause':'resume'}" ${!s.configured?'disabled':''}>${st.entries_enabled?'Einstiege pausieren':'Einstiege einschalten'}</button></div></article>`);
   $('strategy-cards').innerHTML=bots.join('');
 }
 function allocationValues() {
@@ -91,15 +91,16 @@ const LOOP_STATUS={bereit:['BEREIT','buy'],gruen:['GRÜN','buy'],rot:['ROT','sel
 function renderLoop(s) {
   const l=s.loop; $('loop').hidden=!l; if(!l) return;
   const st=(s.strategies||[]).find(x=>x.id==='loop');
-  $('loop-state').textContent=l.halt?'DRAWDOWN-STOPP':st?.entries_enabled?'EINSTIEGE AN':'PAUSIERT';
+  $('loop-state').textContent=l.halt?'DRAWDOWN-STOPP':Object.values(l.bots||{}).map(b=>`${b.name}: ${b.entries_enabled?'AN':'PAUSIERT'}`).join(' · ')||(st?.entries_enabled?'EINSTIEGE AN':'PAUSIERT');
   $('loop-halt').hidden=!l.halt;
   if(l.halt) $('loop-halt-text').textContent=`Maximaler Drawdown erreicht (${l.halt.drawdown} % ≥ ${l.halt.limit} %, ${time(l.halt.at)}). Der Trading-Loop hat seine Positionen geschlossen und kauft nichts mehr. Zurücksetzen startet die Messung neu; Einstiege schaltest du danach selbst wieder ein.`;
   $('loop-summary').innerHTML=[['Risikoregeln',l.rules.ok?`Stop ${l.rules.stop_loss} % · Drawdown ${l.rules.max_drawdown} %`:l.rules.message],['Drawdown jetzt',l.drawdown==null?'—':`${l.drawdown.toFixed(1)} %`],['Eingeschaltet',`${l.running.length} Version${l.running.length===1?'':'en'}`],['Ordner',l.available?'verbunden':'nicht gefunden']].map(([k,v])=>`<div><span>${k}</span><strong class="${k==='Risikoregeln'&&!l.rules.ok?'sell':''}">${escape(v)}</strong></div>`).join('');
-  const rt=l.retest, testing=l.retest_requested||rt?.status==='running', done=Object.entries(rt?.done||{});
+  const rt=l.retest, testing=l.retest_requested||l.retest_running, done=Object.entries(rt?.done||{});
   $('loop-retest').disabled=testing||!l.available;
   $('loop-retest').textContent=testing?'Test läuft…':'Alle neu testen';
   const failed=done.filter(([,r])=>r.startsWith('Fehler'));
-  $('loop-retest-status').textContent=`Der Bot testet alle getesteten, unveränderten Versionen jeden Tag ab ${l.retest_hour}:00 New Yorker Zeit neu, damit das 5-Jahres-Fenster aktuell bleibt. Die Strategien selbst ändern sich dabei nicht. `+
+  const rd=l.bots?.loop_day?.retest, intradayText=rd?` Intraday-Loop: ${rd.status==='running'?`läuft (${rd.trigger}) ${rd.current||''}`:`zuletzt ${rd.trigger} ${time(rd.at||rd.started_at)}, ${rd.status}`}.`:'';
+  $('loop-retest-status').textContent=`Tageskerzen-Versionen werden jeden Tag ab ${l.retest_hour}:00 New Yorker Zeit neu getestet und angepasst, Intraday-Versionen zusätzlich alle ${l.intraday_retest_minutes} Minuten während der Handelszeit. Die Strategie-Dateien ändern sich dabei nicht.${intradayText} `+
     (l.retest_requested?'Stresstest startet gleich…':rt?.status==='running'?`Stresstest läuft (${rt.trigger}): ${rt.current||''} · ${done.length} von ${rt.versions.length} fertig.`:
      rt?`Letzter Lauf (${rt.trigger}) ${time(rt.at||rt.started_at)}: ${rt.status==='fertig'?`${done.length} Version${done.length===1?'':'en'} getestet`:rt.status}${rt.message?' · '+rt.message:''}${failed.length?' · '+failed.map(([v,r])=>`${v}: ${r}`).join(' · '):''}`:'');
   const testCell=t=>t?`<span class="pill ${t.gruen?'buy':'sell'}">${t.gruen?'GRÜN':'ROT'}</span><br><small class="muted">${pct(t.rendite)} · DD ${pct(t.max_drawdown)} · ${escape(t.trades)} Trades</small>`:'—';
@@ -146,7 +147,7 @@ async function refresh() {const serial=++refreshSerial;try{const r=await fetch('
 async function control(action,strategy='all') {try{const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json','X-Bot-Control':'dashboard'},body:JSON.stringify({action,strategy})});const body=await r.json();if(!r.ok)throw Error(body.error||'Action failed');toast(action==='train'?'Retraining queued.':'Entry setting saved.');await refresh();}catch(e){toast(e.message);}}
 $('toggle').addEventListener('click',()=>control((state.portfolio_mode==='both'?state.any_entries_enabled:state.entries_enabled)?'pause':'resume'));
 $('train').addEventListener('click',()=>control('train',selectedStrategy||'all'));
-$('symbols').addEventListener('click',e=>{const b=e.target.closest('[data-symbol]');if(b){selected=b.dataset.symbol;renderModels();renderCandles();}});
+$('symbols').addEventListener('click',e=>{const b=e.target.closest('[data-symbol]');if(b){selected=b.dataset.symbol;renderModels();renderCandles();renderForecast();}});
 $('strategy-cards').addEventListener('click',e=>{const view=e.target.closest('[data-view]'), toggle=e.target.closest('[data-strategy]');if(view){selectedStrategy=view.dataset.view;selected=null;refresh();}else if(toggle){control(toggle.dataset.action,toggle.dataset.strategy);}});
 $('allocation-form').addEventListener('input',()=>{allocDirty=true;allocationPreview();});
 $('alloc-reset').addEventListener('click',()=>{if(state?.allocation){fillAllocation(state.allocation);allocationPreview();}});

@@ -73,7 +73,15 @@ Keep `TRADING_MODE=both` once a journal contains both strategies so all existing
 
 The strategy runs unchanged in an isolated `app.loop_runner` subprocess over the stress test's five-year window and costs (0.1% per order). Signals are pending orders after the last completed daily bar: entry = BUY, pending close/flat = SELL, invested = HOLD. BUY targets the next market session and uses the daily entry/queue timing. File/risk changes block entries until retesting. The owning version keeps control of an existing position's exits; explicitly deactivating it closes the position unless an active successor of the same idea takes over. Each whole-share entry carries an OTO stop from `risiko.py`; fractional protection is enforced by the engine. There is no take-profit for the loop. The loop reads risk values without executing the file and stops/ closes its positions when the configured account-peak drawdown is reached. Restarting leaves entries paused.
 
-`stresstest.py` retests unchanged versions daily from 08:00 New York time and on demand. LISTE reports save `aktien[symbol]` with that stock's metrics and verdict, including individual data errors. The list summary (`ergebnis=einzeltests`) is informational. Strategy files and `risiko.py` are never changed by retesting. Reports already in the repository are historical evidence and are not rewritten by this rebuild.
+**Self-tuning (walk-forward).** A strategy may declare `PARAMETER = {"NAME": [values, ...]}` for its own module constants (all eight bundled strategies do; at most 10 values per constant and 36 combinations per fit). For each stock, `stresstest.pruefe` then:
+
+1. for each of the last two years, picks the combination with the best *return − ½·|drawdown|* (at least the pro-rated 10 trades and the `risiko.py` drawdown limit) using only the years **before** it, and trades that unseen year with it;
+2. judges the stock on those two out-of-sample years only: green needs a positive return, drawdown within `MAX_DRAWDOWN_PROZENT` and at least 4 trades (10 per 5 years, pro-rated);
+3. picks the live values on all five years.
+
+So the verdict never comes from values that already knew the prices they are tested on. The report keeps per stock `parameter`, `standard`, the yearly picks (`test.jahre`) and the five-year figures for information (`gesamt`). The daily 08:00 retest re-tunes every stock as the window moves; strategy files are never changed (values are set in memory for each run). Strategies without `PARAMETER` keep the previous five-year verdict. The bot reuses a report's tuned values and verdict when its hash and `risiko.py` values match and it is at most 7 days older than the latest bar; a stock the report does not cover is tuned by `app.loop_runner` itself (about 2 s per stock; `TRADING_LOOP_TIMEOUT_SECONDS` now defaults to 900). Walk-forward testing reduces, but does not remove, overfitting: two test years are a small sample and the parameter lists themselves were chosen by people who had seen past markets.
+
+`stresstest.py` retests unchanged versions daily from 08:00 New York time and on demand; the dashboard's "Alle neu testen" also includes edited files (for example after adding `PARAMETER`). LISTE reports save `aktien[symbol]` with that stock's metrics and verdict, including individual data errors. The list summary (`ergebnis=einzeltests`) is informational. Strategy files and `risiko.py` are never changed by retesting. Reports already in the repository are historical evidence and are not rewritten by this rebuild.
 
 
 ### Daily strategy
@@ -175,11 +183,45 @@ The report combines these per-stock summaries with a separate Llama market overv
 
 Set `FREELLM_BASE_URL` and `FREELLM_API_KEY` for your proxy. Leave `FREELLM_MODELS` empty to discover an available Llama model via `/models?available=true`, or set one installed Llama model ID. Only one model is used per stock. Cached daily forecasts keep their original chronology and learning labels.
 
+### Intraday-Loop (trading-loop strategies on intraday candles)
+
+A strategy file with `ZEITRAHMEN = "5Min"` (also `15Min`, `30Min`, `1Hour`) is traded by a fourth bot, **Intraday-Loop** (`loop_day`), with its own weight in *Deine Trader* (starts at 0). Files without `ZEITRAHMEN` stay with the daily Trading-Loop. `strategien/intraday_trend_v1.py` is an example (EMA cross above the session VWAP, 5-minute bars, tunable `PARAMETER`); it is untested until you run its stress test.
+
+* **Stress test:** about 60 trading days (90 calendar days) of IEX regular-session bars in New York time, cached for 30 minutes. The strategy runs unchanged inside a wrapper that cancels entries and closes the position on every bar ending 10 minutes or less before its session's close (half days included), so no test trade is held overnight. The walk-forward always applies: values are chosen on the sessions before each half of the last 20 sessions and judged on those 20 unseen sessions; green needs a positive return, drawdown within `risiko.py` and at least 10 trades. At least 40 sessions of history are required.
+* **Re-tuning:** at 08:00 New York time like daily versions, plus every 60 minutes while the market is open. Each bot only re-tests its own versions; "Alle neu testen" asks both.
+* **Signals:** after every completed bar (20 seconds grace for the data feed), one bar request per timeframe covers all of the bot's stocks; each active version is evaluated in the same isolated `app.loop_runner` subprocess and reuses the report's tuned values when the report is from today or yesterday. A BUY is valid only for the bar right after its signal bar. Exits: the strategy's own sell signal, the `risiko.py` stop (broker OTO stop), the `risiko.py` account drawdown halt, and flattening 10 minutes before the actual close (`DAYTRADE_FLATTEN_MINUTES`). Entries use fresh quotes, a 60-second unfilled-entry cancel, numbered client order IDs and at most `DAYTRADE_MAX_ENTRIES_PER_SYMBOL` entries per stock and day. Paper only.
+* **Limits:** 20 test sessions are a small sample, IEX volume is a single exchange, and the backtest fills at the next bar's open without spread or partial fills. Intraday strategies trade often; the 0.1% cost per order matters more than on daily candles.
+
+### Trading-loop candle chart
+
+In the Trading-Loop section, choose a stock to see `GET /api/loop/chart/<symbol>?bot=loop|loop_day`: the last 130 daily (or intraday) candles, the deciding version's own indicators (`self.I(...)`; price-scale lines on the candles, oscillators such as ADX/RSI in a lower pane), its backtest buys/sells with the current tuned values, the live values next to the defaults, the yearly walk-forward picks and the current signal. The chart comes from the same subprocess run that produces the signal; `/api/state` omits it to stay small.
+
+### Forecast versus reality
+
+Under *Inside the models*, `GET /api/predictions/<symbol>?strategy=daily|daytrade` draws candles (about 90 daily sessions, or the latest session's five-minute bars) with every model's **recorded** forecast in price terms: reference price × (1 + predicted return) at the forecast's target candle, next to the actually observed price (white diamonds) and this bot's fills (▲/▼). Daily reference is the next session's open and the target the open after it; intraday reference is the input bar's close and the target 15 minutes later. Open forecasts are dashed; for daily ones the next open is still unknown, so they use the latest close as an indicative reference. Points come only from the immutable experience records used for learning, never recomputed after the fact. Legend checkboxes hide single models; the table lists the latest eight forecasts with direction hits in green. Bars are cached for 2 minutes (intraday) or 30 minutes (daily). The order journal now also records Alpaca's `filled_at`.
+
 ### Day-trading candle chart
 
 Select the day-trading view and a monitored stock to see the dependency-free SVG chart. `GET /api/candles/<symbol>` returns today's **completed one-minute regular-session OHLCV**, aligned indicator arrays (VWAP, EMA9/20, five-minute opening range, upper/lower noise boundaries), observed fired setup signals and an available current 15-minute model forecast. Data uses New York session dates, exchange close times including half-days, and the same indicator formulas as the playbook. Opening-range levels appear only after five bars complete. Setup markers are signals, not fills.
 
 The engine refreshes chart snapshots alongside its playbook polls. On a cold dashboard read, the endpoint fetches today's bars for a monitored stock. Empty sessions, missing baselines and stale forecasts are explicit: unavailable forecasts are `null`, never extrapolated. A current forecast starts at its completed five-minute input close, is accepted for 90 seconds and is omitted if its horizon crosses the session close. The endpoint uses the dashboard's existing authentication; it cannot create orders.
+
+## Read-only access for a GPT (or any assistant)
+
+An external assistant can check the bots, for example once a day, without being able to change anything. No WebSocket is needed: it calls plain HTTPS `GET` endpoints with its own bearer token.
+
+1. Create a token: `python -c "import secrets; print(secrets.token_urlsafe(32))"` and put it in `.env` as `READONLY_API_TOKEN=...`. Optionally set `READONLY_API_DAILY_LIMIT` (default 100 requests per New York day). Make sure `DASHBOARD_ORIGINS` is your public HTTPS address (default `https://trade.bastiwood.com`). Restart.
+2. In the ChatGPT GPT builder: *Configure → Actions → Create new action → Import from URL* `https://<your address>/api/readonly/openapi.json`. Authentication: *API Key*, auth type *Bearer*, paste the token.
+3. Instruct the GPT, e.g.: "Call getDailySummary once, then getStock for stocks with open positions or BUY/SELL decisions, and write me a short report."
+
+| Endpoint | Content |
+|---|---|
+| `GET /api/readonly/summary` | Account, positions (with owning bot), each bot's switch/weight/halt and current decision per stock (models' outlooks, or the trading-loop version, signal and walk-forward test), the daily Llama news report, orders of the last 24 h, latest errors |
+| `GET /api/readonly/stocks/{symbol}` | Everything every bot currently thinks about one stock, including each model's forecast accuracy so far and the news rationale/headlines, plus its last decisions |
+| `GET /api/readonly/trades?days=7` | Orders and fills of the last 1–30 days |
+| `GET /api/readonly/openapi.json` | The schema (no token needed; it holds no data) |
+
+The token only works on these routes and only for `GET`; it does not open the dashboard, and the dashboard password does not open these routes. Secrets (Alpaca/FreeLLM keys, passwords) are never included. Every access is logged and shown in the dashboard's *GPT-Lesezugriff* panel together with today's count; failed token attempts are logged too. Text fields named `*_text` hold news or model-written text and are marked as untrusted data, because news headlines could contain instructions aimed at an AI. To revoke access, remove or change `READONLY_API_TOKEN` and restart. A reverse proxy in front of the app must pass the `Authorization` header through and must not add its own login for `/api/readonly/`.
 
 ## Hardware limits
 

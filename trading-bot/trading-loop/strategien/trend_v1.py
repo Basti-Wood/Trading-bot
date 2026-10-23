@@ -8,6 +8,8 @@ SYMBOL = "LISTE"   # Aktienliste der Bots plus eigene Aktien
 
 SCHNELL = 20
 LANGSAM = 50
+# Selbst-Anpassung: der Stresstest wählt pro Aktie Werte aus diesen Listen (Walk-forward, siehe stresstest.py).
+PARAMETER = {"SCHNELL": [10, 15, 20, 30], "LANGSAM": [40, 50, 80, 100, 150, 200]}
 
 
 def ema(werte, tage):

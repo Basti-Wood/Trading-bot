@@ -9,6 +9,8 @@ SYMBOL = "LISTE"   # Aktienliste der Bots plus eigene Aktien
 SPANNE_TAGE = 20   # Spanne wandert mit: Hoch und Tief der vorherigen 20 Tage
 LINIEN = 10
 LOS = 0.95 / LINIEN   # Anteil des Kapitals pro Linie, alle Linien zusammen höchstens 95 %
+# Selbst-Anpassung: der Stresstest wählt pro Aktie Werte aus diesen Listen (Walk-forward, siehe stresstest.py).
+PARAMETER = {"SPANNE_TAGE": [10, 15, 20, 30, 40, 60]}
 
 
 def hoch(werte, tage):

@@ -11,6 +11,8 @@ SCHNELL = 20
 LANGSAM = 50
 ADX_TAGE = 14
 ADX_TREND = 20     # üblicher Schwellenwert laut Quellen: über 20 gilt als Trend
+# Selbst-Anpassung: der Stresstest wählt pro Aktie Werte aus diesen Listen (Walk-forward, siehe stresstest.py).
+PARAMETER = {"SCHNELL": [10, 20, 30], "LANGSAM": [50, 80, 100, 150], "ADX_TREND": [15, 20, 25]}
 
 
 def ema(werte, tage):

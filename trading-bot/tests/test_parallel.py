@@ -20,7 +20,7 @@ class ParallelTests(TempCase):
         super().setUp()
         self.cfg = replace(self.cfg, trading_mode='both', symbols=('AAA', 'BBB', 'CCC'))
         self.portfolio = PortfolioEngine(self.cfg, self.store)
-        self.daily, self.daytrade, self.loop = self.portfolio.engines
+        self.daily, self.daytrade, self.loop, self.loop_day = self.portfolio.engines
         self.broker = Mock(base='paper')
         self.broker.account.return_value = {'status': 'ACTIVE', 'equity': '10000', 'last_equity': '10000',
             'cash': '10000', 'buying_power': '10000'}
@@ -237,7 +237,7 @@ class ParallelTests(TempCase):
         daily = client.get('/api/state?strategy=daily').get_json()
         daytrade = client.get('/api/state?strategy=daytrade').get_json()
         self.assertEqual(daily['portfolio_mode'], 'both')
-        self.assertEqual([s['id'] for s in daily['strategies']], ['daily', 'daytrade', 'loop'])
+        self.assertEqual([s['id'] for s in daily['strategies']], ['daily', 'daytrade', 'loop', 'loop_day'])
         self.assertEqual(daily['symbols'][0]['forecast']['horizon'], 'daily')
         self.assertEqual(daytrade['symbols'][0]['forecast']['horizon'], '15 minutes')
         self.assertEqual({p['strategy'] for p in daily['account']['positions']}, {'daily', 'daytrade'})
@@ -261,7 +261,7 @@ class UpgradeTests(TempCase):
         self.store.set('model:SPY', {'version': 'existing-daily'})
         self.store.reserve_order('ensemble-legacy', {'symbol': 'SPY', 'side': 'buy', 'status': 'filled'})
         portfolio = PortfolioEngine(replace(self.cfg, trading_mode='both'), self.store)
-        daily, daytrade, _ = portfolio.engines
+        daily, daytrade, _, _ = portfolio.engines
         self.assertTrue(daily.store.get('owned:SPY'))
         self.assertFalse(daytrade.store.get('owned:SPY'))
         self.assertEqual(daily.store.get('model:SPY')['version'], 'existing-daily')

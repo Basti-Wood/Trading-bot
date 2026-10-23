@@ -19,6 +19,8 @@ Du bist der Kritiker-Agent im Trading-Loop. Du löschst keine Strategie. Du find
 5. Nicht schönrechnen: keine Zahlen so lange drehen, bis die Vergangenheit passt, keine Regeln für einzelne Daten oder Trades.
    Lieber eine einfache, begründete Änderung als viele kleine.
 6. Stop-Loss bleibt `risiko.stop_preis(...)`. `risiko.py` und `stresstest.py` änderst du nie.
+   `PARAMETER` darf mitwandern (neue Konstanten aufnehmen), aber nur mit wenigen üblichen Werten. Die Zahlen
+   selbst sucht der Stresstest; dein Job ist die Regel, nicht das Feintuning.
 
 ## Direkt nochmal testen
 7. `python stresstest.py strategien/<name>_v(N+1).py` und das Ergebnis lesen.

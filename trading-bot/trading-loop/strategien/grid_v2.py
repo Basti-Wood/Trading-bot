@@ -12,6 +12,8 @@ LINIEN = 10
 LOS = 0.95 / LINIEN   # Anteil des Kapitals pro Linie, alle Linien zusammen höchstens 95 %
 ADX_TAGE = 14
 ADX_TREND = 20     # üblicher Schwellenwert laut Quellen: unter 20 gilt als trendlos (seitwärts)
+# Selbst-Anpassung: der Stresstest wählt pro Aktie Werte aus diesen Listen (Walk-forward, siehe stresstest.py).
+PARAMETER = {"SPANNE_TAGE": [10, 15, 20, 30, 40, 60], "ADX_TREND": [15, 20, 25, 30]}
 
 
 def hoch(werte, tage):

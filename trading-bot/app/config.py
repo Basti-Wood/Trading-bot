@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 
-CHILD_MODES = ("loop",)
+CHILD_MODES = ("loop", "loop_day")
 
 
 def flag(name, default=False):
@@ -78,6 +78,9 @@ class Config:
     llm_key: str = ""
     llm_models: tuple = ()
     origins: tuple = ("https://trade.bastiwood.com",)
+    # Read-only API for an external assistant (e.g. a GPT Action); empty = disabled.
+    readonly_token: str = ""
+    readonly_daily_limit: int = 100
     # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
     loop_dir: Path = None
     loop_timeout: int = 300
@@ -140,11 +143,16 @@ class Config:
                   "daytrade_close_minutes": (5, 60), "daytrade_capital_share": (.05, .95),
                   "strategy_fraction": (.05, 1), "min_votes": (2, 4),
                   "daytrade_run_minutes": (5, 240), "daytrade_trail_trigger": (.001, .05),
-                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 600)}
+                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 1800)}
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
                 raise ValueError(f"{name} must be between {lo} and {hi}")
+        if self.readonly_token and (len(self.readonly_token) < 32 or not re.fullmatch(r"[A-Za-z0-9_\-.~]+", self.readonly_token)
+                                    or self.readonly_token in {self.password, self.api_key, self.api_secret, self.llm_key}):
+            raise ValueError("READONLY_API_TOKEN must be at least 32 letters/digits (-_.~ allowed) and differ from every other secret")
+        if not 1 <= self.readonly_daily_limit <= 5000:
+            raise ValueError("READONLY_API_DAILY_LIMIT must be between 1 and 5000")
         if self.position_fraction > self.gross_fraction:
             raise ValueError("Position limit cannot exceed gross exposure limit")
         if self.daytrade_run_minutes < self.daytrade_hold_minutes:
@@ -159,8 +167,18 @@ class Config:
 
     @property
     def loop(self):
-        """Trades tested trading-loop stock strategy files."""
-        return self.trading_mode == "loop"
+        """Trades tested trading-loop stock strategy files (daily or intraday candles)."""
+        return self.trading_mode in {"loop", "loop_day"}
+
+    @property
+    def loop_intraday(self):
+        """The intraday trading-loop: strategy files with ZEITRAHMEN below one day."""
+        return self.trading_mode == "loop_day"
+
+    @property
+    def same_day(self):
+        """Strategies that trade inside one session and are flat before the close."""
+        return self.trading_mode in {"daytrade", "loop_day"}
 
 
     @property

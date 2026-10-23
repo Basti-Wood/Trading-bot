@@ -9,6 +9,8 @@ SYMBOL = "LISTE"   # Aktienliste der Bots plus eigene Aktien
 EINSTIEG_TAGE = 55   # Turtle-System 2: Donchian-Hoch der vorherigen 55 Tage
 AUSSTIEG_TAGE = 20   # Turtle-System 2: Donchian-Tief der vorherigen 20 Tage (zieht mit, wirkt als Trailing-Stop)
 VOLUMEN_TAGE = 20    # "hohes Volumen" = über dem Durchschnitt der vorherigen 20 Tage
+# Selbst-Anpassung: der Stresstest wählt pro Aktie Werte aus diesen Listen (Walk-forward, siehe stresstest.py).
+PARAMETER = {"EINSTIEG_TAGE": [30, 40, 55, 70], "AUSSTIEG_TAGE": [10, 15, 20, 30], "VOLUMEN_TAGE": [10, 20]}
 
 
 def hoch(werte, tage):
