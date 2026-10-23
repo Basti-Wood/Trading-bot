@@ -76,7 +76,24 @@ def orders(store, since):
     return out
 
 
-def summary(config, store, contexts, now=None):
+def trading212(secondary, now=None):
+    """The separate Trading 212 book (non-US listings): its own account, stocks and orders."""
+    if secondary is None:
+        return {"enabled": False}
+    account = secondary.get("account") or {}
+    return {"enabled": True, "entries_enabled": secondary.get("entries_enabled", False), "halt": secondary.get("halt"),
+            "engine": clip((secondary.get("engine") or {}).get("status"), 40),
+            "account": {k: account.get(k) for k in ("equity", "cash", "currency", "mode", "at")},
+            "positions": [{k: p.get(k) for k in ("symbol", "qty", "market_value", "unrealized_pl", "currency")}
+                          for p in account.get("positions", [])],
+            "decisions": [{"symbol": r.get("symbol"), "version": r.get("version"), "strategy_signal": r.get("signal"),
+                           "action": r.get("action"), "reason_text": clip(r.get("reason")),
+                           "test": {k: (r.get("test") or {}).get(k) for k in ("gruen", "urteil", "rendite", "max_drawdown", "trades")}}
+                          for r in secondary.get("stocks", [])][:MAX_SYMBOLS],
+            "orders_last_24h": orders(secondary, (now or datetime.now(timezone.utc)) - timedelta(hours=24))}
+
+
+def summary(config, store, contexts, now=None, secondary=None, money=None):
     now = now or datetime.now(timezone.utc)
     account = store.get("account") or {}
     weights = allocation(config, store)["weights"] if config.trading_mode == "both" else {}
@@ -108,11 +125,12 @@ def summary(config, store, contexts, now=None):
     return {"note": NOTE, "at": now.isoformat(), "mode": "paper" if config.paper else "live",
             "account": {k: account.get(k) for k in ("equity", "cash", "daily_pnl", "market_open", "loss_halt", "at")},
             "positions": positions(store), "bots": bots, "news": news,
+            "money": money, "trading212": trading212(secondary, now),
             "orders_last_24h": orders(store, now - timedelta(hours=24)),
             "errors": [{"at": e.get("at"), "message_text": clip(e.get("message"), 200)} for e in store.history("error", 5)]}
 
 
-def stock(config, store, contexts, symbol):
+def stock(config, store, contexts, symbol, secondary=None):
     views = {}
     for cfg, state in contexts.values():
         forecast = state.get(f"forecast:{symbol}")
@@ -130,15 +148,26 @@ def stock(config, store, contexts, symbol):
                                 "headlines_text": [clip(s.get("title"), 180) for s in (research.get("sources") or [])[:6]]}
         if any(v for v in view.values()):
             views[cfg.trading_mode] = view
+    row = next((r for r in (secondary.get("stocks", []) if secondary else []) if r.get("symbol") == symbol), None)
+    if row:
+        views["trading212"] = {"decision": {"action": row.get("action"), "reason_text": clip(row.get("reason"))},
+                               "loop": {"version": row.get("version"), "strategy_signal": row.get("signal"), "test": row.get("test")}}
     held = next((p for p in positions(store) if p["symbol"] == symbol), None)
+    if held is None and secondary is not None:
+        held = next(({**p, "owner": "trading212"} for p in (secondary.get("account") or {}).get("positions", [])
+                     if p.get("symbol") == symbol), None)
     recent = [{"at": e.get("at"), "bot": e.get("strategy"), "action": e.get("action"), "reason_text": clip(e.get("reason"))}
               for e in store.history("decision", 300) if e.get("symbol") == symbol][:15]
     return {"note": NOTE, "symbol": symbol, "position": held, "bots": views, "recent_decisions": recent}
 
 
-def trades(store, days, now=None):
+def trades(store, days, now=None, secondary=None):
     now = now or datetime.now(timezone.utc)
-    return {"note": NOTE, "days": days, "orders": orders(store, now - timedelta(days=days))}
+    since = now - timedelta(days=days)
+    rows = [{**o, "broker": "alpaca"} for o in orders(store, since)]
+    if secondary is not None:
+        rows += [{**o, "broker": "trading212"} for o in orders(secondary, since)]
+    return {"note": NOTE, "days": days, "orders": sorted(rows, key=lambda o: o.get("at") or "", reverse=True)}
 
 
 def openapi(config):
@@ -159,7 +188,8 @@ def openapi(config):
             "paths": {
                 "/api/readonly/summary": get("getDailySummary", "Account, positions, every bot's current decisions, news report, last 24 h of orders"),
                 "/api/readonly/stocks/{symbol}": get("getStock", "Everything each bot currently thinks about one stock",
-                    [{"name": "symbol", "in": "path", "required": True, "schema": {"type": "string", "pattern": "^[A-Z][A-Z0-9.\\-]{0,9}$"}}]),
+                    [{"name": "symbol", "in": "path", "required": True, "description": "US symbol (Alpaca) or Trading 212 ticker",
+                      "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.\\-]{0,63}$"}}]),
                 "/api/readonly/trades": get("getTrades", "Orders and fills of the last N days",
                     [{"name": "days", "in": "query", "required": False, "schema": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7}}]),
             }}

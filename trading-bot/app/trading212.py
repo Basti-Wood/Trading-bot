@@ -14,7 +14,7 @@ import pandas as pd
 import requests
 
 from .broker import BrokerError
-from .loop import INSTRUMENT
+from .loop import INSTRUMENT, STOCK
 
 
 def number(value, *, nonnegative=False):
@@ -69,6 +69,10 @@ def mappings(config):
                 or not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{10}", spec["isin"])
                 or not re.fullmatch(r"[A-Za-z0-9_.\-]{1,30}", spec["symbol"])):
             raise BrokerError("Each Trading 212 mapping needs ticker, symbol, MIC, currency and ISIN")
+        if STOCK.fullmatch(ticker):
+            # A bare US-style symbol (e.g. "SIE") would also enter Alpaca's US book. Trading 212's
+            # own tickers carry an exchange suffix (e.g. "SIEd_EQ"); copy them from its metadata.
+            raise BrokerError(f"Trading 212 mapping {ticker!r} looks like a US symbol; use the exact Trading 212 ticker (e.g. SIEd_EQ)")
     return data
 
 

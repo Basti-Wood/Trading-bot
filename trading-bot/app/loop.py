@@ -134,7 +134,9 @@ def version_info(config, path, rules=None):
         status, note = "bereit", "Getestet; jede Aktie entscheidet einzeln"
     if not (symbol == LIST or isinstance(symbol, str) and INSTRUMENT.fullmatch(symbol)):
         status, note = "nicht_handelbar", "Nur Aktien und ETFs mit gültiger Instrument-ID werden unterstützt"
-    return {**info, "status": status, "note": note, "tradable": status == "bereit" and rules["ok"], "bot": "loop"}
+    elif timeframe != DAILY and timeframe not in TIMEFRAMES:
+        status, note = "nicht_handelbar", f"ZEITRAHMEN muss {', '.join(TIMEFRAMES)} sein (oder fehlen für Tageskerzen)"
+    return {**info, "status": status, "note": note, "tradable": status == "bereit" and rules["ok"], "bot": bot_for(timeframe)}
 
 
 def catalogue(config):
@@ -293,7 +295,13 @@ def evaluate(config, record, frames):
         if bars is None:
             continue
         close = float(bars["close"].iloc[-1])
-        results[symbol] = {**item, "bar_at": bars.index[-1].isoformat(), "target_session": bars.attrs.get("target_session"),
+        bar_at = bars.index[-1]
+        if minutes:
+            # The last completed regular-session bar the strategy saw (bot frames may hold extended hours).
+            bar_at = converted[symbol].index[-1].tz_localize("America/New_York").tz_convert("UTC")
+            close = float(converted[symbol]["Close"].iloc[-1])
+        results[symbol] = {**item, "bar_at": bar_at.isoformat(), "target_session": bars.attrs.get("target_session"),
+                           "timeframe": record.get("timeframe", DAILY),
                            "market_timezone": bars.attrs.get("market_timezone", "America/New_York"),
                            "last_close": close if math.isfinite(close) else None}
     return {"version": record["version"], "sha256": record["sha256"], "symbols": results, "at": utcnow()}
@@ -352,4 +360,4 @@ def ranking(entry):
 
 
 def _source(item):
-    return {k: item.get(k) for k in ("bar_at", "target_session", "last_close", "to", "market_timezone")}
+    return {k: item.get(k) for k in ("bar_at", "target_session", "last_close", "to", "timeframe", "market_timezone")}

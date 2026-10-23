@@ -194,7 +194,7 @@ A strategy file with `ZEITRAHMEN = "5Min"` (also `15Min`, `30Min`, `1Hour`) is t
 
 ### Trading-loop candle chart
 
-In the Trading-Loop section, choose a stock to see `GET /api/loop/chart/<symbol>?bot=loop|loop_day`: the last 130 daily (or intraday) candles, the deciding version's own indicators (`self.I(...)`; price-scale lines on the candles, oscillators such as ADX/RSI in a lower pane), its backtest buys/sells with the current tuned values, the live values next to the defaults, the yearly walk-forward picks and the current signal. The chart comes from the same subprocess run that produces the signal; `/api/state` omits it to stay small.
+In the Trading-Loop section, choose a stock to see `GET /api/loop/chart/<symbol>?bot=loop|loop_day|trading212`: the last 130 daily (or intraday) candles, the deciding version's own indicators (`self.I(...)`; price-scale lines on the candles, oscillators such as ADX/RSI in a lower pane), its backtest buys/sells with the current tuned values, the live values next to the defaults, the yearly walk-forward picks and the current signal. The chart comes from the same subprocess run that produces the signal; `/api/state` omits it to stay small.
 
 ### Forecast versus reality
 
@@ -216,9 +216,9 @@ An external assistant can check the bots, for example once a day, without being 
 
 | Endpoint | Content |
 |---|---|
-| `GET /api/readonly/summary` | Account, positions (with owning bot), each bot's switch/weight/halt and current decision per stock (models' outlooks, or the trading-loop version, signal and walk-forward test), the daily Llama news report, orders of the last 24 h, latest errors |
+| `GET /api/readonly/summary` | Combined/per-broker money, Alpaca account, positions (with owning bot), the Trading 212 book (account, decisions, orders) when enabled, each bot's switch/weight/halt and current decision per stock (models' outlooks, or the trading-loop version, signal and walk-forward test), the daily Llama news report, orders of the last 24 h, latest errors |
 | `GET /api/readonly/stocks/{symbol}` | Everything every bot currently thinks about one stock, including each model's forecast accuracy so far and the news rationale/headlines, plus its last decisions |
-| `GET /api/readonly/trades?days=7` | Orders and fills of the last 1–30 days |
+| `GET /api/readonly/trades?days=7` | Orders and fills of the last 1–30 days, both brokers, each row marked with its broker |
 | `GET /api/readonly/openapi.json` | The schema (no token needed; it holds no data) |
 
 The token only works on these routes and only for `GET`; it does not open the dashboard, and the dashboard password does not open these routes. Secrets (Alpaca/FreeLLM keys, passwords) are never included. Every access is logged and shown in the dashboard's *GPT-Lesezugriff* panel together with today's count; failed token attempts are logged too. Text fields named `*_text` hold news or model-written text and are marked as untrusted data, because news headlines could contain instructions aimed at an AI. To revoke access, remove or change `READONLY_API_TOKEN` and restart. A reverse proxy in front of the app must pass the `Authorization` header through and must not add its own login for `/api/readonly/`.
