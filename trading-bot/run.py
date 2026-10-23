@@ -20,6 +20,9 @@ def main():
     engine = MultiBrokerEngine(config, store)
     atexit.register(engine.shutdown)
     engine.start()
+    if config.readonly_problem:
+        print(f"WARNING: read-only GPT API is off: {config.readonly_problem}. "
+              "Create one with: python -c \"import secrets; print(secrets.token_urlsafe(32))\"", flush=True)
     print(f"Trading dashboard: http://{config.host}:{config.port} | {'PAPER' if config.paper else 'LIVE'} | {config.trading_mode} strategies | entries paused", flush=True)
     try:
         serve(create_app(config, store), host=config.host, port=config.port, threads=4)

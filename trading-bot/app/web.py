@@ -366,7 +366,7 @@ def create_app(config, store, broker_factory=Alpaca):
             allocation={**allocation(config, store), "budget": budget, "gross_fraction": config.gross_fraction,
                         "position_fraction": config.position_fraction} if parallel else None,
             loop=loop_state(equity), news_report=store.get("news_report"),
-            readonly={"enabled": bool(config.readonly_token), "limit": config.readonly_daily_limit,
+            readonly={"enabled": bool(config.readonly_token), "problem": config.readonly_problem, "limit": config.readonly_daily_limit,
                       "used_today": (store.get("readonly_usage") or {}).get("count", 0)
                       if (store.get("readonly_usage") or {}).get("day") == readonly.day_key() else 0,
                       "schema_url": (config.origins[0] if config.origins else "") + "/api/readonly/openapi.json",

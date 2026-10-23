@@ -8,6 +8,33 @@ import re
 CHILD_MODES = ("loop", "loop_day")
 
 
+def readonly_token_problem(config):
+    """Which rule an optional READONLY_API_TOKEN breaks; never repeats the token or another secret."""
+    token = config.readonly_token
+    if not token:
+        return ""
+    if len(token) < 32:
+        return f"READONLY_API_TOKEN is {len(token)} characters long; it needs at least 32"
+    bad = sorted({c if c.isprintable() and c != " " else repr(c) for c in token if not re.fullmatch(r"[A-Za-z0-9_\-.~]", c)})
+    if bad:
+        return f"READONLY_API_TOKEN may only contain letters, digits and - _ . ~ (found {' '.join(bad)})"
+    others = {"DASHBOARD_PASSWORD": config.password, "ALPACA_API_KEY": config.api_key, "ALPACA_SECRET_KEY": config.api_secret,
+              "FREELLM_API_KEY": config.llm_key, "TRADING212_API_KEY": config.trading212_key,
+              "TRADING212_API_SECRET": config.trading212_secret, "TWELVEDATA_API_KEY": config.twelvedata_key}
+    same = [name for name, value in others.items() if value and value == token]
+    if same:
+        return f"READONLY_API_TOKEN must be its own random value, not the same as {', '.join(same)}"
+    return ""
+
+
+def env_value(name, default=""):
+    """A value from the environment; quotes around it (KEY="abc" in a Docker env file) are removed."""
+    value = os.getenv(name, default).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1].strip()
+    return value
+
+
 def flag(name, default=False):
     value = os.getenv(name, str(default)).lower().strip()
     if value not in {"true", "false"}:
@@ -81,6 +108,8 @@ class Config:
     # Read-only API for an external assistant (e.g. a GPT Action); empty = disabled.
     readonly_token: str = ""
     readonly_daily_limit: int = 100
+    # Why an unusable READONLY_API_TOKEN was switched off (shown at startup and in the dashboard).
+    readonly_problem: str = ""
     # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
     loop_dir: Path = None
     loop_timeout: int = 900
@@ -148,10 +177,11 @@ class Config:
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
                 raise ValueError(f"{name} must be between {lo} and {hi}")
-        if self.readonly_token and (len(self.readonly_token) < 32 or not re.fullmatch(r"[A-Za-z0-9_\-.~]+", self.readonly_token)
-                                    or self.readonly_token in {self.password, self.api_key, self.api_secret, self.llm_key,
-                                                               self.trading212_key, self.trading212_secret, self.twelvedata_key}):
-            raise ValueError("READONLY_API_TOKEN must be at least 32 letters/digits (-_.~ allowed) and differ from every other secret")
+        problem = readonly_token_problem(self)
+        if problem:
+            # The read-only API is optional: an unusable token switches only that API off, never the bot.
+            object.__setattr__(self, "readonly_token", "")
+            object.__setattr__(self, "readonly_problem", problem)
         if not 1 <= self.readonly_daily_limit <= 5000:
             raise ValueError("READONLY_API_DAILY_LIMIT must be between 1 and 5000")
         if self.position_fraction > self.gross_fraction:
@@ -260,8 +290,8 @@ class Config:
             loop_dir=(Path(__file__).resolve().parent.parent / os.getenv("TRADING_LOOP_DIR", "trading-loop")).resolve(),
             loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "900")),
             trading212_enabled=flag("TRADING212_ENABLED"),
-            trading212_key=os.getenv("TRADING212_API_KEY", "").strip(),
-            trading212_secret=os.getenv("TRADING212_API_SECRET", "").strip(),
+            trading212_key=env_value("TRADING212_API_KEY"),
+            trading212_secret=env_value("TRADING212_API_SECRET"),
             trading212_paper=flag("TRADING212_PAPER", True),
             trading212_allow_live=flag("TRADING212_ALLOW_LIVE_TRADING"),
             trading212_instruments=(Path(__file__).resolve().parent.parent / os.getenv("TRADING212_INSTRUMENTS_FILE", "config/trading212-instruments.json")).resolve(),
@@ -271,5 +301,5 @@ class Config:
             twelvedata_key=os.getenv("TWELVEDATA_API_KEY", "").strip(),
             reporting_currency=os.getenv("REPORTING_CURRENCY", "EUR").strip().upper(),
             origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()),
-            readonly_token=os.getenv("READONLY_API_TOKEN", "").strip(),
+            readonly_token=env_value("READONLY_API_TOKEN"),
             readonly_daily_limit=int(os.getenv("READONLY_API_DAILY_LIMIT", "100")))
