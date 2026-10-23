@@ -14,7 +14,7 @@ from app.store import StrategyStore
 from app.trading212 import mappings
 from app.trading212_engine import context
 from app.web import create_app
-from test_loop import make_loop_dir, add_version
+from test_loop import PortfolioCase, make_loop_dir, add_version
 from test_trading212 import Fixture, TICKER, SPEC
 
 DASHBOARD = Path(__file__).resolve().parents[1] / "dashboard"
@@ -113,6 +113,17 @@ class ResumeAllTests(Fixture):
         own = client.post("/api/trading212/control", json={"action": "resume"}, headers=HEADERS)
         self.assertEqual(own.status_code, 409)
         self.assertIn("TWELVEDATA_API_KEY", own.get_json()["error"])
+
+
+class EngineErrorMessageTests(PortfolioCase):
+    def test_a_failing_bot_is_named_with_its_error_and_the_others_keep_running(self):
+        self.loop_day.cycle = Mock(side_effect=BrokerError("Alpaca HTTP 403 for GET /v2/stocks/bars"))
+        self.portfolio.cycle()
+        message = self.store.get("portfolio_engine")["message"]
+        self.assertIn("Intraday-Loop: Alpaca HTTP 403 for GET /v2/stocks/bars", message)
+        self.assertIn("other bots keep running", message)
+        self.assertEqual(self.loop_day.store.get("engine")["status"], "error")
+        self.assertNotEqual((self.daily.store.get("engine") or {}).get("status"), "error")
 
 
 class MergeGuardTests(unittest.TestCase):
