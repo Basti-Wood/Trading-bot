@@ -29,6 +29,8 @@ def create_app(config, store, broker_factory=Alpaca):
     contexts = {cfg.trading_mode: (cfg, state) for cfg, state in strategy_contexts(config, store)}
     parallel = config.trading_mode == "both"
     secondary_cfg, secondary = trading212_context(config) if config.trading212_enabled else (None, None)
+    secondary_daily_cfg, secondary_daily = trading212_context(config, "daily") if config.trading212_enabled else (None, None)
+    secondary_books = {"loop": secondary, "daily": secondary_daily} if secondary else {}
 
     def secondary_state():
         if secondary is None:
@@ -36,7 +38,16 @@ def create_app(config, store, broker_factory=Alpaca):
         return {"enabled": True, "configured": config.trading212_configured,
                 "mode": "paper" if config.trading212_paper else "live",
                 "live_execution_allowed": config.trading212_allow_live,
-                "entries_enabled": secondary.get("entries_enabled", False),
+                "entries_enabled": any(book.get("entries_enabled", False) for book in secondary_books.values()),
+                "loop": {"entries_enabled": secondary.get("entries_enabled", False), "share": 1 - config.trading212_prediction_share,
+                         "ready_problem": secondary_resume_error("loop")},
+                "prediction": {"entries_enabled": secondary_daily.get("entries_enabled", False),
+                    "share": config.trading212_prediction_share, "min_votes": config.trading212_min_votes,
+                    "training": secondary_daily.get("training", {"status": "waiting for daily data"}),
+                    "training_history": secondary_daily.history("training", 12),
+                    "stocks": secondary_daily.get("stocks", []), "halt": secondary_daily.get("halt"),
+                    "ready_problem": secondary_resume_error("daily")},
+                "execution_policy": "parallel; each listing's own exchange hours; exits remain active when entries are paused",
                 "engine": secondary.get("engine", {"status": "starting"}),
                 "account": secondary.get("account"), "stocks": secondary.get("stocks", []),
                 "halt": secondary.get("halt"), "rules": loop.risk_rules(config),
@@ -45,7 +56,7 @@ def create_app(config, store, broker_factory=Alpaca):
                 "data_configured": config.trading212_data_source == "yahoo" or bool(config.twelvedata_key),
                 "mappings": mapping_state(),
                 "errors": secondary.get("data_errors", {}), "orders": secondary.orders(30),
-                "ready_problem": secondary_resume_error()}
+                "ready_problem": secondary_resume_error("daily")}
 
     def loop_bots():
         """The trading-loop bots: daily candles ("loop") and intraday candles ("loop_day")."""
@@ -365,7 +376,7 @@ def create_app(config, store, broker_factory=Alpaca):
                          "halt": st.get("halt") if c.loop else None,
                          "engine": st.get("engine", {"status": "starting"}),
                          "training": st.get("training", {"status": "waiting"})} for c, st in contexts.values()],
-            any_entries_enabled=any(st.get("entries_enabled", False) for _, st in contexts.values()) or bool(secondary and secondary.get("entries_enabled", False)),
+            any_entries_enabled=any(st.get("entries_enabled", False) for _, st in contexts.values()) or any(book.get("entries_enabled", False) for book in secondary_books.values()),
             allocation={**allocation(config, store), "budget": budget, "gross_fraction": config.gross_fraction,
                         "position_fraction": config.position_fraction} if parallel else None,
             loop=loop_state(equity), news_report=store.get("news_report"),
@@ -412,14 +423,17 @@ def create_app(config, store, broker_factory=Alpaca):
             for _, state in targets:
                 state.set("entries_enabled", False)
             if selected == "all" and secondary:
-                secondary.set("entries_enabled", False)
+                for book in secondary_books.values():
+                    book.set("entries_enabled", False)
         elif action == "resume":
-            if not config.configured:
-                return jsonify(error="Configure Alpaca keys first"), 409
-            if not store.get("account"):
-                return jsonify(error="Wait for a successful Alpaca account connection"), 409
-            if store.get("account", {}).get("loss_halt"):
-                return jsonify(error="Daily loss halt is active"), 409
+            primary_error = ("Configure Alpaca keys first" if not config.configured else
+                             "Wait for a successful Alpaca account connection" if not store.get("account") else
+                             "Alpaca daily-loss halt is active" if store.get("account", {}).get("loss_halt") else None)
+            if primary_error and (selected != "all" or secondary is None or secondary_blocker()):
+                return jsonify(error=primary_error), 409
+            if primary_error:
+                targets = []
+                warning = primary_error + "; Alpaca remains paused. Trading 212 runs independently."
             if selected in LOOP_BOTS and contexts[selected][1].get("halt"):
                 return jsonify(error="Drawdown-Stopp aus risiko.py aktiv. Erst im Trading-Loop den Höchststand zurücksetzen."), 409
             for cfg, state in targets:
@@ -429,38 +443,46 @@ def create_app(config, store, broker_factory=Alpaca):
             if selected == "all" and secondary:
                 # Trading 212 is a separate book: if it is not ready it stays paused, but it never
                 # keeps the Alpaca bots from starting.
-                blocker, missing = secondary_blocker(), secondary_resume_error()
+                blocker, missing = secondary_blocker(), secondary_resume_error("daily")
                 if blocker:
                     warning = f"Alpaca bots enabled. Trading 212 stays paused: {blocker}"
                 else:
                     # Switched on together with the others; anything still missing blocks single buys.
-                    secondary.set("entries_enabled", True)
+                    for book in secondary_books.values():
+                        if not book.get("halt"):
+                            book.set("entries_enabled", True)
                     if missing:
-                        warning = f"All bots enabled. Trading 212 cannot buy yet: {missing}"
+                        warning = (warning + " " if warning else "") + f"Trading 212 entries enabled, but cannot buy yet: {missing}"
         elif action == "train":
-            if not config.configured:
-                return jsonify(error="Alpaca credentials are required for training data"), 409
+            if not config.configured and not (selected == "all" and config.trading212_configured):
+                return jsonify(error="Configure a broker/data connection for training"), 409
             for _, state in targets:
                 state.set("train_requested", True)
+            if selected == "all" and secondary_daily:
+                secondary_daily.set("train_requested", True)
+                secondary.set("retest_requested", True)
         else:
             return jsonify(error="Unknown action"), 400
         store.event("control", {"action": action, "strategy": selected})
         return jsonify(ok=True, warning=warning)
 
-    def secondary_blocker():
+    def secondary_blocker(strategy="all"):
         """Reasons Trading 212 entries may not be switched on at all."""
         if not config.trading212_configured:
             return "set TRADING212_API_KEY and TRADING212_API_SECRET in .env and restart"
         if not config.trading212_paper and not config.trading212_allow_live:
             return "Trading 212 live execution requires TRADING212_ALLOW_LIVE_TRADING=true"
-        if secondary.get("halt"):
+        if secondary and secondary.root.get("broker_daily_loss_day") == str(pd.Timestamp.now(tz="UTC").date()):
+            return "Trading 212 account daily-loss halt is active"
+        targets = list(secondary_books.values()) if strategy == "all" else [secondary_books[strategy]]
+        if targets and all(book.get("halt") for book in targets):
             return "Trading 212 drawdown stop is active; reset its peak first"
         return None
 
-    def secondary_resume_error():
+    def secondary_resume_error(strategy="loop"):
         """First thing still missing before Trading 212 can buy; switching on is still allowed unless it is a blocker.
         The engine checks data, mappings and connection again before every single order."""
-        blocker = secondary_blocker()
+        blocker = secondary_blocker(strategy)
         if blocker:
             return blocker
         if config.trading212_data_source == "twelvedata" and not config.twelvedata_key:
@@ -470,10 +492,11 @@ def create_app(config, store, broker_factory=Alpaca):
             return f"fix {mapped['file']}: {mapped['error']}"
         if not mapped["count"]:
             return f"map at least one listing in {mapped['file']} (see docs/trading212.md)"
-        if not loop.risk_rules(config)["ok"]:
+        if strategy == "loop" and not loop.risk_rules(config)["ok"]:
             return "trading-loop risk rules in risiko.py are incomplete"
         daily_versions = loop.active_versions(contexts["loop"][1]) if "loop" in contexts else {}
-        if not any(record.get("symbol") == loop.LIST for record in daily_versions.values()):
+        if strategy == "loop" and not any(record.get("symbol") == loop.LIST or record.get("symbol") in trading212_mappings(config)
+                                          for record in daily_versions.values()):
             return "switch on a daily Trading-Loop version (SYMBOL = \"LISTE\"); Trading 212 runs those on its listings"
         engine = secondary.get("engine") or {}
         account = secondary.get("account") or {}
@@ -502,23 +525,34 @@ def create_app(config, store, broker_factory=Alpaca):
             return jsonify(error="Set TRADING212_ENABLED=true first"), 409
         body = request.get_json(silent=True)
         action = body.get("action") if isinstance(body, dict) else None
+        strategy = body.get("strategy", "all") if isinstance(body, dict) else None
+        if strategy not in {"all", "daily", "loop"}:
+            return jsonify(error="Unknown Trading 212 strategy"), 400
+        targets = list(secondary_books.values()) if strategy == "all" else [secondary_books[strategy]]
         if action == "pause":
-            secondary.set("entries_enabled", False)
+            for book in targets:
+                book.set("entries_enabled", False)
         elif action == "resume":
-            error = secondary_blocker()
+            error = secondary_blocker(strategy)
             if error:
                 return jsonify(error=error), 409
-            secondary.set("entries_enabled", True)
-            missing = secondary_resume_error()
+            for book in targets:
+                if not book.get("halt"):
+                    book.set("entries_enabled", True)
+            missing = secondary_resume_error("daily" if strategy == "all" else strategy)
             if missing:
                 store.event("control", {"broker": "trading212", "action": action})
                 return jsonify(ok=True, warning=f"Trading 212 enabled, but it cannot buy yet: {missing}")
         elif action == "retest":
             secondary.set("retest_requested", True)
+        elif action == "train":
+            secondary_daily.set("train_requested", True)
+            secondary.set("retest_requested", True)
         elif action == "reset_peak":
-            secondary.set("entries_enabled", False)
-            secondary.set("halt", None)
-            secondary.set("equity_peak", None)
+            for book in targets:
+                book.set("entries_enabled", False)
+                book.set("halt", None)
+                book.set("equity_peak", None)
         else:
             return jsonify(error="Unknown Trading 212 action"), 400
         store.event("control", {"broker": "trading212", "action": action})

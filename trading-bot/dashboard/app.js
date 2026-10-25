@@ -131,9 +131,9 @@ function render(s) {
   $('pnl').className=(s.account?.daily_pnl||0)<0?'sell':'buy';
   $('capital').textContent=money(s.settings.capital); $('allocation').textContent=`${Math.round(s.settings.capital_fraction*100)}% of equity${s.settings.capital_cap?` (cap ${money(s.settings.capital_cap)})`:''} · ${Math.round(s.settings.position_fraction*100)}% per position · ${Math.round(s.settings.gross_fraction*100)}% max gross`;
   $('entry-state').textContent=parallel?`${strategies.filter(x=>x.entries_enabled).length} / ${strategies.length} enabled`:s.entries_enabled?'Enabled':'Paused';
-  $('toggle').textContent=parallel?(s.any_entries_enabled?'Alle Bots pausieren':'Alle Bots einschalten'):(s.entries_enabled?'Pause entries':`Enable ${s.mode} entries`); $('toggle').disabled=!s.configured;
+  $('toggle').textContent=parallel?(s.any_entries_enabled?'Alle Bots pausieren':'Alle Bots einschalten'):(s.entries_enabled?'Pause entries':`Enable ${s.mode} entries`); $('toggle').disabled=!s.configured&&!s.trading212?.configured;
   $('train').disabled=!s.configured||['running','starting'].includes(s.training.status);
-  $('notice').textContent=!s.configured?'Setup needed: add Alpaca keys and a dashboard password to .env, then restart.':s.account?.loss_halt?'Daily loss limit reached. New entries are disabled; protective exits remain active.':`${(parallel?s.portfolio_engine?.message:null) || s.engine.message || s.engine.status} · Alpaca (US): ${s.settings.feed.toUpperCase()} data, ${s.account?.market_open?'market open':'market closed'}${s.trading212?.enabled?` · Trading 212: ${s.trading212.entries_enabled?'entries on':'paused'}${s.trading212.ready_problem?' – '+s.trading212.ready_problem:` – ${s.trading212.engine?.message||s.trading212.engine?.status||''}`}`:''}`;
+  $('notice').textContent=!s.configured?(s.trading212?.configured?'Alpaca setup pending; Trading 212 runs independently. See its status below.':'Setup needed: add broker keys and a dashboard password, then restart.'):s.account?.loss_halt?'Daily loss limit reached. New entries are disabled; protective exits remain active.':`${(parallel?s.portfolio_engine?.message:null) || s.engine.message || s.engine.status} · Alpaca (US): ${s.settings.feed.toUpperCase()} data, ${s.account?.market_open?'market open':'market closed'}${s.trading212?.enabled?` · Trading 212: ${s.trading212.entries_enabled?'entries on':'paused'}${s.trading212.ready_problem?' – '+s.trading212.ready_problem:` – ${s.trading212.engine?.message||s.trading212.engine?.status||''}`}`:''}`;
   $('memory').textContent=s.resources.available===false?'Telemetry unavailable':`${s.resources.process_memory_mb.toFixed(0)} MB / 6 GB`; $('memory-bar').value=s.resources.process_memory_mb;
   $('train-memory').textContent=`${(s.resources.training_memory_mb/1024).toFixed(1)} GB`;
   $('training-status').textContent=`${s.training.status}${s.training.symbol?' · '+s.training.symbol:''}${s.training.model?' / '+s.training.model:''}`;
@@ -346,12 +346,23 @@ function renderTrading212(s) {
   const budget=Math.min(Number(account?.equity||0)*t.capital_fraction,t.capital_cap||Infinity);
   $('t212-note').textContent=`${t.engine.message||t.engine.status} · Entries ${t.entries_enabled?'enabled':'paused'} · budget ${money(budget,code)} from this account only · ${t.allow_fx?'Foreign-currency orders allowed (FX fees may apply)':'Same-currency entries only'} · Kursdaten: ${t.data_source==='yahoo'?'Yahoo Finance (kostenlos)':'Twelve Data'+(t.data_configured?'':' – TWELVEDATA_API_KEY fehlt')} · ${t.mappings?.error?`Liste ${escape(t.mappings.file)}: ${escape(t.mappings.error)}`:`${t.mappings?.count??0} Werte aus ${escape(t.mappings?.file||'')} geladen`}${t.halt?' · DRAWDOWN STOP ACTIVE':''}`;
   if(t.ready_problem&&!t.entries_enabled) $('t212-note').textContent+=` · Noch nicht startklar: ${t.ready_problem}. Die Alpaca-Bots laufen davon unabhängig.`;
+  const prediction=t.prediction||{},lp=t.loop||{},training=prediction.training||{};
+  $('t212-daily-toggle').textContent=prediction.entries_enabled?'Pause prediction entries':'Enable prediction entries';
+  $('t212-loop-toggle').textContent=lp.entries_enabled?'Pause loop entries':'Enable loop entries';
+  $('t212-daily-toggle').disabled=$('t212-loop-toggle').disabled=!t.configured;
+  $('t212-train').disabled=!t.configured||['running','starting'].includes(training.status);
+  $('t212-training').textContent=`${training.status||'Waiting for data'}${training.symbol?' · '+training.symbol:''}${training.message?' · '+training.message:''} · prediction budget ${money(budget*(prediction.share??.5),code)} · loop budget ${money(budget*(lp.share??.5),code)} · ${prediction.min_votes||3}/3 model votes required. ${prediction.ready_problem||''}${lp.ready_problem?' · Loop: '+lp.ready_problem:''}`;
+  $('t212-predictions').innerHTML=(prediction.stocks||[]).map(r=>`<tr><td>${escape(r.symbol)}</td><td>${(r.models||[]).map(m=>`<div>${escape(m.name)}: ${outlook(m.signal)} ${percent(m.expected_return)}</div>`).join('')||'Waiting for trained models'}</td><td>${percent(r.expected_return)}</td><td>${r.eligible===true?'Validated':r.eligible===false?'Research only: validation did not pass':'Not trained'}<br><small>${escape(r.quality?.status||'waiting')}</small></td><td>${signal(r.action||'WAIT')}<br><small>${escape(r.reason)}</small></td></tr>`).join('')||'<tr><td colspan="5" class="empty">Daily data is loading. Each stock trains independently; one missing listing does not stop the others.</td></tr>';
+  $('t212-training-log').innerHTML=(prediction.training_history||[]).map(e=>`<div class="log-row"><time>${time(e.at)}</time><span>${escape(e.symbol||'')} ${escape(e.model||'')} · ${escape(e.message)}</span></div>`).join('');
   $('t212-positions').innerHTML=(account?.positions||[]).map(p=>`<div class="position"><b>${escape(p.symbol)}</b><span>${escape(p.qty)} shares</span><span>${money(Number(p.market_value),p.currency)}</span><span>${money(Number(p.unrealized_pl),p.currency)} unrealized</span></div>`).join('')||'No open Trading 212 positions.';
 }
-async function trading212Control(action) {
-  try {await api('/api/trading212/control',{action});toast('Trading 212 setting saved.');await refresh();} catch(err){toast(err.message);}
+async function trading212Control(action,strategy='all') {
+  try {const r=await api('/api/trading212/control',{action,strategy});toast(r.warning||'Trading 212 setting saved.');await refresh();} catch(err){toast(err.message);}
 }
 $('t212-toggle').addEventListener('click',()=>trading212Control(state?.trading212?.entries_enabled?'pause':'resume'));
 $('t212-retest').addEventListener('click',()=>trading212Control('retest'));
+$('t212-daily-toggle').addEventListener('click',()=>trading212Control(state?.trading212?.prediction?.entries_enabled?'pause':'resume','daily'));
+$('t212-loop-toggle').addEventListener('click',()=>trading212Control(state?.trading212?.loop?.entries_enabled?'pause':'resume','loop'));
+$('t212-train').addEventListener('click',()=>trading212Control('train','daily'));
 $('t212-reset').addEventListener('click',()=>{if(confirm('Reset the Trading 212 drawdown peak? Entries will stay paused.'))trading212Control('reset_peak');});
 refresh(); setInterval(refresh,5000);

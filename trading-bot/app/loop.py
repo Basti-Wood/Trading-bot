@@ -360,4 +360,4 @@ def ranking(entry):
 
 
 def _source(item):
-    return {k: item.get(k) for k in ("bar_at", "target_session", "last_close", "to", "timeframe", "market_timezone")}
+    return {k: item.get(k) for k in ("bar_at", "target_session", "last_close", "to", "timeframe", "market_timezone", "source_signature")}

@@ -1,5 +1,19 @@
 # Alpaca and Trading 212
 
+## Parallel predictions and strategy execution
+
+Both brokers run independently during each listing's exchange hours. The US open does not stop Trading 212 buying on an open European exchange. Each uses its own funds, data and order journal. Pausing entries still permits protective exits. No positions or cash are transferred between brokers.
+
+Trading 212 now has **two strategies**: daily predictions from Ridge, Extra Trees and Histogram Gradient Boosting, plus the daily strategy-file Trading-Loop. Previously this account only ran the loop; it had no prediction training/forecasting worker. The models now train on validated non-US daily candles, publish separate votes and validation status per stock, expire independently and learn from their own recorded outcomes. The default requires all three models to agree; `TRADING212_MIN_AGREEING_VOTES` accepts 2 or 3. Unvalidated or expired models cannot authorize buys. US stock news is not reused as a fourth vote for European listings.
+
+`TRADING212_PREDICTION_SHARE=0.50` reserves half this account's configured bot budget for predictions and half for the daily loop. Each share has its own position/gross limits; an account-wide cash/exposure check still applies. A stock belongs to one strategy at a time, so the other cannot add to it or sell it. Dashboard switches separately control prediction entries and loop entries; **Retrain non-US models** requests training. Prediction training needs no activated loop version and no Alpaca credentials.
+
+Alpaca and Trading 212 share **one training-process slot** with the existing memory/time watchdog. Training cannot block either broker's risk polling. One failed strategy does not stop the other strategy receiving validated data. Broker-held stops are added for filled shares, and exits remain pending across stop cancellation even if the forecast changes.
+
+The free feed supports the daily strategies. Alpaca continues to run its US intraday prediction/playbook and intraday strategy-file loop. Intraday strategy files are not evaluated against Trading 212 daily candles. The Yahoo service is unofficial and can be delayed or unavailable; listing-identity, quote-age, limit-order and session checks remain in force.
+
+The Trading 212 dashboard displays the three model votes, training errors, validation/freshness and decision reason per stock. Its read-only API includes the prediction book too. The six combined/separate money and return figures are unchanged. Existing loop positions/journals are retained; prediction state has its own namespace in the isolated Trading 212 database. Entries restart paused, while data collection and training start automatically when configured.
+
 Alpaca executes **US-listed stocks/ETFs only**. Trading 212 Invest executes **verified non-US stock/ETF listings only**. Routing follows the listing's exchange, not company nationality or ISIN country. A US-listed foreign-company ADR still belongs to Alpaca. Unknown exchanges, crypto/CFDs and mismatched data cannot trade. A failed broker never routes an order to the other broker.
 
 Alpaca retains prediction, day trading and the trading-loop. Trading 212 adds a separate **daily trading-loop**, using the versions activated in the existing Trading-Loop section. `SYMBOL = "LISTE"` evaluates each broker's own list independently. US results never authorize a European purchase: each listing needs its own green test and BUY from its highest-return green version (ties: smallest absolute drawdown). Existing unowned positions are shown, not adopted.

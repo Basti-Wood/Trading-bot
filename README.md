@@ -11,3 +11,5 @@ Market discovery now screens Alpaca-listed tradable US equities and runs forecas
 The trading-loop evaluates and ranks strategy versions separately for each stock. The dashboard includes daily per-stock Llama news summaries, a separate market overview and one-minute SVG day-trading charts with playbook indicators and current 15-minute forecasts.
 
 Trading 212 Invest can run the trading-loop on mapped non-US listings alongside Alpaca's US-only execution. Accounts have separate cash, orders, ownership and risk state. The dashboard shows A/B combined equity/return, C/D Alpaca equity/return, and E/F Trading 212 equity/return, with currency conversion and funding adjustments. See [Trading 212 setup](trading-bot/docs/trading212.md) for API permissions, market-data requirements and demo configuration.
+
+Trading 212 now runs the three daily prediction models alongside its daily strategy-file loop. Brokers use independent sessions and cash, with a shared training slot and separate strategy budgets. See the [parallel-strategy setup](trading-bot/docs/trading212.md#parallel-predictions-and-strategy-execution).

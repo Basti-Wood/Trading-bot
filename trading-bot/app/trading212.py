@@ -245,7 +245,8 @@ class Trading212:
                        and now - opening < pd.Timedelta(hours=24) and close is not None
                        and close - now < pd.Timedelta(hours=24))
         prior_close = next((at for at, kind in reversed(past) if kind == "CLOSE"), None)
-        return {"open": is_open, "opening": opening, "close": close, "prior_close": prior_close}
+        next_open = next((at for at, kind in relevant if at > now and kind == "OPEN"), None)
+        return {"open": is_open, "opening": opening, "close": close, "prior_close": prior_close, "next_open": next_open}
 
 
 class MarketData:
@@ -286,7 +287,8 @@ class MarketData:
 
     def bars(self, instrument, spec, now):
         # Daily candles change once per exchange day: one request per listing and day saves the quota.
-        key = (spec["symbol"], spec["mic"])
+        key = (spec["symbol"], spec["mic"], spec["currency"], spec["isin"], instrument.get("isin"),
+               instrument.get("currencyCode"), instrument.get("type"))
         cached = getattr(self, "_bars", {}).get(key)
         if cached is not None and cached[0] == now.tz_convert(cached[1].attrs["market_timezone"]).date():
             return cached[1]
@@ -415,14 +417,17 @@ class YahooData:
 
     def check(self, meta, spec, instrument):
         self.verify(meta, spec, instrument)
-        if (YAHOO_EXCHANGES.get(meta.get("exchangeName")) != spec["mic"]
+        if (meta.get("symbol") != self.symbol(spec)
+                or YAHOO_EXCHANGES.get(meta.get("exchangeName")) != spec["mic"]
                 or currency(meta.get("currency")) != currency(spec["currency"])
-                or YAHOO_TYPES.get(meta.get("instrumentType")) not in {instrument.get("type"), None}):
-            raise BrokerError("Market-data listing, exchange or currency does not match the broker instrument")
+                or YAHOO_TYPES.get(meta.get("instrumentType")) != instrument.get("type")):
+            raise BrokerError("Market-data symbol, type, exchange or currency does not match the broker instrument")
 
     def bars(self, instrument, spec, now):
         symbol = self.symbol(spec)
-        cached = self._bars.get(symbol)
+        key = (symbol, spec["mic"], spec["currency"], spec["isin"], instrument.get("isin"),
+               instrument.get("currencyCode"), instrument.get("type"))
+        cached = self._bars.get(key)
         if cached is not None and cached[0] == now.tz_convert(cached[1].attrs["market_timezone"]).date():
             return cached[1]
         result = self.chart(symbol, {"range": "6y", "interval": "1d", "events": "split,div"})
@@ -445,7 +450,7 @@ class YahooData:
         except (KeyError, TypeError, ValueError, IndexError):
             raise BrokerError("Need at least 1,000 valid completed daily candles with an exchange timezone") from None
         frame = complete_sessions(frame, zone, now)
-        self._bars[symbol] = (now.tz_convert(zone).date(), frame)
+        self._bars[key] = (now.tz_convert(zone).date(), frame)
         return frame
 
     def quote(self, instrument, spec, now):

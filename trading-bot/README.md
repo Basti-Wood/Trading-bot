@@ -2,7 +2,7 @@
 
 Three open-source forecasting models + independent FreeLLM news analysis + Alpaca and optional Trading 212 execution, in one server application. No custom neural network, genetic optimizer, CUDA installation, or paid model API is required by the forecasting engine.
 
-**Two brokers:** Alpaca trades US listings; Trading 212 Invest trades verified non-US listings through a separate daily trading-loop. Each uses its own account funds and order journal. The dashboard shows combined and separate money/returns. See [Trading 212 setup and accounting](docs/trading212.md) before enabling the second broker. The strategy-mode and allocator sections below describe the Alpaca book; Trading 212 has its own budget, switch and market-data requirements.
+**Two brokers:** Alpaca trades US listings; Trading 212 Invest trades verified non-US listings through parallel daily predictions and a daily trading-loop. Each uses its own account funds and order journal. The dashboard shows combined and separate money/returns. See [Trading 212 setup and accounting](docs/trading212.md) before enabling the second broker. The strategy-mode and allocator sections below describe the Alpaca book; Trading 212 has its own budget, switch and market-data requirements.
 
 ## Start on your server
 

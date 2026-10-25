@@ -225,7 +225,7 @@ def yahoo_chart(days=1100, exchange="GER", currency="EUR", kind="EQUITY", price_
     close = [100. + i * .01 for i in range(days)]
     adj = [c * (.5 if split_day is not None and i < split_day else 1.) for i, c in enumerate(close)]
     stamps = [int(t.timestamp()) for t in index]
-    meta = {"currency": currency, "symbol": "SAP.DE", "exchangeName": exchange, "fullExchangeName": "XETRA",
+    meta = {"currency": currency, "symbol": "SIE.DE", "exchangeName": exchange, "fullExchangeName": "XETRA",
             "instrumentType": kind, "exchangeTimezoneName": "Europe/Berlin", "regularMarketPrice": 214.4,
             "regularMarketTime": int((price_at or index[-1]).timestamp())}
     quote = {"open": close, "high": [c * 1.01 for c in close], "low": [c * .99 for c in close], "close": close,

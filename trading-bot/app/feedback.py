@@ -32,10 +32,11 @@ def capture_forecast(config, store, forecast):
     # A forecast needs a completed input session, not an in-progress daily bar.
     if config.intraday and captured < bar_at + pd.Timedelta(minutes=5):
         raise ValueError("Forecast input bar is not complete")
-    if not config.intraday and captured.tz_convert("America/New_York").date() <= bar_at.tz_convert("America/New_York").date():
+    zone = forecast.get("market_timezone", "America/New_York")
+    if not config.intraday and captured.tz_convert(zone).date() <= bar_at.tz_convert(zone).date():
         complete = pd.Timestamp(forecast.get("input_complete_at")) if forecast.get("input_complete_at") else None
         if (complete is None or complete.tzinfo is None or captured < complete
-                or complete.tz_convert("America/New_York").date() != bar_at.tz_convert("America/New_York").date()
+                or complete.tz_convert(zone).date() != bar_at.tz_convert(zone).date()
                 or complete <= bar_at):
             raise ValueError("Forecast input session is not complete")
     inserted = store.capture_experience({
@@ -52,7 +53,7 @@ def resolve_outcomes(config, store, symbol, bars, now=None):
     now = pd.Timestamp(now or utcnow())
     if config.intraday:
         return resolve_intraday(config, store, symbol, bars, now)
-    zone = "America/New_York"
+    zone = bars.attrs.get("market_timezone", "America/New_York")
     local_today = now.tz_convert(zone).date()
     completed = bars[bars.index.tz_convert(zone).date < local_today]
     changed = 0

@@ -42,6 +42,7 @@ class PortfolioEngine:
         self.stop = threading.Event()
         self.thread = self.monitor = None
         self.turn = self.training_turn = 0
+        self.training_peers = []
         store.set("parallel_enabled", True)
 
     def start(self):
@@ -63,15 +64,27 @@ class PortfolioEngine:
 
     def training_tick(self):
         # Watchdog every existing worker, then admit at most one training process.
-        for engine in self.engines:
-            engine.training_tick(allow_start=False)
-        if any(e.trainer is not None for e in self.engines):
+        workers = [*self.engines, *self.training_peers]
+        failed = set()
+        for engine in workers:
+            try:
+                engine.training_tick(allow_start=False)
+            except Exception as exc:
+                failed.add(engine)
+                engine.store.set("training", {"status": "failed", "message": str(exc)[:200], "at": utcnow()})
+        if any(e.trainer is not None for e in workers):
             return
-        sequence = self.engines[self.training_turn:] + self.engines[:self.training_turn]
+        sequence = workers[self.training_turn:] + workers[:self.training_turn]
         for engine in sequence:
-            engine.training_tick()
+            if engine in failed:
+                continue
+            try:
+                engine.training_tick()
+            except Exception as exc:
+                engine.store.set("training", {"status": "failed", "message": str(exc)[:200], "at": utcnow()})
+                continue
             if engine.trainer is not None:
-                self.training_turn = (self.engines.index(engine) + 1) % len(self.engines)
+                self.training_turn = (workers.index(engine) + 1) % len(workers)
                 break
 
     def monitor_training(self):
