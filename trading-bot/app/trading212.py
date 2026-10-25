@@ -1,7 +1,9 @@
 """Trading 212's official Invest API. No fallback routing or blind POST retries.
 
 API contract: https://docs.trading212.com/_bundle/api.json
-Daily candles/quotes: https://twelvedata.com/docs (explicit listing mappings).
+Daily candles/quotes: Yahoo Finance's public chart endpoint by default (free, covers the European
+exchanges); Twelve Data (https://twelvedata.com/docs) when TRADING212_DATA_SOURCE=twelvedata and a
+plan with European data is available. Both are matched to the exact listing in the mapping file.
 """
 import json
 import math
@@ -243,7 +245,8 @@ class Trading212:
                        and now - opening < pd.Timedelta(hours=24) and close is not None
                        and close - now < pd.Timedelta(hours=24))
         prior_close = next((at for at, kind in reversed(past) if kind == "CLOSE"), None)
-        return {"open": is_open, "opening": opening, "close": close, "prior_close": prior_close}
+        next_open = next((at for at, kind in relevant if at > now and kind == "OPEN"), None)
+        return {"open": is_open, "opening": opening, "close": close, "prior_close": prior_close, "next_open": next_open}
 
 
 class MarketData:
@@ -283,6 +286,17 @@ class MarketData:
             raise BrokerError("Market-data listing, currency or ISIN does not match the broker instrument")
 
     def bars(self, instrument, spec, now):
+        # Daily candles change once per exchange day: one request per listing and day saves the quota.
+        key = (spec["symbol"], spec["mic"], spec["currency"], spec["isin"], instrument.get("isin"),
+               instrument.get("currencyCode"), instrument.get("type"))
+        cached = getattr(self, "_bars", {}).get(key)
+        if cached is not None and cached[0] == now.tz_convert(cached[1].attrs["market_timezone"]).date():
+            return cached[1]
+        frame = self.download_bars(instrument, spec, now)
+        self._bars = {**getattr(self, "_bars", {}), key: (now.tz_convert(frame.attrs["market_timezone"]).date(), frame)}
+        return frame
+
+    def download_bars(self, instrument, spec, now):
         result = self.request("time_series", {"symbol": spec["symbol"], "mic_code": spec["mic"],
             "interval": "1day", "outputsize": 1500, "order": "asc", "adjust": "all"})
         meta = result.get("meta", {})
@@ -291,21 +305,10 @@ class MarketData:
         try:
             frame = pd.DataFrame(result["values"])
             frame.index = pd.DatetimeIndex(pd.to_datetime(frame.pop("datetime"))).tz_localize(zone).tz_convert("UTC")
-            frame = frame[["open", "high", "low", "close", "volume"]].astype(float).sort_index()
-            # Only complete sessions preceding the current exchange day enter the backtest.
-            day = now.tz_convert(zone).date()
-            frame = frame[frame.index.tz_convert(zone).date < day].tail(1300)
-            valid = ((frame[["open", "high", "low", "close"]] > 0).all().all()
-                     and (frame.high >= frame[["open", "close", "low"]].max(axis=1)).all()
-                     and (frame.low <= frame[["open", "close", "high"]].min(axis=1)).all()
-                     and (frame.volume >= 0).all() and not frame.isna().any().any()
-                     and all(math.isfinite(v) for v in frame.to_numpy().flat))
-            if len(frame) < 1000 or frame.index.has_duplicates or not valid:
-                raise ValueError()
-            frame.attrs["market_timezone"] = zone
-            return frame
+            frame = frame[["open", "high", "low", "close", "volume"]].astype(float)
         except (KeyError, TypeError, ValueError):
             raise BrokerError("Need at least 1,000 valid completed daily candles with an exchange timezone") from None
+        return complete_sessions(frame, zone, now)
 
     def quote(self, instrument, spec, now):
         result = self.request("quote", {"symbol": spec["symbol"], "mic_code": spec["mic"]})
@@ -333,3 +336,151 @@ class MarketData:
         if rate <= 0 or not -10 <= (now - at).total_seconds() <= 120:
             raise BrokerError("Execution FX rate is stale")
         return rate * scale
+
+
+def complete_sessions(frame, zone, now):
+    """Validated, completed daily candles before the current exchange day (the backtest's input)."""
+    try:
+        frame = frame.sort_index()
+        day = now.tz_convert(zone).date()
+        frame = frame[frame.index.tz_convert(zone).date < day].tail(1300)
+        valid = ((frame[["open", "high", "low", "close"]] > 0).all().all()
+                 and (frame.high >= frame[["open", "close", "low"]].max(axis=1) - 1e-9).all()
+                 and (frame.low <= frame[["open", "close", "high"]].min(axis=1) + 1e-9).all()
+                 and (frame.volume >= 0).all() and not frame.isna().any().any()
+                 and all(math.isfinite(v) for v in frame.to_numpy().flat))
+        if len(frame) < 1000 or frame.index.has_duplicates or not valid:
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise BrokerError("Need at least 1,000 valid completed daily candles with an exchange timezone") from None
+    frame.attrs["market_timezone"] = zone
+    return frame
+
+
+# Yahoo Finance symbol suffix and exchange code for each MIC the router supports.
+YAHOO_SUFFIX = {"XETR": ".DE", "XPAR": ".PA", "XAMS": ".AS", "XBRU": ".BR", "XMIL": ".MI", "XMAD": ".MC",
+                "XLIS": ".LS", "XLON": ".L", "XSWX": ".SW", "XWBO": ".VI", "XTSE": ".TO", "XTKS": ".T"}
+YAHOO_EXCHANGES = {"GER": "XETR", "PAR": "XPAR", "AMS": "XAMS", "BRU": "XBRU", "MIL": "XMIL", "MCE": "XMAD",
+                   "LIS": "XLIS", "LSE": "XLON", "EBS": "XSWX", "VIE": "XWBO", "TOR": "XTSE", "JPX": "XTKS"}
+YAHOO_TYPES = {"EQUITY": "STOCK", "ETF": "ETF"}
+
+
+class YahooData:
+    """Free daily candles and recent prices for European listings (Yahoo Finance chart endpoint).
+
+    Unofficial and for personal use: no key, no guaranteed availability. Every response must match the
+    mapped listing's exchange, currency and instrument type; anything else blocks that listing.
+    """
+    BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
+
+    def __init__(self, config):
+        self.config = config
+        self.session = requests.Session()
+        self.session.headers["User-Agent"] = "Mozilla/5.0 (compatible; trading-bot)"
+        self._next_request = 0.
+        self._lock = threading.Lock()
+        self._bars = {}
+
+    def chart(self, symbol, params):
+        if not re.fullmatch(r"[A-Z0-9.\-=^]{1,24}", symbol):
+            raise BrokerError("Invalid Yahoo Finance symbol")
+        with self._lock:
+            delay = self._next_request - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            self._next_request = time.monotonic() + 1.5
+            try:
+                response = self.session.get(self.BASE + quote(symbol, safe=""), params=params, timeout=(5, 25))
+                response.raise_for_status()
+                result = response.json()["chart"]
+            except (requests.RequestException, ValueError, KeyError, TypeError):
+                raise BrokerError("Free non-US market data (Yahoo Finance) unavailable; will retry") from None
+        if result.get("error") or not result.get("result"):
+            raise BrokerError(f"No Yahoo Finance data for {symbol}; check the mapping")
+        return result["result"][0]
+
+    @staticmethod
+    def symbol(spec):
+        if spec.get("yahoo"):
+            return spec["yahoo"]
+        if spec["mic"] not in YAHOO_SUFFIX:
+            raise BrokerError(f"No free data for exchange {spec['mic']}; add a \"yahoo\" symbol to the mapping")
+        return spec["symbol"] + YAHOO_SUFFIX[spec["mic"]]
+
+    @staticmethod
+    def verify(meta, spec, instrument):
+        """Mapping against the broker's own listing: exchange, currency and ISIN must agree."""
+        if (spec["mic"] != instrument["schedule"]["mic"]
+                or currency(spec["currency"]) != currency(instrument["currencyCode"])
+                or spec["isin"] != instrument.get("isin")):
+            raise BrokerError("Mapping exchange, currency or ISIN does not match the Trading 212 instrument")
+
+    def check(self, meta, spec, instrument):
+        self.verify(meta, spec, instrument)
+        if (meta.get("symbol") != self.symbol(spec)
+                or YAHOO_EXCHANGES.get(meta.get("exchangeName")) != spec["mic"]
+                or currency(meta.get("currency")) != currency(spec["currency"])
+                or YAHOO_TYPES.get(meta.get("instrumentType")) != instrument.get("type")):
+            raise BrokerError("Market-data symbol, type, exchange or currency does not match the broker instrument")
+
+    def bars(self, instrument, spec, now):
+        symbol = self.symbol(spec)
+        key = (symbol, spec["mic"], spec["currency"], spec["isin"], instrument.get("isin"),
+               instrument.get("currencyCode"), instrument.get("type"))
+        cached = self._bars.get(key)
+        if cached is not None and cached[0] == now.tz_convert(cached[1].attrs["market_timezone"]).date():
+            return cached[1]
+        result = self.chart(symbol, {"range": "6y", "interval": "1d", "events": "split,div"})
+        meta = result.get("meta", {})
+        self.check(meta, spec, instrument)
+        zone = meta.get("exchangeTimezoneName")
+        try:
+            quotes = result["indicators"]["quote"][0]
+            frame = pd.DataFrame({k: quotes[k] for k in ("open", "high", "low", "close", "volume")},
+                                 index=pd.to_datetime(result["timestamp"], unit="s", utc=True)).dropna()
+            adjusted = result["indicators"].get("adjclose", [{}])[0].get("adjclose")
+            if adjusted:
+                # Same as an "adjust all" feed: scale prices by the split/dividend adjustment factor.
+                factor = pd.Series(adjusted, index=pd.to_datetime(result["timestamp"], unit="s", utc=True)).reindex(frame.index) / frame.close
+                frame[["open", "high", "low", "close"]] = frame[["open", "high", "low", "close"]].mul(factor, axis=0)
+            # Daily candles are stamped at the session start; use the exchange-local date at midnight.
+            local = frame.index.tz_convert(zone).normalize()
+            frame.index = local.tz_convert("UTC")
+            frame = frame[~frame.index.duplicated(keep="last")].astype(float)
+        except (KeyError, TypeError, ValueError, IndexError):
+            raise BrokerError("Need at least 1,000 valid completed daily candles with an exchange timezone") from None
+        frame = complete_sessions(frame, zone, now)
+        self._bars[key] = (now.tz_convert(zone).date(), frame)
+        return frame
+
+    def quote(self, instrument, spec, now):
+        meta = self.chart(self.symbol(spec), {"range": "1d", "interval": "1m"}).get("meta", {})
+        self.check(meta, spec, instrument)
+        try:
+            at = pd.Timestamp(number(meta["regularMarketTime"]), unit="s", tz="UTC")
+            # GBX prices stay in pence here; execution_fx scales them to GBP exactly once.
+            price = number(meta["regularMarketPrice"], nonnegative=True)
+            age = (now - at).total_seconds()
+            if price <= 0 or not -10 <= age <= self.config.trading212_max_quote_age:
+                raise ValueError()
+        except (KeyError, ValueError):
+            raise BrokerError("Non-US price is older than TRADING212_MAX_QUOTE_AGE_SECONDS or missing") from None
+        return price
+
+    def execution_fx(self, source, target, now):
+        source, scale = ("GBP", .01) if currency(source) == "GBX" else (currency(source), 1.)
+        if source == target:
+            return scale
+        if not self.config.trading212_allow_fx:
+            raise BrokerError("Foreign-currency entries disabled; TRADING212_ALLOW_FX is false")
+        meta = self.chart(f"{source}{target}=X", {"range": "1d", "interval": "1m"}).get("meta", {})
+        at = pd.Timestamp(number(meta.get("regularMarketTime")), unit="s", tz="UTC")
+        rate = number(meta.get("regularMarketPrice"), nonnegative=True)
+        if rate <= 0 or not -10 <= (now - at).total_seconds() <= self.config.trading212_max_quote_age:
+            raise BrokerError("Execution FX rate is stale")
+        return rate * scale
+
+
+def market_data(config):
+    """The configured non-US data source; Yahoo Finance unless Twelve Data is chosen explicitly."""
+    return MarketData(config) if config.trading212_data_source == "twelvedata" else YahooData(config)

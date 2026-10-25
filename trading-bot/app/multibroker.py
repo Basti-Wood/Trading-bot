@@ -9,6 +9,8 @@ class MultiBrokerEngine:
     def __init__(self, config, store):
         self.primary = PortfolioEngine(config, store) if config.trading_mode == "both" else Engine(config, store)
         self.secondary = Trading212Engine(config, store) if config.trading212_enabled else None
+        if self.secondary:
+            self.primary.training_peers.append(self.secondary.predictions)
         self.accounts = Accounts(config, store, trading212=self.secondary.broker if self.secondary else None)
 
     def start(self):

@@ -30,6 +30,8 @@ def strategy_signature(config):
                 "feedback_weight": config.feedback_weight, "validation_bars": config.validation_bars}
     if config.intraday:
         settings.update(mode="daytrade", bar_minutes=5, horizon_bars=3, intraday_schema=1)
+    if config.broker_name != "alpaca":
+        settings.update(broker=config.broker_name, source=config.trading212_data_source)
     return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -113,7 +115,10 @@ def train_symbol(config, store, symbol, bars):
                 "sample_weight": config.feedback_weight}
     key = f"model:{symbol}"
     old_meta = store.get(key)
+    input_signature = bars.attrs.get("source_signature")
     if old_meta and old_meta.get("strategy_signature") != strategy_signature(config):
+        old_meta = None
+    if old_meta and input_signature and old_meta.get("input_signature") != input_signature:
         old_meta = None
     if (old_meta and old_meta["data_through"] == bars.index[-1].isoformat()
             and old_meta.get("feedback_revision") == feedback_revision):
@@ -155,6 +160,8 @@ def train_symbol(config, store, symbol, bars):
             "trained_through": train.label_end.max().isoformat(), "metrics": metrics,
             "reports": reports, "eligible": bool(eligible), "incumbent": incumbent_metrics,
             "strategy_signature": strategy_signature(config), "feedback": feedback, "feedback_revision": feedback_revision}
+    if input_signature:
+        meta["input_signature"] = input_signature
     store.set(f"candidate:{symbol}", meta)
     if eligible or not old_meta:
         # Retain a research model even when the first candidate fails. It cannot trade.
@@ -195,6 +202,8 @@ def train_worker(config, symbols=None):
 
 
 def predict(config, meta, bars):
+    if config.broker_name == "trading212" and meta.get("input_signature") != bars.attrs.get("source_signature"):
+        raise ValueError("Listing or data mapping changed; retrain this stock before using its model")
     row = features(bars).tail(1)
     if row.empty or row.index[-1] != bars.index[-1]:
         raise ValueError("Latest completed bar cannot produce valid features")
@@ -226,6 +235,8 @@ def predict(config, meta, bars):
             "forecast_signal": signal, "expected_return": consensus, "agreement": max(buys, sells, 3 - buys - sells),
             "ensemble_method": "median", "target_session": bars.attrs.get("target_session"),
             "input_complete_at": bars.attrs.get("input_complete_at"),
+            "market_timezone": bars.attrs.get("market_timezone", "America/New_York"),
+            "source_signature": bars.attrs.get("source_signature"),
             "last_close": float(bars.close.iloc[-1]), "threshold": config.threshold,
             "horizon": "next 15 minutes from completed five-minute close" if config.intraday
  else "next session open to the following session open",

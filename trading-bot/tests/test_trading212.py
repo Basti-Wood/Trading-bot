@@ -184,7 +184,7 @@ class DataTests(Fixture):
             data.execution_fx("GBP", "EUR", NOW)
 
 
-class EngineTests(Fixture):
+class EngineFixture(Fixture):
     def setUp(self):
         super().setUp()
         self.folder = make_loop_dir(self.temp.name)
@@ -223,6 +223,8 @@ class EngineTests(Fixture):
             "avg_entry_price": 100, "current_price": 101, "market_value": 101 * (actual or qty),
             "unrealized_pl": qty, "currency": "EUR", "instrument_currency": "EUR"}]
 
+
+class EngineTests(EngineFixture):
     def test_entry_uses_only_secondary_cash_and_keeps_alpaca_journal_untouched(self):
         self.store.set("account", {"equity": 1000000, "cash": 1000000})
         self.engine.cycle(NOW)

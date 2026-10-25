@@ -13,6 +13,7 @@ from . import loop
 from .allocation import NAMES, allocation
 from .feedback import summary_key
 from .universe import active_symbols
+from .store import StrategyStore
 
 TEXT = 300           # characters per free-text field
 MAX_SYMBOLS = 60
@@ -81,7 +82,14 @@ def trading212(secondary, now=None):
     if secondary is None:
         return {"enabled": False}
     account = secondary.get("account") or {}
+    daily = StrategyStore(secondary.root, "daily")
     return {"enabled": True, "entries_enabled": secondary.get("entries_enabled", False), "halt": secondary.get("halt"),
+            "prediction": {"entries_enabled": daily.get("entries_enabled", False), "halt": daily.get("halt"),
+                "training": clip((daily.get("training") or {}).get("status"), 60),
+                "decisions": [{"symbol": row["symbol"], "action": row.get("action"),
+                    "reason_text": clip(row.get("reason")), "expected_return": row.get("expected_return"),
+                    "models": models(row), "eligible": row.get("eligible"), "quality": row.get("quality")}
+                    for row in daily.get("stocks", [])][:MAX_SYMBOLS]},
             "engine": clip((secondary.get("engine") or {}).get("status"), 40),
             "account": {k: account.get(k) for k in ("equity", "cash", "currency", "mode", "at")},
             "positions": [{k: p.get(k) for k in ("symbol", "qty", "market_value", "unrealized_pl", "currency")}
@@ -152,6 +160,11 @@ def stock(config, store, contexts, symbol, secondary=None):
     if row:
         views["trading212"] = {"decision": {"action": row.get("action"), "reason_text": clip(row.get("reason"))},
                                "loop": {"version": row.get("version"), "strategy_signal": row.get("signal"), "test": row.get("test")}}
+    if secondary is not None:
+        daily = StrategyStore(secondary.root, "daily")
+        forecast = daily.get(f"forecast:{symbol}")
+        if forecast:
+            views.setdefault("trading212", {})["prediction"] = {"decision": decision(forecast), "models": models(forecast)}
     held = next((p for p in positions(store) if p["symbol"] == symbol), None)
     if held is None and secondary is not None:
         held = next(({**p, "owner": "trading212"} for p in (secondary.get("account") or {}).get("positions", [])

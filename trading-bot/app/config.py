@@ -121,16 +121,34 @@ class Config:
     trading212_instruments: Path = None
     trading212_capital_fraction: float = 1.
     trading212_capital_cap: float = 0.
+    trading212_prediction_share: float = .5
+    trading212_min_votes: int = 3
+    # Internal data/training identity; the public account remains Alpaca by default.
+    broker_name: str = "alpaca"
     trading212_allow_fx: bool = False
     twelvedata_key: str = ""
+    # Non-US candles/prices: "yahoo" (free, covers European exchanges) or "twelvedata" (paid plans for Europe).
+    trading212_data_source: str = "yahoo"
+    # Free European prices can lag a few minutes; older prices never size an order.
+    trading212_max_quote_age: int = 1200
     reporting_currency: str = "EUR"
     def __post_init__(self):
+        if self.broker_name not in {"alpaca", "trading212"}:
+            raise ValueError("Unknown broker context")
+        if not math.isfinite(self.trading212_prediction_share) or not 0 <= self.trading212_prediction_share <= 1:
+            raise ValueError("TRADING212_PREDICTION_SHARE must be between 0 and 1")
+        if self.trading212_min_votes not in {2, 3}:
+            raise ValueError("TRADING212_MIN_AGREEING_VOTES must be 2 or 3")
         if self.trading212_enabled and self.trading_mode != "both" and not self.coordinated:
             raise ValueError("Trading 212's trading-loop requires TRADING_MODE=both")
         if not re.fullmatch(r"[A-Z]{3}", self.reporting_currency):
             raise ValueError("REPORTING_CURRENCY must be a three-letter currency code")
         if not math.isfinite(self.trading212_capital_fraction) or not .01 <= self.trading212_capital_fraction <= 1:
             raise ValueError("TRADING212_CAPITAL_FRACTION must be between .01 and 1")
+        if self.trading212_data_source not in {"yahoo", "twelvedata"}:
+            raise ValueError("TRADING212_DATA_SOURCE must be yahoo or twelvedata")
+        if not 60 <= self.trading212_max_quote_age <= 3600:
+            raise ValueError("TRADING212_MAX_QUOTE_AGE_SECONDS must be between 60 and 3600")
         if not math.isfinite(self.trading212_capital_cap) or not 0 <= self.trading212_capital_cap <= 10000000:
             raise ValueError("TRADING212_CAPITAL_CAP must be between 0 and 10000000 in account currency")
         if not self.symbols or len(self.symbols) > 50 or len(set(self.symbols)) != len(self.symbols):
@@ -144,7 +162,7 @@ class Config:
             raise ValueError("The daytrade and trading-loop strategies are currently paper-only")
         if any(not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", s) for s in self.symbols):
             raise ValueError("Only US equity/ETF symbols are supported")
-        if self.feed not in {"iex", "sip"}:
+        if self.feed not in ({"iex", "sip"} if self.broker_name == "alpaca" else {"trading212-yahoo", "trading212-twelvedata"}):
             raise ValueError("ALPACA_DATA_FEED must be iex or sip")
         if not self.llm_url.startswith(("http://", "https://")) or len(self.llm_models) > 1:
             raise ValueError("Set an HTTP FreeLLM base URL and at most one Llama model")
@@ -214,6 +232,8 @@ class Config:
 
     @property
     def configured(self):
+        if self.broker_name == "trading212":
+            return self.trading212_configured
         return all(v and not v.lower().startswith(("your_", "changeme")) for v in (self.api_key, self.api_secret))
 
     @property
@@ -297,8 +317,12 @@ class Config:
             trading212_instruments=(Path(__file__).resolve().parent.parent / os.getenv("TRADING212_INSTRUMENTS_FILE", "config/trading212-instruments.json")).resolve(),
             trading212_capital_fraction=float(os.getenv("TRADING212_CAPITAL_FRACTION", "1")),
             trading212_capital_cap=float(os.getenv("TRADING212_CAPITAL_CAP", "0")),
+            trading212_prediction_share=float(os.getenv("TRADING212_PREDICTION_SHARE", ".5")),
+            trading212_min_votes=int(os.getenv("TRADING212_MIN_AGREEING_VOTES", "3")),
             trading212_allow_fx=flag("TRADING212_ALLOW_FX"),
             twelvedata_key=os.getenv("TWELVEDATA_API_KEY", "").strip(),
+            trading212_data_source=env_value("TRADING212_DATA_SOURCE", "yahoo").lower(),
+            trading212_max_quote_age=int(env_value("TRADING212_MAX_QUOTE_AGE_SECONDS", "1200")),
             reporting_currency=os.getenv("REPORTING_CURRENCY", "EUR").strip().upper(),
             origins=tuple(s.strip().rstrip("/").lower() for s in os.getenv("DASHBOARD_ORIGINS", "https://trade.bastiwood.com").split(",") if s.strip()),
             readonly_token=env_value("READONLY_API_TOKEN"),
