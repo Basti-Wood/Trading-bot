@@ -187,6 +187,7 @@ class PredictionPipelineTests(EngineFixture):
         with patch("app.trading212_engine.loop.evaluate", side_effect=BrokerError("one bad strategy")):
             Trading212Engine.signals_tick(self.engine, NOW, {TICKER: SPEC})
             self.engine.signals_thread.join(timeout=5)
+            self.engine.loop_thread.join(timeout=5)
         self.assertIn(TICKER, self.engine.predictions.frames)
         self.assertEqual(self.engine.predictions.frames[TICKER].attrs["target_session"], "2026-10-23")
         self.assertIn("one bad strategy", self.engine.store.get("loop_error:trend_v1")["message"])

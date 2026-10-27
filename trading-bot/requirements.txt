@@ -10,3 +10,5 @@ joblib>=1.4,<2
 threadpoolctl>=3.5,<4
 # Runs trading-loop strategy files exactly as their stress test did.
 backtesting>=0.6.6,<0.7
+# Historical non-US session dates when broker metadata only includes today's events.
+exchange-calendars>=4.11,<5

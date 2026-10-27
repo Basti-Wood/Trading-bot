@@ -347,6 +347,9 @@ function renderTrading212(s) {
   $('t212-note').textContent=`${t.engine.message||t.engine.status} · Entries ${t.entries_enabled?'enabled':'paused'} · budget ${money(budget,code)} from this account only · ${t.allow_fx?'Foreign-currency orders allowed (FX fees may apply)':'Same-currency entries only'} · Kursdaten: ${t.data_source==='yahoo'?'Yahoo Finance (kostenlos)':'Twelve Data'+(t.data_configured?'':' – TWELVEDATA_API_KEY fehlt')} · ${t.mappings?.error?`Liste ${escape(t.mappings.file)}: ${escape(t.mappings.error)}`:`${t.mappings?.count??0} Werte aus ${escape(t.mappings?.file||'')} geladen`}${t.halt?' · DRAWDOWN STOP ACTIVE':''}`;
   if(t.ready_problem&&!t.entries_enabled) $('t212-note').textContent+=` · Noch nicht startklar: ${t.ready_problem}. Die Alpaca-Bots laufen davon unabhängig.`;
   const prediction=t.prediction||{},lp=t.loop||{},training=prediction.training||{};
+  const data=t.data_status||{},evaluation=t.loop_evaluation||{};
+  $('t212-data-status').textContent=`Daily data: ${data.status||'waiting'} · ${data.loaded??0}/${data.total??t.mappings?.count??0} listings${data.symbol?' · '+data.symbol:''}${data.at?' · '+time(data.at):''} · Loop evaluation: ${evaluation.status||'waiting'}${evaluation.version?' · '+evaluation.version:''}`;
+  $('t212-data-errors').innerHTML=[...Object.entries(t.errors||{}),...Object.entries(evaluation.errors||{})].map(([key,message])=>`<div class="log-row"><b>${escape(key)}</b><span>${escape(message)}</span></div>`).join('');
   $('t212-daily-toggle').textContent=prediction.entries_enabled?'Pause prediction entries':'Enable prediction entries';
   $('t212-loop-toggle').textContent=lp.entries_enabled?'Pause loop entries':'Enable loop entries';
   $('t212-daily-toggle').disabled=$('t212-loop-toggle').disabled=!t.configured;
