@@ -50,7 +50,8 @@ class Trading212Engine:
         self.source = StrategyStore(root, "loop")
         self.broker, self.data = broker or Trading212(config), data or market_data(config)
         self.stop = threading.Event()
-        self.thread = self.signals_thread = None
+        self.thread = self.signals_thread = self.loop_thread = None
+        self.last_loop_inputs = None
         self.last_signals = 0
         self.last_metadata = 0
         self.turn = 0
@@ -96,7 +97,8 @@ class Trading212Engine:
             remote = self.broker.submit(symbol, side, qty, kind=kind, price=price)
             record.update(status=remote["status"], broker_id=remote["id"], filled_qty=remote["filled_qty"])
         except (BrokerError, KeyError, TypeError, ValueError) as exc:
-            record["status"] = "rejected" if isinstance(exc, BrokerError) and exc.status in {400, 401, 403, 422} else "unknown"
+            record["status"] = "rejected" if isinstance(exc, BrokerError) and exc.status in {400, 401, 403, 404, 422, 429} else "unknown"
+            record["error"] = str(exc)[:240]
             if record["status"] == "rejected" and side == "buy":
                 book.set(f"owned:{symbol}", False)
             book.event("error", {"symbol": symbol, "message": f"Trading 212 {kind} order {record['status']}; inspect broker before retrying"})
@@ -193,18 +195,24 @@ class Trading212Engine:
 
     def signals_tick(self, now, specs):
         forced = self.store.get("retest_requested", False)
-        if self.signals_thread and self.signals_thread.is_alive() or not forced and self.last_signals and time.monotonic() - self.last_signals < 1800:
+        retry_seconds = 60 if self.store.get("data_errors") else 1800
+        if (self.signals_thread and self.signals_thread.is_alive()
+                or not forced and self.last_signals and time.monotonic() - self.last_signals < retry_seconds):
             return
         self.store.set("retest_requested", False)
         self.last_signals = time.monotonic()
         records = loop.active_versions(self.store)
+        self.store.set("data_status", {"status": "loading", "loaded": 0, "total": len(specs), "at": utcnow()})
 
         def work():
-            frames, errors = {}, {}
+            frames, sessions = {}, {}
+            errors = {s: e for s, e in self.store.get("data_errors", {}).items() if s in specs}
             for ticker, spec in specs.items():
                 if self.stop.is_set():
                     return
                 try:
+                    self.store.set("data_status", {"status": "loading", "symbol": ticker,
+                        "loaded": len(frames), "total": len(specs), "at": utcnow()})
                     instrument = self.broker.instrument(ticker)
                     frame = self.data.bars(instrument, spec, now).copy(deep=True)
                     session = self.broker.session_for(ticker, now)
@@ -220,6 +228,11 @@ class Trading212Engine:
                     frame.attrs["target_session"] = str(opening.tz_convert(zone).date()) if valid else None
                     frame.attrs["source_signature"] = source_signature(self.config, spec)
                     frame.attrs["input_complete_at"] = prior.isoformat() if prior is not None else None
+                    sessions[ticker] = {"open": session["open"], "bar_day": str(last_day),
+                        "prior_close": frame.attrs["input_complete_at"], "target_session": frame.attrs["target_session"]}
+                    errors.pop(ticker, None)
+                    if not valid:
+                        errors[ticker] = "Waiting for the latest completed exchange session's daily candle or dated schedule"
                     frames[ticker] = frame
                     try:
                         self.predictions.forecast(ticker, frame)
@@ -228,11 +241,42 @@ class Trading212Engine:
                 except Exception as exc:
                     errors[ticker] = str(exc)[:200]
                     self.daily.set(f"prediction_error:{ticker}", {"message": errors[ticker], "at": utcnow()})
+                self.store.set("data_errors", errors)
+                self.daily.set("data_errors", errors)
             self.predictions.set_frames(frames)
+            self.store.set("data_status", {"status": "partial" if frames and errors else "error" if errors else "ready",
+                "loaded": len(frames), "total": len(specs), "sessions": sessions, "at": utcnow()})
+            self.store.set("data_errors", errors)
+            self.daily.set("data_errors", errors)
+            # A version can backtest many stocks for minutes. It must not occupy the worker
+            # that refreshes predictions after training or retries failed market-data requests.
+            self.loop_tick(frames, records, forced)
+        self.signals_thread = threading.Thread(target=work, name="trading212-daily-data", daemon=True)
+        self.signals_thread.start()
+
+    def loop_tick(self, frames, records, forced=False):
+        if self.loop_thread and self.loop_thread.is_alive():
+            return
+        if records and not frames:
+            self.store.set("loop_evaluation", {"status": "waiting for daily data", "at": utcnow()})
+            return
+        inputs = {"versions": {v: r["sha256"] for v, r in records.items()},
+                  "frames": {s: [f.index[-1].isoformat(), f.attrs.get("target_session"), f.attrs.get("source_signature")]
+                             for s, f in frames.items()}}
+        if not forced and inputs == self.last_loop_inputs:
+            return
+        self.last_loop_inputs = inputs
+        self.store.set("loop_evaluation", {"status": "running" if records else "idle", "at": utcnow()})
+        if not records:
+            return
+
+        def work():
+            failures = {}
             for version, record in records.items():
                 if self.stop.is_set():
                     return
-                symbols = list(specs) if record["symbol"] == loop.LIST else [record["symbol"]]
+                self.store.set("loop_evaluation", {"status": "running", "version": version, "at": utcnow()})
+                symbols = list(frames) if record["symbol"] == loop.LIST else [record["symbol"]]
                 usable = {s: frames[s] for s in symbols if s in frames}
                 try:
                     if usable:
@@ -244,11 +288,13 @@ class Trading212Engine:
                         self.store.set(f"loop_results:{version}", result)
                         self.store.set(f"loop_error:{version}", None)
                 except Exception as exc:
-                    self.store.set(f"loop_error:{version}", {"message": str(exc)[:200], "at": utcnow()})
-            self.store.set("data_errors", errors)
-            self.daily.set("data_errors", errors)
-        self.signals_thread = threading.Thread(target=work, name="trading212-stock-tests", daemon=True)
-        self.signals_thread.start()
+                    failures[version] = str(exc)[:200]
+                    self.store.set(f"loop_error:{version}", {"message": failures[version], "at": utcnow()})
+            self.store.set("loop_evaluation", {"status": "partial" if failures else "complete", "errors": failures, "at": utcnow()})
+            if failures:
+                self.last_loop_inputs = None  # A later poll may retry a failed evaluation.
+        self.loop_thread = threading.Thread(target=work, name="trading212-stock-tests", daemon=True)
+        self.loop_thread.start()
 
     def strategy_share(self, strategy):
         share = self.config.trading212_prediction_share
@@ -386,6 +432,8 @@ class Trading212Engine:
                         action = "SELL"
                         if not acted and ready and session["open"]:
                             acted = self.close(position, orders, reason, mode)
+                elif book.get("data_errors", {}).get(symbol):
+                    reason = book.get("data_errors")[symbol]
                 elif signal == "BUY":
                     if not book.get("entries_enabled", False):
                         reason = f"Trading 212 {mode} entries are paused"

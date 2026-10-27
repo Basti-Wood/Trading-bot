@@ -55,6 +55,8 @@ def create_app(config, store, broker_factory=Alpaca):
                 "allow_fx": config.trading212_allow_fx, "data_source": config.trading212_data_source,
                 "data_configured": config.trading212_data_source == "yahoo" or bool(config.twelvedata_key),
                 "mappings": mapping_state(),
+                "data_status": secondary.get("data_status", {"status": "waiting"}),
+                "loop_evaluation": secondary.get("loop_evaluation", {"status": "waiting"}),
                 "errors": secondary.get("data_errors", {}), "orders": secondary.orders(30),
                 "ready_problem": secondary_resume_error("daily")}
 
@@ -506,6 +508,10 @@ def create_app(config, store, broker_factory=Alpaca):
             return "no fresh Trading 212 account connection yet" + (f" ({detail})" if detail else "; wait a minute")
         if engine.get("status") != "running":
             return "resolve the Trading 212 engine or order reconciliation error first"
+        errors = secondary.get("data_errors", {})
+        if errors and len(errors) >= mapped["count"]:
+            symbol = next(iter(errors))
+            return f"daily data is blocked: {symbol}: {errors[symbol]}"
         return None
 
     def mapping_state():
@@ -564,6 +570,27 @@ def create_app(config, store, broker_factory=Alpaca):
         items = secondary.get("instruments", []) if secondary else []
         return jsonify(items=[i for i in items if query in (i["ticker"] + " " + i["name"]).casefold()][:100],
                        total=len(items), message="Verified non-US exchange listings; map exact ticker, MIC, currency and ISIN for market data")
+
+    @app.get("/api/trading212/diagnostics")
+    def secondary_diagnostics():
+        if secondary is None:
+            return jsonify(error="Trading 212 is disabled"), 409
+        state = secondary_state()
+        report = {key: state[key] for key in ("configured", "mode", "engine", "mappings", "data_source",
+            "data_status", "loop_evaluation", "errors", "ready_problem", "entries_enabled", "live_execution_allowed")}
+        report.update(at=utcnow(), account_checked_at=(state["account"] or {}).get("at"),
+            verified_instruments=len(secondary.get("instruments", [])),
+            prediction={**{k: v for k, v in state["prediction"].items() if k != "halt"},
+                        "halt": bool(state["prediction"].get("halt"))}, loop=state["loop"],
+            active_versions=list(loop.active_versions(secondary)),
+            loop_errors={v: secondary.get(f"loop_error:{v}") for v in loop.active_versions(secondary)
+                         if secondary.get(f"loop_error:{v}")},
+            unresolved_orders=[{k: order.get(k) for k in ("symbol", "strategy", "status", "error")}
+                               for order in secondary.unresolved_orders()])
+        # Deliberate allowlist: no keys, auth headers, account IDs, balances or position quantities.
+        response = jsonify(report)
+        response.headers["Content-Disposition"] = 'attachment; filename="trading212-diagnostics.json"'
+        return response
 
     def body_or_error():
         body = request.get_json(silent=True)

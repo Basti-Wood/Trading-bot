@@ -17,6 +17,7 @@ import requests
 
 from .broker import BrokerError
 from .loop import INSTRUMENT, STOCK
+from .trading212_sessions import surrounding_sessions
 
 
 def number(value, *, nonnegative=False):
@@ -33,6 +34,19 @@ def number(value, *, nonnegative=False):
 
 def currency(value):
     return "GBX" if value == "GBp" else str(value).upper()
+
+
+def daily_cache_current(cached, mic, now):
+    if cached is None:
+        return False
+    saved_day, frame = cached
+    local = now.tz_convert(frame.attrs["market_timezone"])
+    if saved_day != local.date():
+        return False
+    # Do not cache an early provider response missing yesterday's completed candle for
+    # the entire trading day. The next retry must be able to download the corrected data.
+    expected = surrounding_sessions(mic, local.normalize())["prior_close"]
+    return expected is None or frame.index[-1].tz_convert(local.tz).date() == expected.tz_convert(local.tz).date()
 
 
 # Broker exchange metadata, never ticker suffix, ISIN nationality, or currency,
@@ -96,7 +110,12 @@ class Trading212:
         try:
             response = self.session.request(method, self.base + path, timeout=(5, 25), **kwargs)
             if not response.ok:
-                raise BrokerError(f"Trading 212 HTTP {response.status_code} for {method} {path.split('?')[0]}", response.status_code)
+                hints = {401: "check that the key and secret belong to the selected demo/live Invest account",
+                         403: "check this API key's endpoint permissions and IP restrictions",
+                         429: "API rate limit reached; wait for the next poll"}
+                hint = hints.get(response.status_code)
+                raise BrokerError(f"Trading 212 HTTP {response.status_code} for {method} {path.split('?')[0]}"
+                                  + (f": {hint}" if hint else ""), response.status_code)
             return response.json() if response.content else None
         except (requests.RequestException, ValueError):
             # Do not expose response bodies, auth headers or a request exception's URL.
@@ -132,8 +151,11 @@ class Trading212:
     def instrument(self, ticker):
         item = self.metadata().get(ticker)
         schedule = (item or {}).get("schedule") or {}
-        if not item or item.get("type") not in {"STOCK", "ETF"} or not schedule.get("mic"):
-            raise BrokerError("Trading 212 route requires a verified non-US stock/ETF exchange", 422)
+        if not item:
+            raise BrokerError(f"Trading 212 ticker {ticker} is absent from this account's metadata; check the instrument mapping", 422)
+        if item.get("type") not in {"STOCK", "ETF"} or not schedule.get("mic"):
+            raise BrokerError(f"Trading 212 {ticker} requires a verified non-US stock/ETF exchange"
+                              f" (received {schedule.get('exchange', 'no working schedule')})", 422)
         return item
 
     def positions(self):
@@ -246,6 +268,13 @@ class Trading212:
                        and close - now < pd.Timedelta(hours=24))
         prior_close = next((at for at, kind in reversed(past) if kind == "CLOSE"), None)
         next_open = next((at for at, kind in relevant if at > now and kind == "OPEN"), None)
+        # The metadata contract does not promise yesterday's events. A response containing
+        # only today's OPEN/CLOSE used to leave every forecast's target_session unset forever.
+        # Reference calendars fill dates only: broker events still decide is_open and close.
+        if prior_close is None or next_open is None:
+            reference = surrounding_sessions(schedule["mic"], now)
+            prior_close = prior_close if prior_close is not None else reference["prior_close"]
+            next_open = next_open if next_open is not None else reference["next_open"]
         return {"open": is_open, "opening": opening, "close": close, "prior_close": prior_close, "next_open": next_open}
 
 
@@ -290,7 +319,7 @@ class MarketData:
         key = (spec["symbol"], spec["mic"], spec["currency"], spec["isin"], instrument.get("isin"),
                instrument.get("currencyCode"), instrument.get("type"))
         cached = getattr(self, "_bars", {}).get(key)
-        if cached is not None and cached[0] == now.tz_convert(cached[1].attrs["market_timezone"]).date():
+        if daily_cache_current(cached, spec["mic"], now):
             return cached[1]
         frame = self.download_bars(instrument, spec, now)
         self._bars = {**getattr(self, "_bars", {}), key: (now.tz_convert(frame.attrs["market_timezone"]).date(), frame)}
@@ -372,12 +401,15 @@ class YahooData:
     mapped listing's exchange, currency and instrument type; anything else blocks that listing.
     """
     BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
+    ALTERNATE = "https://query2.finance.yahoo.com/v8/finance/chart/"
 
     def __init__(self, config):
         self.config = config
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "Mozilla/5.0 (compatible; trading-bot)"
         self._next_request = 0.
+        self._retry_at = 0.
+        self._base = self.BASE
         self._lock = threading.Lock()
         self._bars = {}
 
@@ -385,19 +417,35 @@ class YahooData:
         if not re.fullmatch(r"[A-Z0-9.\-=^]{1,24}", symbol):
             raise BrokerError("Invalid Yahoo Finance symbol")
         with self._lock:
-            delay = self._next_request - time.monotonic()
-            if delay > 0:
-                time.sleep(delay)
-            self._next_request = time.monotonic() + 1.5
-            try:
-                response = self.session.get(self.BASE + quote(symbol, safe=""), params=params, timeout=(5, 25))
-                response.raise_for_status()
-                result = response.json()["chart"]
-            except (requests.RequestException, ValueError, KeyError, TypeError):
-                raise BrokerError("Free non-US market data (Yahoo Finance) unavailable; will retry") from None
-        if result.get("error") or not result.get("result"):
-            raise BrokerError(f"No Yahoo Finance data for {symbol}; check the mapping")
-        return result["result"][0]
+            if time.monotonic() < self._retry_at:
+                raise BrokerError("Yahoo Finance HTTP 429 rate limit; waiting before retrying")
+            hosts = [self._base, self.ALTERNATE if self._base == self.BASE else self.BASE]
+            for base in hosts:
+                delay = self._next_request - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                self._next_request = time.monotonic() + 1.5
+                try:
+                    response = self.session.get(base + quote(symbol, safe=""), params=params, timeout=(5, 25))
+                    response.raise_for_status()
+                    result = response.json()["chart"]
+                    if not isinstance(result, dict):
+                        raise ValueError()
+                except requests.HTTPError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    if status == 429:
+                        self._retry_at = time.monotonic() + 60
+                        raise BrokerError("Yahoo Finance HTTP 429 rate limit; will retry after a minute") from None
+                    if status not in {500, 502, 503, 504}:
+                        raise BrokerError(f"Yahoo Finance HTTP {status}; check provider access and the listing") from None
+                    continue
+                except (requests.RequestException, ValueError, KeyError, TypeError):
+                    continue  # Public GET only, same provider; every listing is still verified below.
+                if result.get("error") or not result.get("result"):
+                    raise BrokerError(f"No Yahoo Finance data for {symbol}; check the mapping")
+                self._base = base
+                return result["result"][0]
+        raise BrokerError("Free non-US market data (both Yahoo Finance hosts) unavailable; will retry")
 
     @staticmethod
     def symbol(spec):
@@ -428,7 +476,7 @@ class YahooData:
         key = (symbol, spec["mic"], spec["currency"], spec["isin"], instrument.get("isin"),
                instrument.get("currencyCode"), instrument.get("type"))
         cached = self._bars.get(key)
-        if cached is not None and cached[0] == now.tz_convert(cached[1].attrs["market_timezone"]).date():
+        if daily_cache_current(cached, spec["mic"], now):
             return cached[1]
         result = self.chart(symbol, {"range": "6y", "interval": "1d", "events": "split,div"})
         meta = result.get("meta", {})

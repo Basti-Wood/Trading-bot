@@ -91,6 +91,9 @@ def trading212(secondary, now=None):
                     "models": models(row), "eligible": row.get("eligible"), "quality": row.get("quality")}
                     for row in daily.get("stocks", [])][:MAX_SYMBOLS]},
             "engine": clip((secondary.get("engine") or {}).get("status"), 40),
+            "engine_message_text": clip((secondary.get("engine") or {}).get("message")),
+            "data_status": secondary.get("data_status"), "loop_evaluation": secondary.get("loop_evaluation"),
+            "data_errors_text": {s: clip(e) for s, e in secondary.get("data_errors", {}).items()},
             "account": {k: account.get(k) for k in ("equity", "cash", "currency", "mode", "at")},
             "positions": [{k: p.get(k) for k in ("symbol", "qty", "market_value", "unrealized_pl", "currency")}
                           for p in account.get("positions", [])],
