@@ -376,7 +376,9 @@ def create_app(config, store, broker_factory=Alpaca):
                                chart=item["chart"], test=item.get("test"), signal=item.get("signal"),
                                strategy_reason=item.get("reason"), reason=choice.get("reason"),
                                action=decision.get("action", "WAIT"), computed_at=results.get("at"))
-        return jsonify(error="Noch keine Chartdaten: die aktiven Versionen haben diese Aktie noch nicht berechnet"), 404
+        # Not an error: the active versions simply have not evaluated this stock yet (no 404 noise).
+        return jsonify(symbol=symbol, bot=bot, pending=True,
+                       message="Noch keine Chartdaten: die aktiven Versionen haben diese Aktie noch nicht berechnet")
 
     @app.get("/api/state")
     def state():

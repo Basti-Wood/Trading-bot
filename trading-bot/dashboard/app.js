@@ -293,8 +293,10 @@ async function renderLoopChart(s) {
     const r=await fetch(`/api/loop/chart/${encodeURIComponent(symbol)}?bot=${encodeURIComponent(bot)}`); const data=await r.json();
     if(serial!==loopChartSerial) return;
     if(!r.ok) throw Error(data.error||'Chartdaten nicht verfügbar');
+    if(data.pending){loopChartFetched=Date.now()-240000;$('loop-chart').textContent=data.message;$('loop-chart-status').textContent='WIRD BERECHNET';$('loop-chart-legend').innerHTML='';$('loop-chart-note').textContent='';return;}
     drawLoopChart(data);
-  } catch(err){if(serial===loopChartSerial){loopChartFetched=0;$('loop-chart').textContent=err.message;$('loop-chart-status').textContent='NICHT VERFÜGBAR';$('loop-chart-legend').innerHTML='';$('loop-chart-note').textContent='';}}
+  } catch(err){if(serial===loopChartSerial){loopChartFetched=Date.now()-240000;  // Retry after a minute, not every refresh.
+$('loop-chart').textContent=err.message;$('loop-chart-status').textContent='NICHT VERFÜGBAR';$('loop-chart-legend').innerHTML='';$('loop-chart-note').textContent='';}}
 }
 function drawLoopChart(d) {
   const c=d.chart, bars=c.bars||[], t=d.test||{}, days=bars.map(b=>b.at);
