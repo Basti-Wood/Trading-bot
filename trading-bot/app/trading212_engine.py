@@ -510,6 +510,7 @@ class Trading212Engine:
                 "currency": i["currencyCode"], "isin": i.get("isin"), "mic": i["schedule"]["mic"],
                 "exchange": i["schedule"]["exchange"]} for i in instruments.values()
                 if i.get("type") in {"STOCK", "ETF"} and (i.get("schedule") or {}).get("mic")])
+            self.store.set("unknown_exchanges", list(getattr(self.broker, "unknown_exchanges", []))[:40])
             self.last_metadata = time.monotonic()
         reconciled = self.reconcile(orders)
         rules = loop.risk_rules(self.config)

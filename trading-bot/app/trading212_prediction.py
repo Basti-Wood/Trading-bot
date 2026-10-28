@@ -115,7 +115,8 @@ class PredictionWorker:
         quality = forecast_quality(self.config, self.store.get(f"model:{symbol}"), forecast, now)
         if not quality["ready"]:
             return {**forecast, "signal": "HOLD", "quality": quality, "reason": quality["reason"]}
-        action, reason = combine(forecast, None, now=now.to_pydatetime(), min_votes=self.config.trading212_min_votes)
+        # No news source covers these listings, so the impossible news vote is left out.
+        action, reason = combine({**forecast, "news": False}, None, now=now.to_pydatetime(), min_votes=self.config.trading212_min_votes)
         return {**forecast, "signal": action, "quality": quality, "reason": reason,
                 "votes": {m["name"]: m["signal"] for m in forecast["models"]}}
 

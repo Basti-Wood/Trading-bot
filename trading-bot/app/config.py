@@ -122,7 +122,8 @@ class Config:
     trading212_capital_fraction: float = 1.
     trading212_capital_cap: float = 0.
     trading212_prediction_share: float = .5
-    trading212_min_votes: int = 3
+    # Of the three models (no news vote exists for non-US listings): 2 = majority.
+    trading212_min_votes: int = 2
     # Internal data/training identity; the public account remains Alpaca by default.
     broker_name: str = "alpaca"
     trading212_allow_fx: bool = False
@@ -318,7 +319,7 @@ class Config:
             trading212_capital_fraction=float(os.getenv("TRADING212_CAPITAL_FRACTION", "1")),
             trading212_capital_cap=float(os.getenv("TRADING212_CAPITAL_CAP", "0")),
             trading212_prediction_share=float(os.getenv("TRADING212_PREDICTION_SHARE", ".5")),
-            trading212_min_votes=int(os.getenv("TRADING212_MIN_AGREEING_VOTES", "3")),
+            trading212_min_votes=int(os.getenv("TRADING212_MIN_AGREEING_VOTES", "2")),
             trading212_allow_fx=flag("TRADING212_ALLOW_FX"),
             twelvedata_key=os.getenv("TWELVEDATA_API_KEY", "").strip(),
             trading212_data_source=env_value("TRADING212_DATA_SOURCE", "yahoo").lower(),

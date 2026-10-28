@@ -4,7 +4,7 @@
 
 Both brokers run independently during each listing's exchange hours. The US open does not stop Trading 212 buying on an open European exchange. Each uses its own funds, data and order journal. Pausing entries still permits protective exits. No positions or cash are transferred between brokers.
 
-Trading 212 now has **two strategies**: daily predictions from Ridge, Extra Trees and Histogram Gradient Boosting, plus the daily strategy-file Trading-Loop. Previously this account only ran the loop; it had no prediction training/forecasting worker. The models now train on validated non-US daily candles, publish separate votes and validation status per stock, expire independently and learn from their own recorded outcomes. The default requires all three models to agree; `TRADING212_MIN_AGREEING_VOTES` accepts 2 or 3. Unvalidated or expired models cannot authorize buys. US stock news is not reused as a fourth vote for European listings.
+Trading 212 now has **two strategies**: daily predictions from Ridge, Extra Trees and Histogram Gradient Boosting, plus the daily strategy-file Trading-Loop. Previously this account only ran the loop; it had no prediction training/forecasting worker. The models now train on validated non-US daily candles, publish separate votes and validation status per stock, expire independently and learn from their own recorded outcomes. No news source covers these listings, so only the three models vote: by default 2 of 3 must agree (`TRADING212_MIN_AGREEING_VOTES=2`, or 3 for unanimity). Earlier versions also counted a news vote that can never be cast for European stocks, so effectively all three had to agree. Unvalidated or expired models cannot authorize buys. US stock news is not reused as a fourth vote for European listings.
 
 `TRADING212_PREDICTION_SHARE=0.50` reserves half this account's configured bot budget for predictions and half for the daily loop. Each share has its own position/gross limits; an account-wide cash/exposure check still applies. A stock belongs to one strategy at a time, so the other cannot add to it or sell it. Dashboard switches separately control prediction entries and loop entries; **Retrain non-US models** requests training. Prediction training needs no activated loop version and no Alpaca credentials.
 
@@ -86,3 +86,17 @@ Trading 212 defaults to demo. To read a live account, set `TRADING212_PAPER=fals
 - [Trading 212 fees](https://helpcentre.trading212.com/hc/en-us/articles/11471996799517-What-are-the-fees-in-the-Invest-ISAs-and-SIPP)
 - [Twelve Data API](https://twelvedata.com/docs)
 - [Frankfurter API](https://frankfurter.dev/)
+
+
+## Why nothing is bought: the diagnosis
+
+The Trading 212 panel lists each step with ✓/✗: account connection, listings loaded from the JSON file, listings found in the account's metadata (including exchange names the router does not know), daily candles, active Trading-Loop versions with green tests and today's buy signals, trained and validated prediction models, entry switches, exchange hours and the last order. The first ✗ is where the chain stops.
+
+Two causes found on 28 Oct 2026 and fixed:
+
+- **Yahoo's newest daily candle has no close for hours after the session.** The bot dropped that row, so its newest candle was always one session older than Trading 212's calendar, and every signal of both books was rejected as outdated ("Waiting for the latest completed exchange session's daily candle"). The row is now completed from the response's final trade price when both are from the same exchange day.
+- **An impossible news vote.** See above.
+
+Exchange names: Trading 212 does not publish them. If a mapped listing's exchange name is unknown, the mapping's MIC is used, but only when the broker's ISIN and currency match the mapping and nothing points to a US listing. Unknown names appear in the diagnosis.
+
+Prediction models only buy after passing validation (positive return on the last 30 sessions with at least 5 active days, positive walk-forward return). On the shipped listings they rarely signal strongly enough to pass, so expect most Trading 212 trades from the Trading-Loop until the models find an edge.
