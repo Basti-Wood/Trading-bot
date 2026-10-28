@@ -58,7 +58,61 @@ def create_app(config, store, broker_factory=Alpaca):
                 "data_status": secondary.get("data_status", {"status": "waiting"}),
                 "loop_evaluation": secondary.get("loop_evaluation", {"status": "waiting"}),
                 "errors": secondary.get("data_errors", {}), "orders": secondary.orders(30),
-                "ready_problem": secondary_resume_error("daily")}
+                "ready_problem": secondary_resume_error("daily"),
+                "diagnosis": secondary_diagnosis()}
+
+    def secondary_diagnosis():
+        """Step by step: where the Trading 212 chain currently stops, so "no trades" is never a mystery."""
+        steps = []
+        def step(name, ok, detail):
+            steps.append({"step": name, "ok": ok, "detail": detail})
+        engine = secondary.get("engine") or {}
+        account = secondary.get("account") or {}
+        fresh = bool(account.get("at")) and (pd.Timestamp.now(tz="UTC") - pd.Timestamp(account["at"])).total_seconds() <= 90
+        step("Verbindung zum Konto", fresh and engine.get("status") == "running",
+             f"{account.get('mode', '')} · Kontowert {account.get('equity')} {account.get('currency', '')}" if fresh
+             else (engine.get("message") if engine.get("status") in {"error", "setup", "blocked"} else None)
+             or "noch keine aktuellen Kontodaten (Schlüssel, Berechtigungen und Demo/Live-Einstellung prüfen)")
+        mapped = mapping_state()
+        step("Werte aus der JSON-Datei", mapped["count"] > 0 and not mapped["error"],
+             mapped["error"] or f"{mapped['count']} Werte aus {mapped['file']}")
+        errors = secondary.get("data_errors") or {}
+        missing = {s: e for s, e in errors.items() if "metadata" in e or "exchange" in e.lower()}
+        unknown = secondary.get("unknown_exchanges") or []
+        step("Bei Trading 212 gefunden", not missing,
+             (f"{len(missing)} nicht gefunden, z. B. {next(iter(missing))}: {next(iter(missing.values()))}" if missing
+              else f"alle {mapped['count']} Werte gefunden") + (f" · unbekannte Börsennamen: {', '.join(unknown[:6])}" if unknown else ""))
+        data = secondary.get("data_status") or {}
+        step("Tageskerzen geladen", data.get("status") == "ready",
+             f"{data.get('loaded', 0)}/{data.get('total', mapped['count'])} Werte, Status {data.get('status', 'wartet')}"
+             + (f" · {len(errors)} mit Fehler, z. B. {next(iter(errors))}: {next(iter(errors.values()))}" if errors else ""))
+        loop_rows = secondary.get("stocks") or []
+        versions = loop.active_versions(secondary)
+        green = sum(1 for r in loop_rows if (r.get("test") or {}).get("gruen"))
+        buys = [r["symbol"] for r in loop_rows if r.get("signal") == "BUY"]
+        step("Trading-Loop", bool(versions) and green > 0,
+             f"{len(versions)} aktive Version(en)" + (f", {green} Werte grün, Kaufsignal heute: {', '.join(buys) or 'keins'}" if versions
+             else " – im Bereich Trading-Loop eine Tageskerzen-Version mit SYMBOL = \"LISTE\" einschalten (z. B. grid_v1)"))
+        daily_rows = secondary_daily.get("stocks") or []
+        symbols = [r["symbol"] for r in daily_rows]
+        trained = sum(1 for s in symbols if secondary_daily.get(f"model:{s}"))
+        eligible = sum(1 for s in symbols if (secondary_daily.get(f"model:{s}") or {}).get("eligible"))
+        pbuys = [r["symbol"] for r in daily_rows if r.get("signal") == "BUY"]
+        step("Prognose-Modelle", eligible > 0,
+             f"{trained}/{len(symbols)} trainiert, {eligible} bestehen die Prüfung (nur diese dürfen kaufen), Kaufsignal heute: {', '.join(pbuys) or 'keins'}")
+        step("Einstiege eingeschaltet", secondary.get("entries_enabled", False) or secondary_daily.get("entries_enabled", False),
+             f"Trading-Loop {'an' if secondary.get('entries_enabled', False) else 'aus'}, Prognosen {'an' if secondary_daily.get('entries_enabled', False) else 'aus'}")
+        reasons = [r.get("reason") or "" for r in [*loop_rows, *daily_rows] if r.get("signal") == "BUY"]
+        closed = any("closed" in r for r in reasons)
+        step("Börse geöffnet (Mo–Fr ca. 09:05–17:00 Uhr deutscher Zeit)", None if not reasons else not closed,
+             "kein Kaufsignal, das gerade warten müsste" if not reasons else ("Kaufsignal wartet auf die Börsenöffnung" if closed
+             else "; ".join(dict.fromkeys(r[:120] for r in reasons))[:300]))
+        orders = secondary.orders(5)
+        last = orders[0] if orders else None
+        step("Orders", bool(last) and last.get("status") not in {"rejected", "unknown"},
+             f"letzte: {last.get('side')} {last.get('qty')} {last.get('symbol')} · {last.get('status')}" + (f" · {last.get('error')}" if last.get("error") else "")
+             if last else "noch keine Order gesendet")
+        return steps
 
     def loop_bots():
         """The trading-loop bots: daily candles ("loop") and intraday candles ("loop_day")."""

@@ -254,6 +254,29 @@ class YahooDataTests(Fixture):
         self.data._lock = __import__("threading").Lock()
         return self.data.session.get
 
+    def test_yahoos_empty_last_close_is_completed_from_the_final_trade(self):
+        # The real response for the newest session: open/volume present, close (and adjclose) empty for hours.
+        body = yahoo_chart(price_at=self.pd.Timestamp("2026-10-23T15:38:00Z"))
+        result = body["chart"]["result"][0]
+        result["indicators"]["quote"][0]["close"][-1] = None
+        result["indicators"]["quote"][0]["high"][-1] = None
+        result["indicators"]["adjclose"][0]["adjclose"][-1] = None
+        self.respond(body)
+        evening = self.pd.Timestamp("2026-10-23T23:30:00Z")  # Saturday in Berlin: Friday's session is complete.
+        with patch("app.trading212.time.sleep"):
+            frame = self.data.bars(self.instrument, SPEC, evening)
+        self.assertEqual(str(frame.index[-1].tz_convert("Europe/Berlin").date()), "2026-10-23")
+        self.assertEqual(frame.close.iloc[-1], 214.4)
+        self.assertGreaterEqual(frame.high.iloc[-1], 214.4)
+        # A header price from another day never fills the row; the incomplete candle is dropped instead.
+        self.data._bars = {}
+        body = yahoo_chart(price_at=self.pd.Timestamp("2026-10-22T15:38:00Z"))
+        body["chart"]["result"][0]["indicators"]["quote"][0]["close"][-1] = None
+        self.respond(body)
+        with patch("app.trading212.time.sleep"):
+            frame = self.data.bars(self.instrument, SPEC, evening)
+        self.assertEqual(str(frame.index[-1].tz_convert("Europe/Berlin").date()), "2026-10-22")
+
     def test_daily_candles_are_complete_adjusted_and_fetched_once_a_day(self):
         get = self.respond(yahoo_chart(split_day=10))
         with patch("app.trading212.time.sleep"):
@@ -297,3 +320,25 @@ class SessionWindowTests(unittest.TestCase):
         self.assertTrue(entry_window(session, at("15:00")))
         self.assertFalse(entry_window(session, at("15:10")))
         self.assertFalse(entry_window({**session, "open": False}, at("12:00")))
+
+
+class NewsVoteTests(unittest.TestCase):
+    def test_books_without_news_count_only_the_three_models(self):
+        from app.research import ballots, combine
+        forecast = {"eligible": True, "models": [{"name": n, "signal": v} for n, v in (("a", "BUY"), ("b", "BUY"), ("c", "HOLD"))]}
+        self.assertIn("LLM news", ballots(forecast))  # Alpaca's daily book keeps its news vote.
+        self.assertEqual(set(ballots({**forecast, "news": False})), {"a", "b", "c"})
+        self.assertEqual(combine({**forecast, "news": False}, None, min_votes=2)[0], "BUY")
+        self.assertEqual(combine({**forecast, "news": False}, None, min_votes=3)[0], "HOLD")
+
+
+class DiagnosisTests(Fixture):
+    def test_state_explains_step_by_step_why_nothing_is_bought(self):
+        steps = create_app(self.cfg, self.store).test_client().get("/api/state").get_json()["trading212"]["diagnosis"]
+        names = [s["step"] for s in steps]
+        self.assertEqual(names[:4], ["Verbindung zum Konto", "Werte aus der JSON-Datei", "Bei Trading 212 gefunden", "Tageskerzen geladen"])
+        by_name = {s["step"]: s for s in steps}
+        self.assertTrue(by_name["Werte aus der JSON-Datei"]["ok"])
+        self.assertFalse(by_name["Verbindung zum Konto"]["ok"])
+        self.assertIn("grid_v1", by_name["Trading-Loop"]["detail"])  # No active version: says what to switch on.
+        self.assertEqual(by_name["Orders"]["detail"], "noch keine Order gesendet")

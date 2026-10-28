@@ -60,6 +60,7 @@ class PredictionExecutionTests(EngineFixture):
         self.assertEqual(self.store.get("account")["cash"], 999999)
 
     def test_two_bullish_models_do_not_bypass_the_three_vote_setting(self):
+        self.engine.predictions.config = replace(self.engine.predictions.config, trading212_min_votes=3)
         self.forecast(("BUY", "BUY", "HOLD"))
         self.engine.cycle(NOW)
         self.broker.submit.assert_not_called()
@@ -254,7 +255,7 @@ class PredictionControlTests(Fixture):
         state = client.get("/api/state").get_json()["trading212"]
         self.assertEqual(state["prediction"]["share"], .5)
         self.assertEqual(state["loop"]["share"], .5)
-        self.assertEqual(state["prediction"]["min_votes"], 3)
+        self.assertEqual(state["prediction"]["min_votes"], 2)  # Majority of the three models; no news vote exists.
         self.assertIn("training", state["prediction"])
         self.assertIn("parallel", state["execution_policy"])
 

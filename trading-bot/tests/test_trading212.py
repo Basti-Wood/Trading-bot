@@ -65,13 +65,24 @@ class ApiTests(Fixture):
         return broker
 
     def test_us_exchange_is_rejected_even_when_ticker_and_currency_look_european(self):
-        for exchange in ("NYSE", "NASDAQ", "UNKNOWN"):
+        for exchange in ("NYSE", "NASDAQ", "Nasdaq Global Select", "UNKNOWN"):
             with self.subTest(exchange=exchange):
+                if exchange == "UNKNOWN":
+                    self.mapping.write_text("{}")  # An unknown name is only accepted for a mapped listing.
                 broker = self.adapter(exchange)
                 broker.request = Mock()
                 with self.assertRaises(BrokerError):
                     broker.submit(TICKER, "buy", 3, kind="market")
                 broker.request.assert_not_called()
+
+    def test_unknown_exchange_name_uses_the_mapping_only_when_isin_and_currency_agree(self):
+        broker = self.adapter("Frankfurter Wertpapierbörse (Xetra)")
+        item = broker.instrument(TICKER)
+        self.assertEqual((item["schedule"]["mic"], item["schedule"]["mic_source"]), ("XETR", "mapping"))
+        self.assertEqual(broker.unknown_exchanges, ["Frankfurter Wertpapierbörse (Xetra)"])
+        self.mapping.write_text(json.dumps({TICKER: {**SPEC, "isin": "DE0007164600"}}))
+        with self.assertRaises(BrokerError):
+            self.adapter("Frankfurter Wertpapierbörse (Xetra)").instrument(TICKER)
 
     def test_only_non_us_stocks_and_etfs_are_accepted(self):
         broker = self.adapter(kind="CRYPTO")

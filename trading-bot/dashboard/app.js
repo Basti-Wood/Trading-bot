@@ -349,6 +349,7 @@ function renderTrading212(s) {
   const prediction=t.prediction||{},lp=t.loop||{},training=prediction.training||{};
   const data=t.data_status||{},evaluation=t.loop_evaluation||{};
   $('t212-data-status').textContent=`Daily data: ${data.status||'waiting'} · ${data.loaded??0}/${data.total??t.mappings?.count??0} listings${data.symbol?' · '+data.symbol:''}${data.at?' · '+time(data.at):''} · Loop evaluation: ${evaluation.status||'waiting'}${evaluation.version?' · '+evaluation.version:''}`;
+  $('t212-diagnosis').innerHTML=(t.diagnosis||[]).map(d=>`<div class="log-row"><b class="${d.ok===true?'buy':d.ok===false?'sell':'hold'}">${d.ok===true?'✓':d.ok===false?'✗':'•'} ${escape(d.step)}</b><span>${escape(d.detail)}</span></div>`).join('');
   $('t212-data-errors').innerHTML=[...Object.entries(t.errors||{}),...Object.entries(evaluation.errors||{})].map(([key,message])=>`<div class="log-row"><b>${escape(key)}</b><span>${escape(message)}</span></div>`).join('');
   $('t212-daily-toggle').textContent=prediction.entries_enabled?'Pause prediction entries':'Enable prediction entries';
   $('t212-loop-toggle').textContent=lp.entries_enabled?'Pause loop entries':'Enable loop entries';

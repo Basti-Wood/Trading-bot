@@ -63,6 +63,14 @@ MARKETS = {
 }
 
 
+US_EXCHANGE_WORDS = ("nyse", "nasdaq", "amex", "otc", "cboe", "bats", "arca", "iex", "united states", "us market")
+
+
+def us_listing(ticker, exchange_name):
+    name = str(exchange_name).lower()
+    return "_US_" in ticker or any(word in name for word in US_EXCHANGE_WORDS)
+
+
 def market_code(name):
     key = re.sub(r"[^a-zäöü]", "", str(name).lower())
     return MARKETS.get(key)
@@ -101,6 +109,7 @@ class Trading212:
         self.session.auth = (config.trading212_key, config.trading212_secret)
         self._cache = {}
         self._lock = threading.RLock()
+        self.unknown_exchanges = []
 
     def request(self, method, path, **kwargs):
         if not self.config.trading212_configured:
@@ -145,8 +154,27 @@ class Trading212:
         exchanges = self.cached("/equity/metadata/exchanges", 600)
         schedules = {s["id"]: {**s, "exchange": ex["name"], "mic": market_code(ex["name"])}
                      for ex in exchanges for s in ex.get("workingSchedules", [])}
-        return {i["ticker"]: {**i, "schedule": schedules.get(i.get("workingScheduleId"))}
-                for i in instruments if INSTRUMENT.fullmatch(i.get("ticker", ""))}
+        # Exchange names the router does not know yet, shown in the dashboard's diagnosis.
+        self.unknown_exchanges = sorted({s["exchange"] for s in schedules.values() if not s["mic"]})
+        try:
+            specs = mappings(self.config)
+        except BrokerError:
+            specs = {}
+        result = {}
+        for item in instruments:
+            ticker = item.get("ticker", "")
+            if not INSTRUMENT.fullmatch(ticker):
+                continue
+            schedule = schedules.get(item.get("workingScheduleId"))
+            spec = specs.get(ticker)
+            # Trading 212 does not publish its exchange names. If a mapped listing's exchange name is
+            # unknown, the mapping's MIC may stand in, but only when ISIN and currency agree and
+            # nothing suggests a US listing (Alpaca alone trades those).
+            if (schedule and not schedule["mic"] and spec and not us_listing(ticker, schedule["exchange"])
+                    and item.get("isin") == spec["isin"] and currency(item.get("currencyCode")) == currency(spec["currency"])):
+                schedule = {**schedule, "mic": spec["mic"], "mic_source": "mapping"}
+            result[ticker] = {**item, "schedule": schedule}
+        return result
 
     def instrument(self, ticker):
         item = self.metadata().get(ticker)
@@ -386,6 +414,32 @@ def complete_sessions(frame, zone, now):
     return frame
 
 
+def complete_last_candle(frame, meta, zone):
+    """Yahoo leaves the newest daily candle's close (and sometimes high/low) empty for hours after the
+    session; its final trade is in meta.regularMarketPrice. Without this, the latest completed session
+    was always missing, every signal looked a day old and nothing was ever bought."""
+    if frame.empty or not pd.isna(frame["close"].iloc[-1]):
+        return
+    try:
+        traded = pd.Timestamp(number(meta["regularMarketTime"]), unit="s", tz="UTC")
+        price = number(meta["regularMarketPrice"], nonnegative=True)
+    except (KeyError, BrokerError):
+        return
+    last = frame.index[-1]
+    if price <= 0 or traded.tz_convert(zone).date() != last.tz_convert(zone).date():
+        return  # The header price belongs to another day; leave the row incomplete (it is dropped).
+    row = frame.iloc[-1]
+    high = [v for v in (row["high"], meta.get("regularMarketDayHigh"), price, row["open"]) if v is not None and not pd.isna(v)]
+    low = [v for v in (row["low"], meta.get("regularMarketDayLow"), price, row["open"]) if v is not None and not pd.isna(v)]
+    frame.loc[last, "close"] = price
+    frame.loc[last, "high"] = max(float(v) for v in high)
+    frame.loc[last, "low"] = min(float(v) for v in low)
+    if pd.isna(row["open"]):
+        frame.loc[last, "open"] = price
+    if pd.isna(row["volume"]):
+        frame.loc[last, "volume"] = 0.
+
+
 # Yahoo Finance symbol suffix and exchange code for each MIC the router supports.
 YAHOO_SUFFIX = {"XETR": ".DE", "XPAR": ".PA", "XAMS": ".AS", "XBRU": ".BR", "XMIL": ".MI", "XMAD": ".MC",
                 "XLIS": ".LS", "XLON": ".L", "XSWX": ".SW", "XWBO": ".VI", "XTSE": ".TO", "XTKS": ".T"}
@@ -484,12 +538,16 @@ class YahooData:
         zone = meta.get("exchangeTimezoneName")
         try:
             quotes = result["indicators"]["quote"][0]
-            frame = pd.DataFrame({k: quotes[k] for k in ("open", "high", "low", "close", "volume")},
-                                 index=pd.to_datetime(result["timestamp"], unit="s", utc=True)).dropna()
+            index = pd.to_datetime(result["timestamp"], unit="s", utc=True)
+            frame = pd.DataFrame({k: quotes[k] for k in ("open", "high", "low", "close", "volume")}, index=index, dtype=float)
+            complete_last_candle(frame, meta, zone)
+            frame = frame.dropna()
             adjusted = result["indicators"].get("adjclose", [{}])[0].get("adjclose")
             if adjusted:
                 # Same as an "adjust all" feed: scale prices by the split/dividend adjustment factor.
-                factor = pd.Series(adjusted, index=pd.to_datetime(result["timestamp"], unit="s", utc=True)).reindex(frame.index) / frame.close
+                # The newest row often has no adjclose yet; it keeps the previous day's factor.
+                factor = pd.Series(adjusted, index=index, dtype=float).reindex(frame.index) / frame.close
+                factor = factor.where(factor > 0).ffill().fillna(1.)
                 frame[["open", "high", "low", "close"]] = frame[["open", "high", "low", "close"]].mul(factor, axis=0)
             # Daily candles are stamped at the session start; use the exchange-local date at midnight.
             local = frame.index.tz_convert(zone).normalize()
