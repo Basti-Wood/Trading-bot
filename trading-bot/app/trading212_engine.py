@@ -12,7 +12,7 @@ from . import loop
 from .broker import BrokerError
 from .execution import TERMINAL
 from .store import Store, StrategyStore, utcnow
-from .trading212 import Trading212, market_data, mappings, number
+from .trading212 import Trading212, market_data, mappings, number, resolve_mappings
 from .trading212_prediction import PredictionWorker
 
 
@@ -202,17 +202,20 @@ class Trading212Engine:
         self.store.set("retest_requested", False)
         self.last_signals = time.monotonic()
         records = loop.active_versions(self.store)
-        self.store.set("data_status", {"status": "loading", "loaded": 0, "total": len(specs), "at": utcnow()})
+        mapping_errors = self.store.get("mapping_resolution", {}).get("errors", {})
+        total = len(specs) + len(mapping_errors)
+        self.store.set("data_status", {"status": "loading", "loaded": 0, "total": total, "at": utcnow()})
 
         def work():
             frames, sessions = {}, {}
             errors = {s: e for s, e in self.store.get("data_errors", {}).items() if s in specs}
+            errors.update(mapping_errors)
             for ticker, spec in specs.items():
                 if self.stop.is_set():
                     return
                 try:
                     self.store.set("data_status", {"status": "loading", "symbol": ticker,
-                        "loaded": len(frames), "total": len(specs), "at": utcnow()})
+                        "loaded": len(frames), "total": total, "at": utcnow()})
                     instrument = self.broker.instrument(ticker)
                     frame = self.data.bars(instrument, spec, now).copy(deep=True)
                     session = self.broker.session_for(ticker, now)
@@ -245,7 +248,7 @@ class Trading212Engine:
                 self.daily.set("data_errors", errors)
             self.predictions.set_frames(frames)
             self.store.set("data_status", {"status": "partial" if frames and errors else "error" if errors else "ready",
-                "loaded": len(frames), "total": len(specs), "sessions": sessions, "at": utcnow()})
+                "loaded": len(frames), "total": total, "sessions": sessions, "at": utcnow()})
             self.store.set("data_errors", errors)
             self.daily.set("data_errors", errors)
             # A version can backtest many stocks for minutes. It must not occupy the worker
@@ -413,7 +416,7 @@ class Trading212Engine:
             elif book.get(f"exit_reason:{symbol}") and position and owned:
                 action, reason = "SELL", book.get(f"exit_reason:{symbol}")
             elif symbol not in specs:
-                reason = "Map this listing to matching daily data before trading"
+                reason = book.get("data_errors", {}).get(symbol) or "Map this listing to matching daily data before trading"
             else:
                 spec = specs[symbol]
                 instrument = self.broker.instrument(symbol)
@@ -491,6 +494,7 @@ class Trading212Engine:
                "views": choice.get("views", {}), "models": choice.get("models", []),
                "expected_return": choice.get("expected_return"), "eligible": choice.get("eligible"),
                "quality": choice.get("quality"), "owner": loop.owner_version(book, symbol) if mode == "loop" and owned else None}
+        row["validation"] = choice.get("validation")
         return row, acted
 
     def cycle(self, now=None):
@@ -518,8 +522,24 @@ class Trading212Engine:
             self.store.set("risk_rules", rules)
         safe_rules = rules if rules["ok"] else self.store.get("risk_rules") or {}
         acted, protected = self._risk(account, positions, orders, reconciled, now, safe_rules)
-        specs = mappings(self.config)
-        symbols = sorted(set(specs) | {p["symbol"] for p in positions})
+        configured = mappings(self.config)
+        instruments = self.broker.metadata()
+        blocked = {s for book in self.books.values() for s in book.owned_symbols()}
+        blocked.update(o["symbol"] for o in self.store.unresolved_orders())
+        # A corporate rename must not turn old confirmed fills into an apparently new,
+        # unowned symbol merely because the old ticker disappeared from positions.
+        blocked.update(s for s in configured if s not in instruments
+                       and any(self.owned_quantity(s, mode) > 0 for mode in self.books))
+        resolution = resolve_mappings(configured, instruments, blocked)
+        previous = self.store.get("mapping_resolution", {})
+        if previous.get("specs") != resolution["specs"]:
+            self.store.set("retest_requested", True)
+        self.store.set("mapping_resolution", resolution)
+        specs = resolution["specs"]
+        for book in self.books.values():
+            errors = {s: e for s, e in book.get("data_errors", {}).items() if s in specs}
+            book.set("data_errors", {**errors, **resolution["errors"]})
+        symbols = sorted(set(specs) | set(resolution["errors"]) | {p["symbol"] for p in positions})
         modes = ["loop", "daily"] if self.turn % 2 == 0 else ["daily", "loop"]
         self.turn += 1
         plans = []

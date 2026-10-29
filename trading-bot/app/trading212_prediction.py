@@ -22,6 +22,8 @@ def train_frames_worker(config, frames):
         for symbol, bars in frames.items():
             try:
                 store.set(f"training_attempt:{symbol}", time.time())
+                store.set(f"training_attempt_signature:{symbol}",
+                          strategy_signature(config) + ":" + str(bars.attrs.get("source_signature")))
                 train_symbol(config, store, symbol, bars)
             except Exception as exc:
                 failures[symbol] = str(exc)[:200]
@@ -83,7 +85,9 @@ class PredictionWorker:
             changed = (meta.get("strategy_signature") != strategy_signature(self.config)
                        or meta.get("input_signature") != frame.attrs.get("source_signature"))
             expired = not meta.get("created_at") or (pd.Timestamp.now(tz="UTC") - pd.Timestamp(meta["created_at"])).total_seconds() > self.config.model_max_age_hours * 3600
-            if (requested or due or changed or expired) and (requested or now - self.store.get(f"training_attempt:{symbol}", 0) >= 3600):
+            attempt_signature = strategy_signature(self.config) + ":" + str(frame.attrs.get("source_signature"))
+            new_settings = self.store.get(f"training_attempt_signature:{symbol}") != attempt_signature
+            if (requested or due or changed or expired) and (requested or new_settings or now - self.store.get(f"training_attempt:{symbol}", 0) >= 3600):
                 targets[symbol] = frame
         if not targets:
             return
@@ -117,6 +121,8 @@ class PredictionWorker:
             return {**forecast, "signal": "HOLD", "quality": quality, "reason": quality["reason"]}
         # No news source covers these listings, so the impossible news vote is left out.
         action, reason = combine({**forecast, "news": False}, None, now=now.to_pydatetime(), min_votes=self.config.trading212_min_votes)
+        if not forecast.get("eligible") and (forecast.get("validation") or {}).get("reasons"):
+            reason += "; " + "; ".join(forecast["validation"]["reasons"])
         return {**forecast, "signal": action, "quality": quality, "reason": reason,
                 "votes": {m["name"]: m["signal"] for m in forecast["models"]}}
 
