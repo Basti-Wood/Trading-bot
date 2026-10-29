@@ -33,6 +33,8 @@
 <p id="t212-note" class="muted"></p><div class="row-actions"><button id="t212-toggle" type="button">Enable Trading 212 entries</button><button id="t212-retest" type="button">Retest non-US stocks</button><button id="t212-reset" type="button">Reset Trading 212 drawdown peak</button><a href="/api/trading212/diagnostics" download>Download diagnostics</a></div>
 <h3>Diagnose: warum (noch) nicht gekauft wird</h3><div id="t212-diagnosis" class="training-log"></div>
 <p id="t212-data-status" class="small muted"></p><div id="t212-data-errors" class="training-log"></div>
+<p id="t212-aliases" class="small muted"></p>
+<details><summary>Trading-Loop: Einzeltests und Ablehnungsgründe</summary><div id="t212-loop-tests" class="training-log"></div></details>
 <p class="small muted">Three local models predict each mapped listing independently. The daily Trading-Loop evaluates its active versions on the same listing’s own candles. Each strategy has its own budget and position ownership. Both brokers run in parallel during their exchanges’ hours; the US open does not stop European entries. Pausing entries retains protective exits.</p>
 <div class="row-actions"><button id="t212-daily-toggle" type="button">Enable prediction entries</button><button id="t212-loop-toggle" type="button">Enable loop entries</button><button id="t212-train" type="button">Retrain non-US models</button></div>
 <h3>Non-US prediction models</h3><p id="t212-training" class="small muted">Waiting for daily data.</p>

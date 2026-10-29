@@ -32,6 +32,33 @@ def create_app(config, store, broker_factory=Alpaca):
     secondary_daily_cfg, secondary_daily = trading212_context(config, "daily") if config.trading212_enabled else (None, None)
     secondary_books = {"loop": secondary, "daily": secondary_daily} if secondary else {}
 
+    def secondary_loop_tests(include_rows=False):
+        available = {v["version"]: v for v in loop.catalogue(secondary_cfg)}
+        out = []
+        for version, record in loop.active_versions(secondary).items():
+            result = secondary.get(f"loop_results:{version}") or {}
+            problem = (secondary.get(f"loop_error:{version}") or {}).get("message")
+            info = available.get(version)
+            if not info:
+                problem = "Strategy file is unavailable"
+            elif info["sha256"] != record["sha256"]:
+                problem = "Strategy changed since activation; retest and reactivate this version"
+            elif not info["tradable"]:
+                problem = info["note"]
+            items = result.get("symbols", {}) if result.get("sha256") == record["sha256"] else {}
+            rows = [{"symbol": symbol, "signal": item.get("signal"), "test": item.get("test"), "error": item.get("error")}
+                    for symbol, item in items.items()]
+            tested = [r for r in rows if r["test"]]
+            errors = [r for r in rows if r["error"]]
+            rejected = list(dict.fromkeys(r["test"].get("urteil", "Not qualified") for r in tested if not r["test"].get("gruen")))
+            entry = {"version": version, "tested": len(tested), "green": sum(bool(r["test"].get("gruen")) for r in tested),
+                "errors": len(errors), "error": problem or (errors[0]["error"] if errors else None), "rejections": rejected,
+                "status": "error" if problem or errors else "complete" if tested else "waiting"}
+            if include_rows:
+                entry["rows"] = rows
+            out.append(entry)
+        return out
+
     def secondary_state():
         if secondary is None:
             return {"enabled": False, "configured": False}
@@ -40,7 +67,7 @@ def create_app(config, store, broker_factory=Alpaca):
                 "live_execution_allowed": config.trading212_allow_live,
                 "entries_enabled": any(book.get("entries_enabled", False) for book in secondary_books.values()),
                 "loop": {"entries_enabled": secondary.get("entries_enabled", False), "share": 1 - config.trading212_prediction_share,
-                         "ready_problem": secondary_resume_error("loop")},
+                         "ready_problem": secondary_resume_error("loop"), "tests": secondary_loop_tests()},
                 "prediction": {"entries_enabled": secondary_daily.get("entries_enabled", False),
                     "share": config.trading212_prediction_share, "min_votes": config.trading212_min_votes,
                     "training": secondary_daily.get("training", {"status": "waiting for daily data"}),
@@ -55,6 +82,7 @@ def create_app(config, store, broker_factory=Alpaca):
                 "allow_fx": config.trading212_allow_fx, "data_source": config.trading212_data_source,
                 "data_configured": config.trading212_data_source == "yahoo" or bool(config.twelvedata_key),
                 "mappings": mapping_state(),
+                "mapping_resolution": secondary.get("mapping_resolution", {}),
                 "data_status": secondary.get("data_status", {"status": "waiting"}),
                 "loop_evaluation": secondary.get("loop_evaluation", {"status": "waiting"}),
                 "errors": secondary.get("data_errors", {}), "orders": secondary.orders(30),
@@ -69,7 +97,7 @@ def create_app(config, store, broker_factory=Alpaca):
         engine = secondary.get("engine") or {}
         account = secondary.get("account") or {}
         fresh = bool(account.get("at")) and (pd.Timestamp.now(tz="UTC") - pd.Timestamp(account["at"])).total_seconds() <= 90
-        step("Verbindung zum Konto", fresh and engine.get("status") == "running",
+        step("Verbindung zum Konto", fresh,
              f"{account.get('mode', '')} · Kontowert {account.get('equity')} {account.get('currency', '')}" if fresh
              else (engine.get("message") if engine.get("status") in {"error", "setup", "blocked"} else None)
              or "noch keine aktuellen Kontodaten (Schlüssel, Berechtigungen und Demo/Live-Einstellung prüfen)")
@@ -77,11 +105,14 @@ def create_app(config, store, broker_factory=Alpaca):
         step("Werte aus der JSON-Datei", mapped["count"] > 0 and not mapped["error"],
              mapped["error"] or f"{mapped['count']} Werte aus {mapped['file']}")
         errors = secondary.get("data_errors") or {}
-        missing = {s: e for s, e in errors.items() if "metadata" in e or "exchange" in e.lower()}
+        resolution = secondary.get("mapping_resolution", {})
+        missing = resolution.get("errors", {s: e for s, e in errors.items() if "metadata" in e or "exchange" in e.lower()})
         unknown = secondary.get("unknown_exchanges") or []
         step("Bei Trading 212 gefunden", not missing,
              (f"{len(missing)} nicht gefunden, z. B. {next(iter(missing))}: {next(iter(missing.values()))}" if missing
-              else f"alle {mapped['count']} Werte gefunden") + (f" · unbekannte Börsennamen: {', '.join(unknown[:6])}" if unknown else ""))
+              else f"alle {mapped['count']} Werte gefunden") +
+             (f" · {len(resolution['aliases'])} veraltete Ticker eindeutig zugeordnet" if resolution.get("aliases") else "") +
+             (f" · unbekannte Nicht-US-Börsennamen: {', '.join(unknown[:6])}" if unknown else ""))
         data = secondary.get("data_status") or {}
         step("Tageskerzen geladen", data.get("status") == "ready",
              f"{data.get('loaded', 0)}/{data.get('total', mapped['count'])} Werte, Status {data.get('status', 'wartet')}"
@@ -90,16 +121,33 @@ def create_app(config, store, broker_factory=Alpaca):
         versions = loop.active_versions(secondary)
         green = sum(1 for r in loop_rows if (r.get("test") or {}).get("gruen"))
         buys = [r["symbol"] for r in loop_rows if r.get("signal") == "BUY"]
-        step("Trading-Loop", bool(versions) and green > 0,
+        tests = secondary_loop_tests()
+        failures = [t for t in tests if t["status"] == "error"]
+        completed = sum(t["tested"] for t in tests)
+        detail = f" · Fehler: {failures[0]['version']}: {failures[0]['error']}" if failures else ""
+        if not detail and completed:
+            detail = f" · {completed} Einzeltests berechnet; " + ("kein Einzeltest qualifiziert" if not green else "Einzeltests verfügbar")
+        elif not detail and versions:
+            detail = " · Einzeltests laufen oder warten noch auf Tageskerzen"
+        step("Trading-Loop", False if failures or not versions else True if green else None,
              f"{len(versions)} aktive Version(en)" + (f", {green} Werte grün, Kaufsignal heute: {', '.join(buys) or 'keins'}" if versions
-             else " – im Bereich Trading-Loop eine Tageskerzen-Version mit SYMBOL = \"LISTE\" einschalten (z. B. grid_v1)"))
+             else " – im Bereich Trading-Loop eine Tageskerzen-Version mit SYMBOL = \"LISTE\" einschalten (z. B. grid_v1)") + detail)
         daily_rows = secondary_daily.get("stocks") or []
         symbols = [r["symbol"] for r in daily_rows]
         trained = sum(1 for s in symbols if secondary_daily.get(f"model:{s}"))
         eligible = sum(1 for s in symbols if (secondary_daily.get(f"model:{s}") or {}).get("eligible"))
         pbuys = [r["symbol"] for r in daily_rows if r.get("signal") == "BUY"]
-        step("Prognose-Modelle", eligible > 0,
-             f"{trained}/{len(symbols)} trainiert, {eligible} bestehen die Prüfung (nur diese dürfen kaufen), Kaufsignal heute: {', '.join(pbuys) or 'keins'}")
+        rejections = []
+        for symbol in symbols:
+            validation = (secondary_daily.get(f"model:{symbol}") or {}).get("validation") or {}
+            rejections.extend(validation.get("reasons", []))
+        training = secondary_daily.get("training") or {}
+        failed_training = training.get("status") in {"failed", "worker failed", "resource limit reached", "partial failure"}
+        step("Prognose-Modelle", False if failed_training else True if eligible else None,
+             f"{trained}/{len(symbols)} trainiert, {eligible} bestehen die Prüfung (nur diese dürfen kaufen), Kaufsignal heute: {', '.join(pbuys) or 'keins'}"
+             + (f" · Training: {training['status']}: {training.get('message') or next(iter(training.get('errors', {}).values()), '')}" if failed_training else "")
+             + (" · " + "; ".join(list(dict.fromkeys(rejections))[:3]) if rejections else
+                " · Prüfdetails erscheinen nach dem nächsten Training" if trained and not eligible else ""))
         step("Einstiege eingeschaltet", secondary.get("entries_enabled", False) or secondary_daily.get("entries_enabled", False),
              f"Trading-Loop {'an' if secondary.get('entries_enabled', False) else 'aus'}, Prognosen {'an' if secondary_daily.get('entries_enabled', False) else 'aus'}")
         reasons = [r.get("reason") or "" for r in [*loop_rows, *daily_rows] if r.get("signal") == "BUY"]
@@ -109,7 +157,7 @@ def create_app(config, store, broker_factory=Alpaca):
              else "; ".join(dict.fromkeys(r[:120] for r in reasons))[:300]))
         orders = secondary.orders(5)
         last = orders[0] if orders else None
-        step("Orders", bool(last) and last.get("status") not in {"rejected", "unknown"},
+        step("Orders", last.get("status") not in {"rejected", "unknown"} if last else None,
              f"letzte: {last.get('side')} {last.get('qty')} {last.get('symbol')} · {last.get('status')}" + (f" · {last.get('error')}" if last.get("error") else "")
              if last else "noch keine Order gesendet")
         return steps
@@ -367,7 +415,8 @@ def create_app(config, store, broker_factory=Alpaca):
                 currency = "USD"
                 if bot == "trading212":
                     try:
-                        code = (trading212_mappings(config).get(symbol) or {}).get("currency", "")
+                        code = (secondary.get("mapping_resolution", {}).get("specs", {}).get(symbol)
+                                or trading212_mappings(config).get(symbol) or {}).get("currency", "")
                     except BrokerError:
                         code = ""
                     # GBX (pence) prices are shown as pence, never as dollars.
@@ -631,11 +680,12 @@ def create_app(config, store, broker_factory=Alpaca):
             return jsonify(error="Trading 212 is disabled"), 409
         state = secondary_state()
         report = {key: state[key] for key in ("configured", "mode", "engine", "mappings", "data_source",
-            "data_status", "loop_evaluation", "errors", "ready_problem", "entries_enabled", "live_execution_allowed")}
+            "data_status", "loop_evaluation", "errors", "ready_problem", "entries_enabled", "live_execution_allowed", "mapping_resolution")}
         report.update(at=utcnow(), account_checked_at=(state["account"] or {}).get("at"),
             verified_instruments=len(secondary.get("instruments", [])),
             prediction={**{k: v for k, v in state["prediction"].items() if k != "halt"},
-                        "halt": bool(state["prediction"].get("halt"))}, loop=state["loop"],
+                        "halt": bool(state["prediction"].get("halt"))},
+            loop={**state["loop"], "tests": secondary_loop_tests(include_rows=True)},
             active_versions=list(loop.active_versions(secondary)),
             loop_errors={v: secondary.get(f"loop_error:{v}") for v in loop.active_versions(secondary)
                          if secondary.get(f"loop_error:{v}")},
