@@ -281,14 +281,23 @@ class Trading212:
         raise BrokerError("Order absent from pending orders and history; outcome unresolved")
 
     def cash_flows(self, since):
+        """Deposits, withdrawals and cash transfers since `since`; interest and fees count as results."""
+        start = pd.Timestamp(since)
         rows = []
         for page in self.pages("/equity/history/transactions", {"time": since, "limit": 50}):
             for row in page:
-                if row.get("type") == "TRANSFER":
-                    raise BrokerError("Transfers need a valued performance adjustment")
-                if row.get("type") in {"DEPOSIT", "WITHDRAW"}:
-                    amount = abs(number(row["amount"])) * (-1 if row["type"] == "WITHDRAW" else 1)
-                    rows.append({"at": row["dateTime"], "amount": amount, "currency": row["currency"]})
+                kind = row.get("type")
+                if kind not in {"DEPOSIT", "WITHDRAW", "TRANSFER"}:
+                    continue
+                try:
+                    if pd.Timestamp(row["dateTime"]) < start:
+                        continue  # Only movements after tracking began change the invested capital.
+                except (KeyError, TypeError, ValueError):
+                    pass
+                amount = number(row["amount"])
+                if kind != "TRANSFER":  # A transfer's sign gives its direction; the others are unsigned.
+                    amount = abs(amount) * (-1 if kind == "WITHDRAW" else 1)
+                rows.append({"at": row.get("dateTime"), "amount": amount, "currency": row["currency"]})
         return rows
 
     def submit(self, ticker, side, qty, *, kind, price=None):

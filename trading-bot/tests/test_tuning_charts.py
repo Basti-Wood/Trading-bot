@@ -145,7 +145,8 @@ class LoopChartTests(PortfolioCase):
         client = create_app(self.cfg, self.store).test_client()
         data = client.get("/api/loop/chart/AAA").get_json()
         self.assertEqual((data["version"], data["deciding"], data["chart"]), ("trend_v2", True, chart))
-        self.assertEqual(client.get("/api/loop/chart/ZZZ").status_code, 404)
+        pending = client.get("/api/loop/chart/ZZZ")  # Not computed yet: a normal answer, not a 404 error.
+        self.assertEqual((pending.status_code, pending.get_json()["pending"]), (200, True))
         self.assertEqual(client.get("/api/loop/chart/a%20b").status_code, 400)
         state = client.get("/api/state").get_json()
         rows = [r for v in state["loop"]["running"] for r in v["rows"]]

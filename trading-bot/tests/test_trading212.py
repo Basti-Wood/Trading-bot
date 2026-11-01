@@ -362,9 +362,46 @@ class AccountTests(Fixture):
         broker = Mock(base="paper-alpaca")
         broker.account.return_value = {"id": "1", "equity": 10000, "cash": 3000, "currency": "USD"}
         broker.cash_flows.side_effect = BrokerError("missing permission", 403)
-        result = Accounts(self.cfg, self.store, alpaca=broker).observe("alpaca", broker, NOW)
+        accounts = Accounts(self.cfg, self.store, alpaca=broker)
+        result = accounts.observe("alpaca", broker, NOW)
         self.assertEqual(result["equity"], 10000)
-        self.assertIsNone(result["return_fraction"])
+        # Without a funding history the value change is still shown, marked as unadjusted.
+        self.assertEqual(result["return_fraction"], 0.)
+        self.assertTrue(result["unadjusted"])
+        self.assertIn("nicht herausgerechnet", result["return_error"])
+        broker.account.return_value = {"id": "1", "equity": 10500, "cash": 3000, "currency": "USD"}
+        later = accounts.observe("alpaca", broker, NOW + pd.Timedelta(minutes=1))
+        self.assertAlmostEqual(later["return_fraction"], .05)
+
+    def test_funding_history_after_an_unadjusted_start_resets_the_baseline(self):
+        broker = Mock(base="paper-alpaca")
+        broker.account.return_value = {"id": "1", "equity": 10000, "cash": 3000, "currency": "USD"}
+        broker.cash_flows.side_effect = BrokerError("rate limit", 429)
+        accounts = Accounts(self.cfg, self.store, alpaca=broker)
+        accounts.observe("alpaca", broker, NOW)
+        broker.cash_flows.side_effect = None
+        broker.cash_flows.return_value = [{"at": NOW.isoformat(), "amount": 500., "currency": "USD"}]
+        broker.account.return_value = {"id": "1", "equity": 10500, "cash": 3500, "currency": "USD"}
+        result = accounts.observe("alpaca", broker, NOW + pd.Timedelta(minutes=1))
+        self.assertFalse(result.get("unadjusted"))
+        self.assertEqual(result["return_fraction"], 0.)
+        # A later, one-off history failure keeps the last known invested capital.
+        broker.cash_flows.side_effect = BrokerError("rate limit", 429)
+        broker.account.return_value = {"id": "1", "equity": 11025, "cash": 3500, "currency": "USD"}
+        result = accounts.observe("alpaca", broker, NOW + pd.Timedelta(minutes=2))
+        self.assertAlmostEqual(result["return_fraction"], .05)
+        self.assertFalse(result.get("unadjusted"))
+
+    def test_trading212_cash_flows_count_signed_transfers_and_skip_older_rows(self):
+        client = Trading212(self.cfg)
+        page = [{"type": "DEPOSIT", "amount": 100, "currency": "EUR", "dateTime": "2026-10-22T10:00:00Z"},
+                {"type": "WITHDRAW", "amount": 40, "currency": "EUR", "dateTime": "2026-10-22T11:00:00Z"},
+                {"type": "TRANSFER", "amount": -25, "currency": "EUR", "dateTime": "2026-10-22T12:00:00Z"},
+                {"type": "INTEREST_ON_FREE_CASH", "amount": 1, "currency": "EUR", "dateTime": "2026-10-22T12:00:00Z"},
+                {"type": "DEPOSIT", "amount": 999, "currency": "EUR", "dateTime": "2026-10-01T10:00:00Z"}]
+        with patch.object(Trading212, "pages", return_value=iter([page])):
+            rows = client.cash_flows("2026-10-20T00:00:00+00:00")
+        self.assertEqual([r["amount"] for r in rows], [100, -40, -25])
 
 
 class WebTests(Fixture):

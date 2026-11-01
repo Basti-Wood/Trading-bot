@@ -113,6 +113,10 @@ class Config:
     # Trading-loop folder (strategien/, berichte/, risiko.py); None = no loop strategies available.
     loop_dir: Path = None
     loop_timeout: int = 900
+    # Join a trade the strategy opened at most this many bars ago (0 = only fresh entry signals),
+    # as long as the price is at most loop_join_max_gain above the strategy's own entry price.
+    loop_join_bars: int = 3
+    loop_join_max_gain: float = .02
     trading212_enabled: bool = False
     trading212_key: str = ""
     trading212_secret: str = ""
@@ -124,6 +128,9 @@ class Config:
     trading212_prediction_share: float = .5
     # Of the three models (no news vote exists for non-US listings): 2 = majority.
     trading212_min_votes: int = 2
+    # Demo account only: models that have not passed validation may still trade on a majority vote,
+    # so the prediction book gathers real results. Never applies to a live account.
+    trading212_research_trades: bool = True
     # Internal data/training identity; the public account remains Alpaca by default.
     broker_name: str = "alpaca"
     trading212_allow_fx: bool = False
@@ -191,7 +198,8 @@ class Config:
                   "daytrade_close_minutes": (5, 60), "daytrade_capital_share": (.05, .95),
                   "strategy_fraction": (.05, 1), "min_votes": (2, 4),
                   "daytrade_run_minutes": (5, 240), "daytrade_trail_trigger": (.001, .05),
-                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 1800)}
+                  "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 1800),
+                  "loop_join_bars": (0, 20), "loop_join_max_gain": (0, .10)}
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
@@ -310,6 +318,8 @@ class Config:
             # Relative paths start at the trading-bot folder, whatever the working directory.
             loop_dir=(Path(__file__).resolve().parent.parent / os.getenv("TRADING_LOOP_DIR", "trading-loop")).resolve(),
             loop_timeout=int(os.getenv("TRADING_LOOP_TIMEOUT_SECONDS", "900")),
+            loop_join_bars=int(env_value("LOOP_JOIN_OPEN_TRADE_BARS", "3")),
+            loop_join_max_gain=float(env_value("LOOP_JOIN_MAX_GAIN", ".02")),
             trading212_enabled=flag("TRADING212_ENABLED"),
             trading212_key=env_value("TRADING212_API_KEY"),
             trading212_secret=env_value("TRADING212_API_SECRET"),
@@ -321,6 +331,7 @@ class Config:
             trading212_prediction_share=float(os.getenv("TRADING212_PREDICTION_SHARE", ".5")),
             trading212_min_votes=int(os.getenv("TRADING212_MIN_AGREEING_VOTES", "2")),
             trading212_allow_fx=flag("TRADING212_ALLOW_FX"),
+            trading212_research_trades=flag("TRADING212_PAPER_RESEARCH_TRADES", True),
             twelvedata_key=os.getenv("TWELVEDATA_API_KEY", "").strip(),
             trading212_data_source=env_value("TRADING212_DATA_SOURCE", "yahoo").lower(),
             trading212_max_quote_age=int(env_value("TRADING212_MAX_QUOTE_AGE_SECONDS", "1200")),

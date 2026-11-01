@@ -149,6 +149,38 @@ class LoopFolderTests(unittest.TestCase):
             self.assertEqual(result["target_session"], "2026-10-16")
             self.assertIn("gruen", result["test"])
 
+    def test_a_recent_open_trade_can_be_joined_but_an_old_one_cannot(self):
+        history = bars(430)
+        cfg = replace(self.cfg, loop_join_bars=3, loop_join_max_gain=.10)
+        for name, buy_at, expected in (("recent_v1", 428, "BUY"), ("old_v1", 100, "HOLD")):
+            path = add_version(self.folder, name, buy_at=buy_at)
+            record = {"version": name, "symbol": "AAA", "sha256": loop.file_hash(path)}
+            result = loop.evaluate(cfg, record, {"AAA": history})["symbols"]["AAA"]
+            self.assertEqual(result["signal"], expected, name)
+            self.assertIn("open_trade", result)
+        self.assertTrue(result.get("joined") is None)
+        off = replace(self.cfg, loop_join_bars=0)
+        path = add_version(self.folder, "recent_v2", buy_at=428)
+        result = loop.evaluate(off, {"version": "recent_v2", "symbol": "AAA", "sha256": loop.file_hash(path)}, {"AAA": history})
+        self.assertEqual(result["symbols"]["AAA"]["signal"], "HOLD")
+
+    def test_joining_respects_the_price_limit(self):
+        item = {"signal": "HOLD", "reason": "Strategie ist investiert und hält",
+                "open_trade": {"entry_price": 100., "bars_held": 1, "entry_at": "2026-10-28"}}
+        cfg = replace(self.cfg, loop_join_bars=3, loop_join_max_gain=.02)
+        self.assertEqual(loop.join_open_trade(cfg, item, 101.5)["signal"], "BUY")
+        self.assertEqual(loop.join_open_trade(cfg, item, 103.)["signal"], "HOLD")
+        self.assertEqual(loop.join_open_trade(cfg, {**item, "open_trade": {**item["open_trade"], "bars_held": 4}}, 100.)["signal"], "HOLD")
+
+    def test_a_trade_the_bot_already_left_is_not_joined_again(self):
+        from app.store import Store, StrategyStore
+        book = StrategyStore(Store(Path(self.temp.name) / "joins"), "loop")
+        self.assertFalse(loop.exited_since(book, "AAA", "2026-10-28"))
+        book.reserve_order("sell-1", {"symbol": "AAA", "side": "sell", "qty": 1, "status": "filled"})
+        self.assertTrue(loop.exited_since(book, "AAA", "2000-01-01"))
+        self.assertFalse(loop.exited_since(book, "BBB", "2000-01-01"))
+        self.assertFalse(loop.exited_since(StrategyStore(book.root, "loop_day"), "AAA", "2000-01-01"))
+
     def test_list_version_tests_every_symbol_with_the_stress_test_verdict(self):
         path = add_version(self.folder, "liste_v1", symbol="LISTE", buy_at=100, sell_at=0)
         record = {"version": "liste_v1", "symbol": "LISTE", "sha256": loop.file_hash(path)}

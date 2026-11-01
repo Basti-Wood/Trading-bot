@@ -495,6 +495,8 @@ class Trading212Engine:
                "expected_return": choice.get("expected_return"), "eligible": choice.get("eligible"),
                "quality": choice.get("quality"), "owner": loop.owner_version(book, symbol) if mode == "loop" and owned else None}
         row["validation"] = choice.get("validation")
+        row["research_trade"] = choice.get("research_trade", False)
+        row["joined"] = bool(choice.get("joined"))
         return row, acted
 
     def cycle(self, now=None):

@@ -66,10 +66,32 @@ class PredictionExecutionTests(EngineFixture):
         self.broker.submit.assert_not_called()
 
     def test_unvalidated_models_are_visible_but_cannot_buy(self):
+        self.engine.predictions.config = replace(self.engine.predictions.config, trading212_research_trades=False)
         self.forecast(eligible=False)
         self.engine.cycle(NOW)
         self.broker.submit.assert_not_called()
         self.assertIn("validation", self.engine.daily.get(f"forecast:{TICKER}")["reason"])
+
+    def test_demo_account_research_trades_follow_the_majority_vote(self):
+        self.forecast(eligible=False)
+        self.engine.cycle(NOW)
+        self.broker.submit.assert_called_once()
+        row = self.engine.daily.get("stocks")[0]
+        self.assertTrue(row["research_trade"])
+        self.assertIn("Forschungs-Trade", row["reason"])
+
+    def test_research_trades_never_reach_a_live_account(self):
+        self.engine.predictions.config = replace(self.engine.predictions.config, trading212_paper=False)
+        self.forecast(eligible=False)
+        self.assertFalse(self.engine.predictions.research_trades)
+        decision = self.engine.predictions.decision(TICKER, NOW)
+        self.assertEqual(decision["signal"], "HOLD")
+        self.assertIn("validation", decision["reason"])
+
+    def test_research_trades_still_need_the_majority(self):
+        self.forecast(("BUY", "HOLD", "SELL"), eligible=False)
+        self.engine.cycle(NOW)
+        self.broker.submit.assert_not_called()
 
     def test_expired_models_cannot_buy(self):
         meta = self.engine.daily.get(f"model:{TICKER}")
