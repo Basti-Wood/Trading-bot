@@ -53,6 +53,7 @@ def daily_cache_current(cached, mic, now):
 # determines the route. Unknown exchanges fail closed until explicitly supported.
 MARKETS = {
     "londonstockexchange": "XLON", "londonstockexchangeaim": "XLON", "lse": "XLON",
+    "londonstockexchangenonisa": "XLON",
     "deutscheborsexetra": "XETR", "deutschebörsexetra": "XETR", "xetra": "XETR",
     "gettex": "GETT", "gettexgermany": "GETT",
     "euronextparis": "XPAR", "euronextamsterdam": "XAMS", "euronextbrussels": "XBRU",
@@ -61,6 +62,7 @@ MARKETS = {
     "wienerbörse": "XWBO", "wienerborse": "XWBO", "viennastockexchange": "XWBO",
     "torontostockexchange": "XTSE", "tsx": "XTSE", "tokyostockexchange": "XTKS",
 }
+NON_US_MICS = frozenset(MARKETS.values())
 
 
 US_EXCHANGE_WORDS = ("nyse", "nasdaq", "amex", "otc", "cboe", "bats", "arca", "iex", "united states", "us market")
@@ -98,6 +100,39 @@ def mappings(config):
             # own tickers carry an exchange suffix (e.g. "SIEd_EQ"); copy them from its metadata.
             raise BrokerError(f"Trading 212 mapping {ticker!r} looks like a US symbol; use the exact Trading 212 ticker (e.g. SIEd_EQ)")
     return data
+
+
+def resolve_mappings(specs, instruments, blocked_symbols=()):
+    """Resolve obsolete API tickers by exact listing identity, never by company name."""
+    resolved, aliases, errors = {}, {}, {}
+    for configured, spec in specs.items():
+        item = instruments.get(configured)
+        candidates = [item] if item else [i for i in instruments.values()
+            if (i.get("schedule") or {}).get("mic_source") != "mapping"]
+        matches = [i for i in candidates if i and i.get("type") in {"STOCK", "ETF"}
+            and spec["mic"] in NON_US_MICS
+            and not us_listing(i["ticker"], (i.get("schedule") or {}).get("exchange", ""))
+            and (i.get("schedule") or {}).get("mic") == spec["mic"]
+            and i.get("isin") == spec["isin"] and currency(i.get("currencyCode")) == currency(spec["currency"])]
+        if len(matches) != 1:
+            errors[configured] = (f"{configured}: {len(matches)} matching broker listings for ISIN {spec['isin']}, "
+                f"{spec['mic']}, {spec['currency']}; check the mapping" if not item else
+                f"{configured}: broker listing type, exchange, currency or ISIN does not match the mapping")
+            continue
+        actual = matches[0]["ticker"]
+        if actual != configured and actual in specs:
+            errors[configured] = f"{configured}: duplicate mapping; broker ticker {actual} is already configured directly"
+            continue
+        if actual != configured and configured in blocked_symbols:
+            errors[configured] = f"{configured} is now listed as {actual}; reconcile existing bot ownership/orders before changing ticker"
+            continue
+        if actual in resolved:
+            errors[configured] = f"{configured}: duplicate mapping for broker ticker {actual}"
+            continue
+        resolved[actual] = spec
+        if actual != configured:
+            aliases[configured] = actual
+    return {"specs": resolved, "aliases": aliases, "errors": errors, "configured": len(specs)}
 
 
 class Trading212:
@@ -155,7 +190,8 @@ class Trading212:
         schedules = {s["id"]: {**s, "exchange": ex["name"], "mic": market_code(ex["name"])}
                      for ex in exchanges for s in ex.get("workingSchedules", [])}
         # Exchange names the router does not know yet, shown in the dashboard's diagnosis.
-        self.unknown_exchanges = sorted({s["exchange"] for s in schedules.values() if not s["mic"]})
+        self.unknown_exchanges = sorted({s["exchange"] for s in schedules.values()
+                                        if not s["mic"] and not us_listing("", s["exchange"])})
         try:
             specs = mappings(self.config)
         except BrokerError:
@@ -181,7 +217,8 @@ class Trading212:
         schedule = (item or {}).get("schedule") or {}
         if not item:
             raise BrokerError(f"Trading 212 ticker {ticker} is absent from this account's metadata; check the instrument mapping", 422)
-        if item.get("type") not in {"STOCK", "ETF"} or not schedule.get("mic"):
+        if (item.get("type") not in {"STOCK", "ETF"} or schedule.get("mic") not in NON_US_MICS
+                or us_listing(ticker, schedule.get("exchange", ""))):
             raise BrokerError(f"Trading 212 {ticker} requires a verified non-US stock/ETF exchange"
                               f" (received {schedule.get('exchange', 'no working schedule')})", 422)
         return item

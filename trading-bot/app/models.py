@@ -31,7 +31,9 @@ def strategy_signature(config):
     if config.intraday:
         settings.update(mode="daytrade", bar_minutes=5, horizon_bars=3, intraday_schema=1)
     if config.broker_name != "alpaca":
-        settings.update(broker=config.broker_name, source=config.trading212_data_source)
+        settings.update(broker=config.broker_name, source=config.trading212_data_source,
+                        validation_schema=2, validation_votes=config.trading212_min_votes,
+                        min_trades=config.min_trades, max_drawdown=config.max_drawdown)
     return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -92,6 +94,33 @@ def passes(metrics, config):
             and metrics["max_drawdown"] <= config.max_drawdown)
 
 
+def consensus_predictions(predictions, config):
+    values = np.asarray(predictions)
+    votes = config.trading212_min_votes if config.broker_name == "trading212" else 2
+    agrees = (values > config.threshold).sum(axis=0) >= votes
+    return np.where(agrees, np.median(values, axis=0), 0.)
+
+
+def validation_report(metrics, wf_return, config):
+    checks = {"trades": metrics["active_days"] >= config.min_trades,
+              "return": metrics["net_return"] > 0,
+              "drawdown": metrics["max_drawdown"] <= config.max_drawdown,
+              "walk_forward": bool(wf_return > 0)}
+    reasons = []
+    if not checks["trades"]:
+        reasons.append(f"Only {metrics['active_days']} validation trades; at least {config.min_trades} required")
+    if not checks["return"]:
+        reasons.append(f"Validation return after costs is {metrics['net_return']:.2%}; must be positive")
+    if not checks["drawdown"]:
+        reasons.append(f"Validation drawdown {metrics['max_drawdown']:.2%} exceeds {config.max_drawdown:.2%}")
+    if not checks["walk_forward"]:
+        reasons.append(f"Mean walk-forward return after costs is {wf_return:.2%}; must be positive")
+    return {"passed": all(checks.values()), "checks": checks, "reasons": reasons,
+            "metrics": metrics, "walk_forward_return": float(wf_return),
+            "minimum_trades": config.min_trades, "maximum_drawdown": config.max_drawdown,
+            "minimum_votes": config.trading212_min_votes if config.broker_name == "trading212" else 2}
+
+
 def load_bundle(config, meta):
     # Only internally written checkpoints; never accept uploads/pickle from an API.
     return joblib.load(config.data_dir / "models" / meta["file"])
@@ -125,12 +154,16 @@ def train_symbol(config, store, symbol, bars):
         store.event("training", {"symbol": symbol, "message": "No new bars or resolved feedback; keeping current model"})
         return
     fitted, reports, predictions = {}, {}, []
+    splits = list(TimeSeriesSplit(n_splits=3, gap=4 if config.intraday else 2).split(train))
+    fold_predictions = [[] for _ in splits]
     for name in MODEL_NAMES:
         store.set("training", {"status": "running", "symbol": symbol, "model": MODEL_NAMES[name], "at": utcnow()})
         folds = []
-        for tr, val in TimeSeriesSplit(n_splits=3, gap=4 if config.intraday else 2).split(train):
+        for fold_index, (tr, val) in enumerate(splits):
             model = fit_model(name, train.iloc[tr])
-            folds.append(evaluate(train.iloc[val], model.predict(train.iloc[val][FEATURES]), config))
+            values = model.predict(train.iloc[val][FEATURES])
+            folds.append(evaluate(train.iloc[val], values, config))
+            fold_predictions[fold_index].append(values)
         model = fit_model(name, train)
         pred = model.predict(holdout[FEATURES])
         fitted[name] = model
@@ -139,19 +172,21 @@ def train_symbol(config, store, symbol, bars):
         store.event("training", {"symbol": symbol, "model": MODEL_NAMES[name],
             "message": f"Walk-forward and holdout evaluated; {feedback['train_rows']} resolved local examples used in fitting",
             **reports[name]["holdout"]})
-    consensus = np.median(predictions, axis=0)
-    agreement = (np.asarray(predictions) > config.threshold).sum(axis=0) >= 2
-    metrics = evaluate(holdout, np.where(agreement, consensus, 0), config)
-    wf_return = np.mean([np.mean([f["net_return"] for f in report["walk_forward"]]) for report in reports.values()])
+    metrics = evaluate(holdout, consensus_predictions(predictions, config), config)
+    ensemble_folds = [evaluate(train.iloc[val], consensus_predictions(values, config), config)
+                      for (_, val), values in zip(splits, fold_predictions)]
+    wf_return = (np.mean([f["net_return"] for f in ensemble_folds]) if config.broker_name == "trading212" else
+                 np.mean([np.mean([f["net_return"] for f in report["walk_forward"]]) for report in reports.values()]))
+    validation = validation_report(metrics, wf_return, config)
     eligible = passes(metrics, config) and wf_return > 0
     incumbent_metrics = None
-    if old_meta:
+    if old_meta and old_meta.get("eligible"):
         old = load_bundle(config, old_meta)
         if old["trained_through"] >= holdout.index[0].isoformat():
             eligible = False
         else:
             ps = np.asarray([m.predict(holdout[FEATURES]) for m in old["models"].values()])
-            incumbent_metrics = evaluate(holdout, np.where((ps > config.threshold).sum(axis=0) >= 2, np.median(ps, axis=0), 0), config)
+            incumbent_metrics = evaluate(holdout, consensus_predictions(ps, config), config)
             eligible = eligible and metrics["net_return"] > incumbent_metrics["net_return"] + .001
     version = uuid.uuid4().hex[:12]
     file_prefix = f"daytrade-{symbol}" if config.intraday else symbol
@@ -159,6 +194,7 @@ def train_symbol(config, store, symbol, bars):
             "created_at": utcnow(), "data_through": bars.index[-1].isoformat(),
             "trained_through": train.label_end.max().isoformat(), "metrics": metrics,
             "reports": reports, "eligible": bool(eligible), "incumbent": incumbent_metrics,
+            "validation": validation, "ensemble_walk_forward": ensemble_folds,
             "strategy_signature": strategy_signature(config), "feedback": feedback, "feedback_revision": feedback_revision}
     if input_signature:
         meta["input_signature"] = input_signature
@@ -232,6 +268,7 @@ def predict(config, meta, bars):
     return {"symbol": meta["symbol"], "at": utcnow(), "bar_at": row.index[-1].isoformat(),
             "features": {name: float(row[name].iloc[0]) for name in FEATURES},
             "model_version": meta["version"], "eligible": meta["eligible"], "models": outputs,
+            "validation": meta.get("validation"),
             "forecast_signal": signal, "expected_return": consensus, "agreement": max(buys, sells, 3 - buys - sells),
             "ensemble_method": "median", "target_session": bars.attrs.get("target_session"),
             "input_complete_at": bars.attrs.get("input_complete_at"),

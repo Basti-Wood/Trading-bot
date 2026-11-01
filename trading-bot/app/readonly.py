@@ -88,7 +88,8 @@ def trading212(secondary, now=None):
                 "training": clip((daily.get("training") or {}).get("status"), 60),
                 "decisions": [{"symbol": row["symbol"], "action": row.get("action"),
                     "reason_text": clip(row.get("reason")), "expected_return": row.get("expected_return"),
-                    "models": models(row), "eligible": row.get("eligible"), "quality": row.get("quality")}
+                    "models": models(row), "eligible": row.get("eligible"), "quality": row.get("quality"),
+                    "validation": row.get("validation")}
                     for row in daily.get("stocks", [])][:MAX_SYMBOLS]},
             "engine": clip((secondary.get("engine") or {}).get("status"), 40),
             "engine_message_text": clip((secondary.get("engine") or {}).get("message")),

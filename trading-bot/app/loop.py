@@ -344,7 +344,11 @@ def combine(store, symbol, config=None):
                 "test": test, "strategy_signal": item.get("signal"),
                 "reason": f"{version}: beste grüne Version für {symbol} ({test['rendite']:+.1f} %, "
                           f"max. Drawdown {test['max_drawdown']:.1f} %); {item.get('reason', item.get('signal'))}"}
-    return {**base, "reason": f"Kein grüner Einzeltest für {symbol}" if views else "Warte auf das erste Signal der aktiven Versionen"}
+    details = [f"{v}: {i.get('error') or (i.get('test') or {}).get('urteil', 'Testergebnis fehlt')}" for v, i in views.items()]
+    if not views:
+        details = [f"{v}: {e['message']}" for v in active if (e := store.get(f"loop_error:{v}")) and e.get("message")]
+    reason = f"Kein grüner Einzeltest für {symbol}" if views else "Warte auf das erste Signal der aktiven Versionen"
+    return {**base, "reason": reason + ("; " + "; ".join(details)[:400] if details else "")}
 
 
 def green_test(test):
