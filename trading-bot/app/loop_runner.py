@@ -141,9 +141,16 @@ def run(module, data, stresstest, Backtest, symbol="", reports=None):
         test = {"rendite": number(stats["Return [%]"]), "kaufen_halten": number(stats["Buy & Hold Return [%]"]),
                 "max_drawdown": number(stats["Max. Drawdown [%]"]), "trades": int(stats["# Trades"]), "parameter": {}}
     action, reason = signal(live._strategy)
-    return {"signal": action, "reason": reason, "bars": len(data),
+    result = {"signal": action, "reason": reason, "bars": len(data),
             "from": str(data.index[0].date()), "to": str(data.index[-1].date()),
             "test": {"gruen": verdict == "GRÜN", "urteil": verdict, **test}, "chart": chart(live, data)}
+    trades = list(live._strategy.trades)
+    if action == "HOLD" and trades:
+        # The bot may join a trade the strategy opened only recently (see loop.join_open_trade).
+        first = min(trades, key=lambda t: t.entry_bar)
+        result["open_trade"] = {"entry_price": finite(first.entry_price), "bars_held": int(len(data) - 1 - first.entry_bar),
+                                "entry_at": str(first.entry_time)}
+    return result
 
 
 def main(path, folder, loop_dir):

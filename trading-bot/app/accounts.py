@@ -70,7 +70,7 @@ class Accounts:
         if baseline and baseline["scope"] != scope:
             # An account/mode/currency switch must not inherit another account's performance.
             baseline = None
-        flow_start = baseline["flow_start"] if baseline else (now.normalize() - pd.Timedelta(days=2)).isoformat()
+        flow_start = baseline["flow_start"] if baseline and not baseline.get("unadjusted") else (now.normalize() - pd.Timedelta(days=2)).isoformat()
         snapshot = {"broker": name, "equity": equity, "cash": cash, "currency": code, "mode": mode,
                     "at": now.isoformat(), "status": "connected", "return_fraction": None, "pnl": None,
                     "net_capital": None, "since": baseline["at"] if baseline else None}
@@ -79,7 +79,7 @@ class Accounts:
             if any(row["currency"] != code for row in flows):
                 raise BrokerError("Funding in a different currency needs a valued adjustment")
             flow_total = sum(number(row["amount"]) for row in flows)
-            if baseline is None:
+            if baseline is None or baseline.get("unadjusted"):
                 baseline = {"scope": scope, "at": now.isoformat(), "equity": equity,
                             "flow_start": flow_start, "flow_total": flow_total}
                 self.store.set(key, baseline)
@@ -88,7 +88,27 @@ class Accounts:
             snapshot.update(net_capital=capital, pnl=pnl, return_fraction=pnl / capital if capital > 0 else None,
                             since=baseline["at"])
         except (BrokerError, KeyError, TypeError, ValueError):
-            snapshot["return_error"] = "Complete funding history required; deposits and withdrawals must not appear as profit"
+            previous = self.store.get("broker_balance:" + name) or {}
+            if (baseline and not baseline.get("unadjusted") and previous.get("net_capital") is not None
+                    and not previous.get("unadjusted") and previous.get("currency") == code):
+                # A one-off failed history request (e.g. its rate limit) keeps the last known capital.
+                capital = previous["net_capital"]
+                snapshot.update(net_capital=capital, pnl=equity - capital, since=baseline["at"],
+                                return_fraction=(equity - capital) / capital if capital > 0 else None)
+                self.store.set("broker_balance:" + name, snapshot)
+                return snapshot
+            # Without a funding history the change in account value since tracking began is still
+            # shown, clearly marked: a deposit or withdrawal in that time would distort it.
+            if baseline is None or baseline.get("scope") != scope:
+                baseline = {"scope": scope, "at": now.isoformat(), "equity": equity, "flow_start": flow_start,
+                            "flow_total": 0., "unadjusted": True}
+                self.store.set(key, baseline)
+            capital = baseline["equity"]
+            pnl = equity - capital
+            snapshot.update(net_capital=capital, pnl=pnl, return_fraction=pnl / capital if capital > 0 else None,
+                            since=baseline["at"], unadjusted=True,
+                            return_error="Ein-/Auszahlungsverlauf nicht abrufbar: Veränderung des Kontowerts seit "
+                                         "Beobachtungsbeginn, Ein- und Auszahlungen sind darin nicht herausgerechnet")
         self.store.set("broker_balance:" + name, snapshot)
         return snapshot
 

@@ -44,6 +44,15 @@ An explicit HTTP 429 rate-limit rejection is recorded as rejected, with its erro
 
 ## When Trading 212 appears idle
 
+Two rules make the bot trade more often (both shown per stock in the dashboard):
+
+- **Trading-Loop joins recent trades.** Strategies open a trade on one bar and then hold for days; buying only on that single bar meant most days had no buy at all. A green strategy that opened its trade at most `LOOP_JOIN_OPEN_TRADE_BARS` candles ago (default 3) now also counts as a buy ("Nachkauf"), provided the price is at most `LOOP_JOIN_MAX_GAIN` (default 2 %) above the strategy's own entry. A trade the bot already left, for example through its stop-loss, is never joined again. `LOOP_JOIN_OPEN_TRADE_BARS=0` restores fresh-entry-only behaviour. This applies to the Alpaca trading loop as well.
+- **Research trades on the demo account.** Most per-stock models make too few trades in the 30-session holdout to pass validation, so the prediction book never bought. On the Trading 212 demo account (`TRADING212_PAPER=true`) a majority of the three models (`TRADING212_MIN_AGREEING_VOTES`) may now buy even when validation has not passed; such rows are labelled "Forschungs-Trade". Stops, budgets, drawdown and daily-loss limits apply unchanged. `TRADING212_PAPER_RESEARCH_TRADES=false` turns this off; it never applies to a live account.
+
+There is no separate percentage/weight to set for Trading 212: it uses its own account. `TRADING212_PREDICTION_SHARE` splits that account between the prediction book and the loop (default 50/50), and `TRADING212_CAPITAL_FRACTION` / `TRADING212_CAPITAL_CAP` limit how much of it the bot uses.
+
+The account return (%) in the money cards is adjusted for deposits and withdrawals from Trading 212's transaction history. If that history cannot be read, the card still shows the change in account value since observation began and says that deposits/withdrawals are not taken out.
+
 An account connection plus enabled entries does not imply a purchase is due. Every stock still needs its own qualified test and current BUY. A green strategy can currently say HOLD or SELL. Trained models with too few profitable validation opportunities remain research-only. Waiting for a qualifying signal and having no orders are shown as neutral states; connection, computation and order failures are shown as errors.
 
 The panel includes **Trading-Loop: Einzeltests und Ablehnungsgründe**: each version's computed/green/error counts, exact rejection verdicts and calculation errors. The prediction table and diagnostics expose holdout trade count, net return after costs, drawdown, walk-forward return and the failed requirements. This distinguishes a genuine red test from a missing result or failed worker. The downloaded diagnostics include the per-stock/per-version results.

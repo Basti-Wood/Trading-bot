@@ -120,11 +120,20 @@ class PredictionWorker:
         if not quality["ready"]:
             return {**forecast, "signal": "HOLD", "quality": quality, "reason": quality["reason"]}
         # No news source covers these listings, so the impossible news vote is left out.
-        action, reason = combine({**forecast, "news": False}, None, now=now.to_pydatetime(), min_votes=self.config.trading212_min_votes)
-        if not forecast.get("eligible") and (forecast.get("validation") or {}).get("reasons"):
+        research = self.research_trades and not forecast.get("eligible")
+        action, reason = combine({**forecast, "news": False, "eligible": forecast.get("eligible") or research}, None,
+                                 now=now.to_pydatetime(), min_votes=self.config.trading212_min_votes)
+        if research:
+            reason = "Forschungs-Trade (nur Demokonto; Modell hat die Prüfung noch nicht bestanden): " + reason
+        elif not forecast.get("eligible") and (forecast.get("validation") or {}).get("reasons"):
             reason += "; " + "; ".join(forecast["validation"]["reasons"])
-        return {**forecast, "signal": action, "quality": quality, "reason": reason,
+        return {**forecast, "signal": action, "quality": quality, "reason": reason, "research_trade": bool(research),
                 "votes": {m["name"]: m["signal"] for m in forecast["models"]}}
+
+    @property
+    def research_trades(self):
+        """Unvalidated models may trade on a majority vote only on the Trading 212 demo account."""
+        return bool(self.config.trading212_research_trades and self.config.trading212_paper)
 
     def shutdown(self):
         self.stop.set()

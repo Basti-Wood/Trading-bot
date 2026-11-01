@@ -143,8 +143,11 @@ def create_app(config, store, broker_factory=Alpaca):
             rejections.extend(validation.get("reasons", []))
         training = secondary_daily.get("training") or {}
         failed_training = training.get("status") in {"failed", "worker failed", "resource limit reached", "partial failure"}
-        step("Prognose-Modelle", False if failed_training else True if eligible else None,
-             f"{trained}/{len(symbols)} trainiert, {eligible} bestehen die Prüfung (nur diese dürfen kaufen), Kaufsignal heute: {', '.join(pbuys) or 'keins'}"
+        research = config.trading212_research_trades and config.trading212_paper
+        rule = ("auf dem Demokonto dürfen auch ungeprüfte Modelle bei Mehrheit kaufen (Forschungs-Trades)" if research
+                else "nur diese dürfen kaufen")
+        step("Prognose-Modelle", False if failed_training else True if eligible or (research and trained) else None,
+             f"{trained}/{len(symbols)} trainiert, {eligible} bestehen die Prüfung ({rule}), Kaufsignal heute: {', '.join(pbuys) or 'keins'}"
              + (f" · Training: {training['status']}: {training.get('message') or next(iter(training.get('errors', {}).values()), '')}" if failed_training else "")
              + (" · " + "; ".join(list(dict.fromkeys(rejections))[:3]) if rejections else
                 " · Prüfdetails erscheinen nach dem nächsten Training" if trained and not eligible else ""))

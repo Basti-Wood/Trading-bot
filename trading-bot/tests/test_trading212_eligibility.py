@@ -195,6 +195,7 @@ class DiagnosticDetailTests(EngineFixture):
         self.assertIn("worker timed out", step["detail"])
 
     def test_no_qualified_model_or_order_is_a_waiting_state(self):
+        self.cfg = replace(self.cfg, trading212_research_trades=False)
         cfg, daily = context(self.cfg, "daily")
         daily.set("stocks", [{"symbol": TICKER, "signal": "HOLD"}])
         daily.set(f"model:{TICKER}", {"eligible": False, "validation": {"reasons": ["Only 0 validation trades; at least 5 required"]}})

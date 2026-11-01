@@ -21,6 +21,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pandas as pd
+
 from .store import utcnow
 
 VERSION = re.compile(r"[a-z0-9_]{1,60}_v\d{1,3}")
@@ -300,11 +302,50 @@ def evaluate(config, record, frames):
             # The last completed regular-session bar the strategy saw (bot frames may hold extended hours).
             bar_at = converted[symbol].index[-1].tz_localize("America/New_York").tz_convert("UTC")
             close = float(converted[symbol]["Close"].iloc[-1])
+        item = join_open_trade(config, item, close)
         results[symbol] = {**item, "bar_at": bar_at.isoformat(), "target_session": bars.attrs.get("target_session"),
                            "timeframe": record.get("timeframe", DAILY),
                            "market_timezone": bars.attrs.get("market_timezone", "America/New_York"),
                            "last_close": close if math.isfinite(close) else None}
     return {"version": record["version"], "sha256": record["sha256"], "symbols": results, "at": utcnow()}
+
+
+def join_open_trade(config, item, close):
+    """A strategy that is already invested counts as a buy for a recent, not yet run-away trade.
+
+    Without this the bot only buys on the single bar where a strategy opens a trade and then
+    waits days for the next one. Joining is limited to trades opened at most loop_join_bars bars
+    ago whose price is at most loop_join_max_gain above the strategy's own entry price.
+    """
+    trade = item.get("open_trade")
+    bars = getattr(config, "loop_join_bars", 0)
+    if item.get("signal") != "HOLD" or not trade or not bars or not math.isfinite(close):
+        return item
+    entry, held = trade.get("entry_price"), trade.get("bars_held")
+    if not entry or held is None or held > bars:
+        return item
+    gain = close / entry - 1
+    if gain > getattr(config, "loop_join_max_gain", 0):
+        return {**item, "reason": f"Strategie ist investiert, aber der Kurs liegt {gain:+.1%} über ihrem Einstieg; kein Nachkauf"}
+    return {**item, "signal": "BUY", "joined": True,
+            "reason": f"Nachkauf: die Strategie ist seit {held} Kerze(n) investiert (Einstieg {entry:.2f}, Kurs {gain:+.1%})"}
+
+
+def exited_since(store, symbol, entry_at):
+    """True when this book already sold the symbol during the strategy's current trade (e.g. its stop)."""
+    try:
+        start = pd.Timestamp(entry_at).date()
+    except (TypeError, ValueError):
+        return True
+    strategy = getattr(store, "strategy", "loop")
+    for order in getattr(store, "root", store).orders(500):
+        try:
+            if (order.get("symbol") == symbol and order.get("side") == "sell"
+                    and order.get("strategy", "daily") == strategy and pd.Timestamp(order["at"]).date() >= start):
+                return True
+        except (KeyError, TypeError, ValueError):
+            continue
+    return False
 
 
 def combine(store, symbol, config=None):
@@ -339,6 +380,8 @@ def combine(store, symbol, config=None):
         version, item = min(green, key=ranking)
         test = item["test"]
         action = "BUY" if item.get("signal") == "BUY" else "HOLD"
+        if item.get("joined") and exited_since(store, symbol, item.get("open_trade", {}).get("entry_at")):
+            action, item = "HOLD", {**item, "reason": "Strategie ist investiert; der Bot hat diesen Trade schon verlassen und steigt nicht erneut ein"}
         return {**base, **_source(item), "version": version, "sha256": active[version]["sha256"],
                 "signal": action, "forecast_signal": action, "expected_return": test["rendite"] / 100,
                 "test": test, "strategy_signal": item.get("signal"),
@@ -364,4 +407,5 @@ def ranking(entry):
 
 
 def _source(item):
-    return {k: item.get(k) for k in ("bar_at", "target_session", "last_close", "to", "timeframe", "market_timezone", "source_signature")}
+    return {k: item.get(k) for k in ("bar_at", "target_session", "last_close", "to", "timeframe", "market_timezone", "source_signature",
+                                    "joined", "open_trade")}
