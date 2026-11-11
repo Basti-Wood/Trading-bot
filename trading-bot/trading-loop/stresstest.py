@@ -31,6 +31,7 @@ import pandas as pd
 from backtesting import Backtest
 from dotenv import load_dotenv
 
+import qualitaet
 import risiko
 
 ORDNER = Path(__file__).resolve().parent
@@ -228,9 +229,9 @@ def strategie_klasse(modul, kurse):
     return Tagesende
 
 
-def backtest(modul, kurse, werte, finalize=True):
+def backtest(modul, kurse, werte, finalize=True, kosten=KOSTEN):
     with parameter(modul, werte):
-        bt = Backtest(kurse, strategie_klasse(modul, kurse), cash=STARTKAPITAL, commission=KOSTEN, finalize_trades=finalize)
+        bt = Backtest(kurse, strategie_klasse(modul, kurse), cash=STARTKAPITAL, commission=kosten, finalize_trades=finalize)
         return bt, bt.run()
 
 
@@ -340,7 +341,26 @@ def pruefe(modul, kurse):
         ergebnis = urteil(stats)
         eintrag.update(gesamt)
     eintrag.update(ergebnis="gruen" if ergebnis == "GRÜN" else "rot", urteil=ergebnis)
+    eintrag.update(qualitaet_bericht(modul, kurse, werte, stats, eintrag, raster_namen(modul)))
     return eintrag, bt, stats
+
+
+def raster_namen(modul):
+    raster = getattr(modul, "PARAMETER", None) or {}
+    return [name for name, werte in raster.items() if len(werte) > 1] if isinstance(raster, dict) else []
+
+
+def qualitaet_bericht(modul, kurse, werte, stats, eintrag, angepasst):
+    """Trade-Statistik, Test mit doppelten Kosten und Qualitätspunkte (siehe qualitaet.py). Ändert nicht grün/rot."""
+    statistik = qualitaet.trade_kennzahlen(stats["_trades"])
+    try:
+        _, teuer = backtest(modul, kurse, werte, kosten=KOSTEN * 2)
+        doppelt = zahl(teuer["Return [%]"])
+    except Exception:
+        doppelt = None
+    jahre = (kurse.index[-1] - kurse.index[0]).days / 365.25
+    bewertung = qualitaet.bewerten(statistik, eintrag.get("max_drawdown"), jahre, len(angepasst), doppelt)
+    return {"statistik": statistik, "rendite_doppelte_kosten": doppelt, "qualitaet": bewertung}
 
 
 def werte_text(werte):
@@ -372,7 +392,8 @@ def zeile(eintrag):
     werte = f" · Werte {werte_text(eintrag['parameter'])}" if eintrag["parameter"] else ""
     zahl_text = lambda key, breite: "—" if eintrag[key] is None else f"{eintrag[key]:{breite}.1f}"
     return (f"{zeitraum}Rendite {zahl_text('rendite', 6)} % · Kaufen-und-Halten {zahl_text('kaufen_halten', 7)} % · "
-            f"max. Drawdown {zahl_text('max_drawdown', 6)} % · Trades {eintrag['trades']:3}{werte} · {eintrag['urteil']}")
+            f"max. Drawdown {zahl_text('max_drawdown', 6)} % · Trades {eintrag['trades']:3}{werte} · {eintrag['urteil']}"
+            + (f" · Qualität {eintrag['qualitaet']['punkte']}/100" if eintrag.get("qualitaet") else ""))
 
 
 def listen_urteil(gruen, anzahl):

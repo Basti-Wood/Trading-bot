@@ -88,6 +88,21 @@ class PredictionExecutionTests(EngineFixture):
         self.assertEqual(decision["signal"], "HOLD")
         self.assertIn("validation", decision["reason"])
 
+    def test_losing_streak_pauses_this_book_only(self):
+        from app import streak
+        for symbol in ("A", "B", "C"):
+            streak.remember(self.engine.daily, {"symbol": symbol, "unrealized_pl": -5, "market_value": 95})
+            streak.closed(self.engine.daily, symbol)
+        self.engine.cycle(NOW)
+        self.broker.submit.assert_not_called()
+        self.assertIn("Verlust-Trades", self.engine.daily.get("stocks")[0]["reason"])
+
+    def test_sizing_decision_is_recorded_per_stock(self):
+        self.engine.cycle(NOW)
+        plan = self.engine.daily.get(f"sizing:{TICKER}")
+        self.assertIn(plan["binding"], plan["limits"])
+        self.assertGreater(plan["amount"], 0)
+
     def test_research_trades_still_need_the_majority(self):
         self.forecast(("BUY", "HOLD", "SELL"), eligible=False)
         self.engine.cycle(NOW)

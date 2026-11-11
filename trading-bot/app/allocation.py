@@ -6,6 +6,8 @@ External holdings are observed and stay outside the bots' allowances.
 """
 import math
 
+from . import sizing
+
 BOTS = ("daily", "daytrade", "loop", "loop_day")
 NAMES = {"daily": "Prediction-Bot", "daytrade": "Daytrading-Bot", "loop": "Trading-Loop", "loop_day": "Intraday-Loop"}
 
@@ -18,7 +20,7 @@ def allocation(config, store):
     weights.update({k: v for k, v in (saved.get("weights") or {}).items() if k in BOTS})
     return {"capital_fraction": saved.get("capital_fraction", config.capital_fraction),
             "capital_cap": saved.get("capital_cap", config.capital),
-            "weights": weights, "saved_at": saved.get("at")}
+            "weights": weights, "sizing": sizing.settings(config, store), "saved_at": saved.get("at")}
 
 
 def validate(body):
@@ -38,7 +40,11 @@ def validate(body):
         raise ValueError("Jede Gewichtung muss zwischen 0 und 100 liegen")
     if sum(weights.values()) <= 0:
         raise ValueError("Mindestens ein Bot braucht eine Gewichtung über 0")
-    return {"capital_fraction": fraction, "capital_cap": cap, "weights": {k: round(v, 1) for k, v in weights.items()}}
+    result = {"capital_fraction": fraction, "capital_cap": cap, "weights": {k: round(v, 1) for k, v in weights.items()}}
+    cleaned = sizing.validate(body.get("sizing"))
+    if cleaned:
+        result["sizing"] = cleaned
+    return result
 
 
 def managed(config):

@@ -8,7 +8,7 @@ import time
 
 import pandas as pd
 
-from . import loop
+from . import loop, regime, sizing, streak
 from .broker import BrokerError
 from .execution import TERMINAL
 from .store import Store, StrategyStore, utcnow
@@ -247,6 +247,10 @@ class Trading212Engine:
                 self.store.set("data_errors", errors)
                 self.daily.set("data_errors", errors)
             self.predictions.set_frames(frames)
+            if frames:
+                benchmark = frames.get(self.config.trading212_benchmark)
+                regime.save(self.store, "trading212", regime.posture(self.config, benchmark, frames,
+                                                                     self.config.trading212_benchmark))
             self.store.set("data_status", {"status": "partial" if frames and errors else "error" if errors else "ready",
                 "loaded": len(frames), "total": total, "sessions": sessions, "at": utcnow()})
             self.store.set("data_errors", errors)
@@ -354,6 +358,7 @@ class Trading212Engine:
             if not self.owned_quantity(symbol, mode):
                 protected = False
                 continue
+            streak.remember(book, position)
             session = self.broker.session_for(symbol, now)
             stop = rules.get("stop_loss", self.config.stop_loss * 100) / 100 if mode == "loop" else self.config.stop_loss
             stopped = position["current_price"] <= position["avg_entry_price"] * (1 - stop)
@@ -398,6 +403,8 @@ class Trading212Engine:
                         if time.time() - observed < 30:
                             protected = False
                             continue
+                    if symbol not in held:
+                        streak.closed(book, symbol)
                     book.set(f"owned:{symbol}", False)
                     book.set(f"exit_reason:{symbol}", None)
                     book.set(f"flat_observed:{symbol}", None)
@@ -458,17 +465,25 @@ class Trading212Engine:
                         reason = "Outside this listing's regular-session entry window"
                     elif self.strategy_share(mode) <= 0:
                         reason = "This strategy has a zero budget share"
+                    elif (cooldown := streak.status(self.config, book))["active"]:
+                        reason = cooldown["reason"]
                     elif not acted:
                         price = self.data.quote(instrument, spec, pd.Timestamp.now(tz="UTC"))
                         fx = self.data.execution_fx(instrument["currencyCode"], account["currency"], pd.Timestamp.now(tz="UTC"))
                         capital = account["equity"] * self.config.trading212_capital_fraction
                         if self.config.trading212_capital_cap:
                             capital = min(capital, self.config.trading212_capital_cap)
-                        own_capital = capital * self.strategy_share(mode)
                         gross = sum(abs(p["market_value"]) for p in positions)
-                        own_gross = sum(abs(p["market_value"]) for p in positions if self.store.owner(p["symbol"]) == mode)
-                        budget = min(own_capital * self.config.position_fraction, own_capital * self.config.gross_fraction - own_gross,
-                                     capital * self.config.gross_fraction - gross, account["cash"])
+                        own = [p for p in positions if self.store.owner(p["symbol"]) == mode]
+                        own_gross = sum(abs(p["market_value"]) for p in own)
+                        stop = (rules.get("stop_loss") or self.config.stop_loss * 100) / 100 if mode == "loop" else self.config.stop_loss
+                        plan = sizing.budget(capital=capital, share=self.strategy_share(mode), price=price * fx, stop=stop,
+                            gross_all=gross, gross_bot=own_gross, open_risk_bot=sizing.open_risk(own, stop),
+                            cash=account["cash"], settings=sizing.settings(self.config, self.root),
+                            test=choice.get("test") if mode == "loop" else None,
+                            ceiling=regime.ceiling(self.store, "trading212"))
+                        book.set(f"sizing:{symbol}", {**plan, "at": utcnow()})
+                        budget = plan["amount"]
                         qty = math.floor(max(0, budget) / (price * fx * 1.01))
                         if instrument.get("maxOpenQuantity") is not None:
                             qty = min(qty, math.floor(number(instrument["maxOpenQuantity"], nonnegative=True)))
@@ -482,7 +497,8 @@ class Trading212Engine:
                             else:
                                 reason = "An order was already attempted for this signal and time slot"
                         else:
-                            reason = "This account/strategy's cash or exposure limit leaves no whole-share budget"
+                            reason = (f"Kein Budget für eine ganze Aktie: Grenze '{plan['binding']}' "
+                                      f"({plan['limits'][plan['binding']]:.0f} {account['currency']})")
                 elif position and owned:
                     action = "HOLD"
         except (BrokerError, KeyError, TypeError, ValueError) as exc:

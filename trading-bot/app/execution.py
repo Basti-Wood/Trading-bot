@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import hashlib
 import math
 import time
+from . import regime, sizing, streak
 from .allocation import BOTS, bot_capital, bot_share
 from .broker import BrokerError
 from .store import utcnow
@@ -59,7 +60,8 @@ class Executor:
         return f"Alpaca order {remote['status']} (acceptance is not a fill){queued}"
 
     def execute(self, symbol, action, session, account, positions, orders, *, loss_breach=False, force_exit=False,
-                queued_for_open=False, reference_price=None, stop_fraction=None, target_fraction=None, plan=None):
+                queued_for_open=False, reference_price=None, stop_fraction=None, target_fraction=None, plan=None,
+                test=None):
         cfg = self.config
         self.changed = False
         if queued_for_open and (cfg.same_day or not cfg.queue_daily_orders or action != "BUY"):
@@ -105,6 +107,9 @@ class Executor:
                 return "Waiting for confirmed flat position before releasing strategy ownership"
             if any(o["side"] == "buy" for o in self.store.unresolved_orders()):
                 return "An entry outcome is unresolved; waiting for reconciliation"
+            cooldown = streak.status(cfg, self.store)
+            if cooldown["active"]:
+                return cooldown["reason"]
             if cfg.loop and not stop_fraction:
                 return "Stop-Loss aus risiko.py fehlt; Einstieg blockiert"
             if cfg.loop_intraday and len(self.store.session_entries(symbol, session)) >= cfg.daytrade_max_entries:
@@ -137,9 +142,16 @@ class Executor:
             # If any entry is pending, wait for a fresh account snapshot before allocating again.
             if any(o["side"] == "buy" for o in orders):
                 return "Pending buy order; waiting for updated exposure"
-            budget = min(strategy_capital * cfg.position_fraction, capital * cfg.gross_fraction - gross,
-                         strategy_capital * cfg.gross_fraction - strategy_gross,
-                         float(account["cash"]), float(account["buying_power"]))
+            sizing_stop = stop_fraction or (None if cfg.loop else cfg.effective_stop)
+            owned_positions = [p for p in positions if self.store.get(f"owned:{p['symbol']}", False)]
+            plan_size = sizing.budget(capital=capital, share=bot_share(cfg, self.store), price=price, stop=sizing_stop,
+                gross_all=gross, gross_bot=strategy_gross, open_risk_bot=sizing.open_risk(owned_positions, sizing_stop),
+                cash=min(float(account["cash"]), float(account["buying_power"])),
+                settings=sizing.settings(cfg, self.store), test=test, ceiling=regime.ceiling(self.store, "alpaca"))
+            self.store.set(f"sizing:{symbol}", {**plan_size, "at": utcnow()})
+            budget = plan_size["amount"]
+            if budget <= 0:
+                return f"Kein Budget für einen Kauf: Grenze '{plan_size['binding']}' ist ausgeschöpft"
             if cfg.same_day:
                 # Broker-reported capacity, when supplied, can only lower our cash cap.
                 for field in ("daytrading_buying_power", "non_marginable_buying_power"):

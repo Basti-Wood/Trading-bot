@@ -6,6 +6,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from . import loop, readonly
 from .candles import snapshot, forecast_overlay
 from .daytrade import NY, session_open
+from . import sizing, streak
 from .allocation import BOTS, NAMES, allocation, bot_capital, bot_share, validate
 from .broker import Alpaca, BrokerError
 from .store import utcnow
@@ -66,6 +67,9 @@ def create_app(config, store, broker_factory=Alpaca):
                 "mode": "paper" if config.trading212_paper else "live",
                 "live_execution_allowed": config.trading212_allow_live,
                 "entries_enabled": any(book.get("entries_enabled", False) for book in secondary_books.values()),
+                "regime": secondary.root.get("market_regime:trading212"),
+                "sizing": sizing.settings(config, store),
+                "cooldown": {mode: streak.status(config, book) for mode, book in secondary_books.items()},
                 "loop": {"entries_enabled": secondary.get("entries_enabled", False), "share": 1 - config.trading212_prediction_share,
                          "ready_problem": secondary_resume_error("loop"), "tests": secondary_loop_tests()},
                 "prediction": {"entries_enabled": secondary_daily.get("entries_enabled", False),
@@ -482,13 +486,15 @@ def create_app(config, store, broker_factory=Alpaca):
                          "entries_enabled": st.get("entries_enabled", False),
                          "capital_fraction": bot_share(c, store), "weight": allocation(config, store)["weights"].get(c.trading_mode) if parallel else None,
                          "capital_ceiling": (budget if parallel else c.sizing_capital(equity)) * bot_share(c, store),
-                         "gross_ceiling": (budget if parallel else c.sizing_capital(equity)) * bot_share(c, store) * c.gross_fraction,
+                         "gross_ceiling": (budget if parallel else c.sizing_capital(equity)) * bot_share(c, store) * sizing.settings(c, store)["gross_fraction"],
+                         "cooldown": streak.status(c, st),
                          "halt": st.get("halt") if c.loop else None,
                          "engine": st.get("engine", {"status": "starting"}),
                          "training": st.get("training", {"status": "waiting"})} for c, st in contexts.values()],
             any_entries_enabled=any(st.get("entries_enabled", False) for _, st in contexts.values()) or any(book.get("entries_enabled", False) for book in secondary_books.values()),
-            allocation={**allocation(config, store), "budget": budget, "gross_fraction": config.gross_fraction,
-                        "position_fraction": config.position_fraction} if parallel else None,
+            allocation={**allocation(config, store), "budget": budget, "gross_fraction": sizing.settings(config, store)["gross_fraction"],
+                        "position_fraction": sizing.settings(config, store)["position_fraction"]} if parallel else None,
+            market_regime=store.get("market_regime:alpaca"),
             loop=loop_state(equity), news_report=store.get("news_report"),
             readonly={"enabled": bool(config.readonly_token), "problem": config.readonly_problem, "limit": config.readonly_daily_limit,
                       "used_today": (store.get("readonly_usage") or {}).get("count", 0)
@@ -716,6 +722,9 @@ def create_app(config, store, broker_factory=Alpaca):
             cleaned = validate(body)
         except ValueError as exc:
             return jsonify(error=str(exc)), 400
+        previous = (store.get("allocation") or {}).get("sizing")
+        if previous and "sizing" not in cleaned:
+            cleaned["sizing"] = previous  # An older dashboard without sizing fields keeps the saved values.
         store.set("allocation", {**cleaned, "at": utcnow()})
         store.event("control", {"action": "allocation", **cleaned})
         return jsonify(ok=True, allocation=allocation(config, store))
