@@ -65,6 +65,7 @@ def make_loop_dir(root, stop=5, drawdown=20):
     (folder / "risiko.py").write_text(RISIKO.format(stop=stop, drawdown=drawdown), encoding="utf-8")
     if REAL_STRESSTEST.is_file():
         shutil.copy(REAL_STRESSTEST, folder / "stresstest.py")
+        shutil.copy(REAL_STRESSTEST.with_name("qualitaet.py"), folder / "qualitaet.py")
     else:
         (folder / "stresstest.py").write_text("STARTKAPITAL = 100_000\nKOSTEN = 0.001\n", encoding="utf-8")
     return folder

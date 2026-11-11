@@ -129,7 +129,8 @@ def run(module, data, stresstest, Backtest, symbol="", reports=None):
             with stresstest.parameter(module, values):
                 live = Backtest(data, module.Strategie, cash=stresstest.STARTKAPITAL, commission=costs, finalize_trades=False).run()
         verdict = entry["urteil"]
-        test = {k: entry.get(k) for k in ("rendite", "kaufen_halten", "max_drawdown", "trades")}
+        test = {k: entry.get(k) for k in ("rendite", "kaufen_halten", "max_drawdown", "trades",
+                                          "statistik", "qualitaet", "rendite_doppelte_kosten")}
         test.update(methode=entry["methode"], parameter=values, standard=entry.get("standard", {}), quelle=source,
                     angepasst=bool(entry.get("angepasst")), zeitraum=entry.get("test", {}).get("von") and
                     f"{entry['test']['von']} bis {entry['test']['bis']}", jahre=entry.get("test", {}).get("jahre", []),

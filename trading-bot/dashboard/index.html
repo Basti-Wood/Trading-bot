@@ -25,10 +25,16 @@
 <label>Daytrading-Bot <output id="out-daytrade"></output><input id="alloc-daytrade" type="range" min="0" max="100" step="5"></label>
 <label>Trading-Loop <output id="out-loop"></output><input id="alloc-loop" type="range" min="0" max="100" step="5"></label>
 <label data-bot="loop_day">Intraday-Loop <output id="out-loop_day"></output><input id="alloc-loop_day" type="range" min="0" max="100" step="5"></label>
+<p class="sizing-title small muted">Positionsgröße: Prozent vom Anteil des jeweiligen Bots (gilt auch für Trading 212). Die kleinste Grenze entscheidet.</p>
+<label>Einsatz pro Aktie (höchstens, %)<input id="size-position" type="number" min="1" max="20" step="0.5" required></label>
+<label>Höchstens investiert (%)<input id="size-gross" type="number" min="5" max="100" step="5" required></label>
+<label>Risiko pro Trade bis zum Stop (%)<input id="size-risk" type="number" min="0.1" max="5" step="0.1" required></label>
+<label>Offenes Risiko aller Positionen (%)<input id="size-heat" type="number" min="1" max="30" step="1" required></label>
+<label class="sizing-check"><input id="size-quality" type="checkbox"> Größe nach Testqualität und halbem Kelly anpassen (Trading-Loop)</label>
 <div class="form-actions"><button id="alloc-reset" type="button">Verwerfen</button><button class="primary" type="submit">Speichern</button></div>
 </form>
 <div id="allocation-preview" class="validation"></div>
-<p id="allocation-note" class="small muted"></p></article></section>
+<p id="allocation-note" class="small muted"></p><p id="regime-note" class="small"></p></article></section>
 <section id="trading212" class="panel" hidden><div class="section-title"><div><span class="eyebrow">NON-US LISTINGS · PARALLEL ACCOUNT</span><h2>Trading 212 · Predictions &amp; Trading-Loop</h2></div><span id="t212-state" class="pill">STARTING</span></div>
 <p id="t212-note" class="muted"></p><div class="row-actions"><button id="t212-toggle" type="button">Enable Trading 212 entries</button><button id="t212-retest" type="button">Retest non-US stocks</button><button id="t212-reset" type="button">Reset Trading 212 drawdown peak</button><a href="/api/trading212/diagnostics" download>Download diagnostics</a></div>
 <h3>Diagnose: warum (noch) nicht gekauft wird</h3><div id="t212-diagnosis" class="training-log"></div>

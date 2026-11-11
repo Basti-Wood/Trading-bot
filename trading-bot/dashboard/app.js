@@ -60,17 +60,27 @@ const allocBots=()=>(state?.strategies||[]).map(st=>st.id).filter(id=>id in BOT_
 const pct = value => value == null ? '—' : `${value > 0 ? '+' : ''}${Number(value).toFixed(1)} %`;
 let allocDirty=false;
 function traderCards(s) {
-  const bots=(s.strategies||[]).map(st=>`<article class="panel trader-card"><div class="top section-title"><span class="number">${escape(st.name.toUpperCase())}</span><span class="pill">${st.halt?'DRAWDOWN-STOPP':st.entries_enabled?'EINSTIEGE AN':'PAUSIERT'}</span></div><span class="amount">${money(st.capital_ceiling)}</span><span class="small muted">Gewichtung ${st.weight ?? '—'} · ${Math.round(st.capital_fraction*100)} % vom Bot-Budget · investiert höchstens ${money(st.gross_ceiling)}</span><p class="small muted">${escape(BOT_TEXT[st.id]||'')}</p><span class="small muted ${st.engine.status==='error'?'sell':''}">${escape(st.engine.status==='error'?'Fehler: '+(st.engine.message||''):st.engine.status)}${!st.id.startsWith('loop')?` / Training: ${escape(st.training.status)}${st.training.message?` <span class="muted">(${escape(st.training.message)})</span>`:''}`:''}</span><div class="strategy-actions">${st.id.startsWith('loop')?'<a class="button" href="#loop">Strategien</a>':`<button data-view="${escape(st.id)}" aria-pressed="${st.id===selectedStrategy}">${st.id===selectedStrategy?'Prognosen sichtbar':'Prognosen ansehen'}</button>`}<button data-strategy="${escape(st.id)}" data-action="${st.entries_enabled?'pause':'resume'}" ${!s.configured?'disabled':''}>${st.entries_enabled?'Einstiege pausieren':'Einstiege einschalten'}</button></div></article>`);
+  const bots=(s.strategies||[]).map(st=>`<article class="panel trader-card"><div class="top section-title"><span class="number">${escape(st.name.toUpperCase())}</span><span class="pill">${st.halt?'DRAWDOWN-STOPP':st.entries_enabled?'EINSTIEGE AN':'PAUSIERT'}</span></div><span class="amount">${money(st.capital_ceiling)}</span><span class="small muted">Gewichtung ${st.weight ?? '—'} · ${Math.round(st.capital_fraction*100)} % vom Bot-Budget · investiert höchstens ${money(st.gross_ceiling)}</span><p class="small muted">${escape(BOT_TEXT[st.id]||'')}</p>${st.cooldown?.active?`<p class="small sell">${escape(st.cooldown.reason)}</p>`:st.cooldown?.losses?`<p class="small muted">${st.cooldown.losses} Verlust-Trade(s) in Folge (Pause ab ${st.cooldown.limit})</p>`:''}<span class="small muted ${st.engine.status==='error'?'sell':''}">${escape(st.engine.status==='error'?'Fehler: '+(st.engine.message||''):st.engine.status)}${!st.id.startsWith('loop')?` / Training: ${escape(st.training.status)}${st.training.message?` <span class="muted">(${escape(st.training.message)})</span>`:''}`:''}</span><div class="strategy-actions">${st.id.startsWith('loop')?'<a class="button" href="#loop">Strategien</a>':`<button data-view="${escape(st.id)}" aria-pressed="${st.id===selectedStrategy}">${st.id===selectedStrategy?'Prognosen sichtbar':'Prognosen ansehen'}</button>`}<button data-strategy="${escape(st.id)}" data-action="${st.entries_enabled?'pause':'resume'}" ${!s.configured?'disabled':''}>${st.entries_enabled?'Einstiege pausieren':'Einstiege einschalten'}</button></div></article>`);
   $('strategy-cards').innerHTML=bots.join('');
 }
 function allocationValues() {
   return {capital_fraction:Number($('alloc-fraction').value)/100, capital_cap:Number($('alloc-cap').value||0),
-    weights:Object.fromEntries(allocBots().map(bot=>[bot,Number($('alloc-'+bot).value)]))};
+    weights:Object.fromEntries(allocBots().map(bot=>[bot,Number($('alloc-'+bot).value)])),
+    sizing:{position_fraction:Number($('size-position').value), gross_fraction:Number($('size-gross').value),
+      risk_per_trade:Number($('size-risk').value), heat:Number($('size-heat').value), quality_scaling:$('size-quality').checked}};
+}
+const pct100=v=>Math.round(Number(v||0)*1000)/10;
+function regimeText(r,label){
+  if(!r) return `${label}: Marktlage noch nicht berechnet (keine Einschränkung)`;
+  return `${label}: Marktlage ${r.name} → ${Math.round(r.ceiling*100)} % von „Höchstens investiert“ nutzbar · ${(r.reasons||[]).join(' · ')} · ${time(r.at)}`;
 }
 function fillAllocation(a) {
   $('alloc-fraction').value=Math.round(a.capital_fraction*100); $('alloc-cap').value=a.capital_cap||0;
   for(const label of document.querySelectorAll('#allocation-form [data-bot]')) label.hidden=!allocBots().includes(label.dataset.bot);
   for(const bot of allocBots()) $('alloc-'+bot).value=a.weights[bot]??0;
+  const z=a.sizing||{};
+  $('size-position').value=pct100(z.position_fraction); $('size-gross').value=pct100(z.gross_fraction);
+  $('size-risk').value=pct100(z.risk_per_trade); $('size-heat').value=pct100(z.heat); $('size-quality').checked=z.quality_scaling!==false;
   allocDirty=false;
 }
 function allocationPreview() {
@@ -78,8 +88,12 @@ function allocationPreview() {
   const v=allocationValues(), equity=Number(state.account?.equity||0), total=Object.values(v.weights).reduce((x,y)=>x+y,0);
   let budget=equity*v.capital_fraction; if(v.capital_cap) budget=Math.min(budget,v.capital_cap);
   for(const bot of allocBots()) $('out-'+bot).textContent=`${v.weights[bot]} → ${total?Math.round(v.weights[bot]/total*100):0} %`;
-  $('allocation-preview').innerHTML=[['Bot-Budget',money(budget)],...allocBots().map(bot=>[BOT_NAMES[bot],money(total?budget*v.weights[bot]/total:0)])].map(([k,x])=>`<div><span>${k}</span><strong>${escape(x)}</strong></div>`).join('');
-  $('allocation-note').textContent=`Jeder Bot investiert höchstens ${Math.round(a.gross_fraction*100)} % seines Anteils gleichzeitig und höchstens ${Math.round(a.position_fraction*100)} % pro Aktie. Gewichtung 0 heißt: dieser Bot kauft nichts mehr; offene Positionen behalten ihre Schutz-Ausstiege. ${allocDirty?'Noch nicht gespeichert.':''}`;
+  const z=v.sizing, share=bot=>total?budget*v.weights[bot]/total:0;
+  $('allocation-preview').innerHTML=[['Bot-Budget',money(budget)],...allocBots().map(bot=>[BOT_NAMES[bot],`${money(share(bot))} · pro Aktie bis ${money(share(bot)*z.position_fraction/100)}`])].map(([k,x])=>`<div><span>${k}</span><strong>${escape(x)}</strong></div>`).join('');
+  $('allocation-note').textContent=`Jeder Bot investiert höchstens ${z.gross_fraction} % seines Anteils gleichzeitig und höchstens ${z.position_fraction} % pro Aktie. Ein Kauf ist außerdem so klein, dass ein Stop-Loss höchstens ${z.risk_per_trade} % des Bot-Anteils kostet, und alle offenen Positionen zusammen riskieren höchstens ${z.heat} %. ${z.quality_scaling?'Trading-Loop: Aktien mit guter Testqualität bekommen bis 1,25× so viel, schwache bis 0,5×; ein negatives halbes Kelly verhindert den Kauf. ':''}Nach 3 Verlust-Trades in Folge pausiert ein Bot 24 Stunden. Gewichtung 0 heißt: dieser Bot kauft nichts mehr; offene Positionen behalten ihre Schutz-Ausstiege. ${allocDirty?'Noch nicht gespeichert.':''}`;
+  const r=state.market_regime, t=state.trading212?.regime;
+  $('regime-note').innerHTML=[`<span class="regime-${escape(r?.state||'angriff')}">${escape(regimeText(r,'Alpaca (USA)'))}</span>`,
+    state.trading212?.enabled?`<span class="regime-${escape(t?.state||'angriff')}">${escape(regimeText(t,'Trading 212 (Europa)'))}</span>`:''].filter(Boolean).join('<br>');
 }
 function renderAllocation(s) {
   if(!s.allocation) return;
@@ -359,7 +373,9 @@ function renderTrading212(s) {
   $('t212-loop-toggle').textContent=lp.entries_enabled?'Pause loop entries':'Enable loop entries';
   $('t212-daily-toggle').disabled=$('t212-loop-toggle').disabled=!t.configured;
   $('t212-train').disabled=!t.configured||['running','starting'].includes(training.status);
-  $('t212-training').textContent=`${training.status||'Waiting for data'}${training.symbol?' · '+training.symbol:''}${training.message?' · '+training.message:''} · Aufteilung des Trading-212-Kontos (keine Gewichtung nötig): Prognosen ${Math.round((prediction.share??.5)*100)} % = ${money(budget*(prediction.share??.5),code)}, Trading-Loop ${Math.round((lp.share??.5)*100)} % = ${money(budget*(lp.share??.5),code)} · ${prediction.min_votes||3}/3 model votes required. ${prediction.ready_problem||''}${lp.ready_problem?' · Loop: '+lp.ready_problem:''}`;
+  $('t212-training').textContent=`${training.status||'Waiting for data'}${training.symbol?' · '+training.symbol:''}${training.message?' · '+training.message:''} · Aufteilung des Trading-212-Kontos (keine Gewichtung nötig): Prognosen ${Math.round((prediction.share??.5)*100)} % = ${money(budget*(prediction.share??.5),code)}, Trading-Loop ${Math.round((lp.share??.5)*100)} % = ${money(budget*(lp.share??.5),code)} · ${prediction.min_votes||3}/3 model votes required. ${prediction.ready_problem||''}${lp.ready_problem?' · Loop: '+lp.ready_problem:''}`
+    +` · ${regimeText(t.regime,'Marktlage')}`+(t.sizing?` · pro Aktie höchstens ${pct100(t.sizing.position_fraction)} %, investiert höchstens ${pct100(t.sizing.gross_fraction)} % je Buch`:'')
+    +Object.entries(t.cooldown||{}).filter(([,c])=>c.active).map(([m,c])=>` · ${m==='loop'?'Trading-Loop':'Prognosen'}: ${c.reason}`).join('');
   $('t212-predictions').innerHTML=(prediction.stocks||[]).map(r=>`<tr><td>${escape(r.symbol)}</td><td>${(r.models||[]).map(m=>`<div>${escape(m.name)}: ${outlook(m.signal)} ${percent(m.expected_return)}</div>`).join('')||'Waiting for trained models'}</td><td>${percent(r.expected_return)}</td><td>${r.eligible===true?'Validated':r.eligible===false?(r.research_trade?'Nicht bestanden – Forschungs-Trades erlaubt (nur Demokonto)':'Research only: validation did not pass'):'Not trained'}<br><small>${escape(r.quality?.status||'waiting')}<br>${escape((r.validation?.reasons||[]).join('; '))}</small></td><td>${signal(r.action||'WAIT')}<br><small>${escape(r.reason)}</small></td></tr>`).join('')||'<tr><td colspan="5" class="empty">Daily data is loading. Each stock trains independently; one missing listing does not stop the others.</td></tr>';
   $('t212-training-log').innerHTML=(prediction.training_history||[]).map(e=>`<div class="log-row"><time>${time(e.at)}</time><span>${escape(e.symbol||'')} ${escape(e.model||'')} · ${escape(e.message)}</span></div>`).join('');
   $('t212-positions').innerHTML=(account?.positions||[]).map(p=>`<div class="position"><b>${escape(p.symbol)}</b><span>${escape(p.qty)} shares</span><span>${money(Number(p.market_value),p.currency)}</span><span>${money(Number(p.unrealized_pl),p.currency)} unrealized</span></div>`).join('')||'No open Trading 212 positions.';

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import multiprocessing as mp
@@ -16,7 +17,7 @@ from .models import train_worker, predict, strategy_signature
 from .prediction_quality import forecast_quality
 from .feedback import capture_forecast, resolve_outcomes
 from .daytrade import TREND_EXITS, baseline, best, bracket, exit_signal, fresh, playbook, session_open
-from . import loop
+from . import loop, regime, streak
 from .research import Research, ballots, combine
 from .store import utcnow
 from .universe import active_symbols, monitored_symbols, scan, entries_ready, watched_symbols
@@ -36,6 +37,7 @@ class Engine:
         self.monitor = None
         self.cached = {}
         self.forecast_attempts = {}
+        self.regime_thread = None
         self.scan_thread = None
         self.forecast_thread = None
         self.retest_thread = None
@@ -235,6 +237,44 @@ class Engine:
                     self.store.event("error", {"symbol": symbol, "message": str(exc)[:240]})
         self.forecast_thread = threading.Thread(target=work, name="forecasts", daemon=True)
         self.forecast_thread.start()
+
+    def regime_tick(self, symbols):
+        """Market posture for all Alpaca bots (app/regime.py), refreshed every few hours by whichever bot gets there first."""
+        saved = getattr(self.store, "root", self.store).get("market_regime:alpaca")
+        if self.regime_thread and self.regime_thread.is_alive():
+            return
+        try:
+            if saved and (pd.Timestamp.now(tz="UTC") - pd.Timestamp(saved["at"])).total_seconds() < 4 * 3600:
+                return
+        except (KeyError, TypeError, ValueError):
+            pass
+        if time.time() - self.forecast_attempts.get("_regime", 0) < 900:
+            return
+        self.forecast_attempts["_regime"] = time.time()
+        if not (isinstance(Alpaca, type) and isinstance(self.broker, Alpaca)):
+            return  # Test doubles and other brokers have no daily index candles.
+        config = replace(self.config, history_days=400)
+        names = [s for s in dict.fromkeys(symbols) if s != self.config.benchmark][:40]
+
+        def work():
+            try:
+                broker, frames = Alpaca(config), {}
+                benchmark = broker.bars(self.config.benchmark)
+                for symbol in names:
+                    if self.stop.is_set():
+                        return
+                    try:
+                        frames[symbol] = broker.bars(symbol)
+                    except Exception:
+                        continue
+                regime.save(self.store, "alpaca", regime.posture(self.config, benchmark, frames, self.config.benchmark))
+            except Exception as exc:
+                try:
+                    self.store.event("error", {"message": "Marktlage: " + str(exc)[:200]})
+                except Exception:
+                    pass
+        self.regime_thread = threading.Thread(target=work, name="market-regime", daemon=True)
+        self.regime_thread.start()
 
     def loop_tick(self):
         """Test and signal each activated version on its symbols: daily versions at most every 30 minutes,
@@ -627,6 +667,8 @@ class Engine:
                             continue
                     if owned and self.config.intraday:
                         self.store.set(f"flat_since:{symbol}", time.time())
+                    if owned:
+                        streak.closed(self.store, symbol)
                     self.store.set(f"owned:{symbol}", False)
                     self.store.set(f"exit_pending:{symbol}", False)
                     self.store.set(f"exit_reason:{symbol}", None)
@@ -637,6 +679,7 @@ class Engine:
                     self.store.set(f"flat_observed:{symbol}", None)
                 exit_reason = (self.store.get(f"exit_reason:{symbol}") or "Completing the previously requested exit") if self.store.get(f"exit_pending:{symbol}", False) else None
                 if pos and float(pos["qty"]) > 0 and owned:
+                    streak.remember(self.store, pos)
                     pnl_fraction = float(pos.get("unrealized_plpc") or 0)
                     if loss_breach:
                         exit_reason = "Account daily-loss limit reached"
@@ -721,7 +764,8 @@ class Engine:
                         stop_fraction, target_fraction = bracket(self.config, plan)
                         queue_args.update(stop_fraction=stop_fraction, target_fraction=target_fraction, plan=plan)
                     if self.config.loop and action == "BUY":
-                        queue_args.update(stop_fraction=self.stop_limit() if self.rules.get("ok") else None)
+                        queue_args.update(stop_fraction=self.stop_limit() if self.rules.get("ok") else None,
+                                          test=forecast.get("test"))
                         # Recorded before the order: the buying version decides this position's exit.
                         self.store.set(f"loop_owner:{symbol}", forecast["version"])
                     status = self.executor.execute(symbol, action, queue_session if queued_buy else day, account, positions, orders,
@@ -742,6 +786,8 @@ class Engine:
                 self.store.event("error", {"symbol": symbol, "message": str(exc)[:240]})
         # Network-heavy scanning, forecasting and LLM calls cannot stall risk polling.
         self.scan_tick()
+        if not self.config.same_day and not self.config.intraday:
+            self.regime_tick(symbols)
         # Day trading also evaluates its setups for the user's own holdings (shown, never traded).
         watched = watched_symbols(self.config, self.store, positions) if self.config.intraday else []
         self.playbook_tick(list(dict.fromkeys([*symbols, *watched])), now, clock["is_open"], clock.get("next_close"))

@@ -46,6 +46,8 @@ Antworte auf Deutsch, kurz und ohne Fachchinesisch. Der Nutzer kann nicht progra
 ## Grün oder rot
 Rot, sobald eins zutrifft: Gesamtrendite 0 % oder weniger · maximaler Drawdown über `MAX_DRAWDOWN_PROZENT` · weniger als
 10 Trades (zu wenig, um etwas zu sagen). Sonst grün. So steht es in `urteil()` in `stresstest.py`.
+Zusätzlich steht pro Aktie eine Qualität (0–100, `qualitaet.py`: Trades, Erwartung, Risiko, Robustheit, Test mit doppelten
+Kosten) im Bericht. Sie ändert grün/rot nicht; der Bot passt damit nur die Positionsgröße an (siehe `../docs/sizing-and-risk.md`).
 
 Bei `SYMBOL = "LISTE"` (Wunsch des Nutzers: Aktienliste der Bots plus eigene Aktien, `python liste.py`) gilt `urteil()` für jede
 Aktie einzeln. Es gibt keine Mindestanzahl grüner Aktien und kein Listenurteil als Kaufhürde. Jede Aktie bekommt ihre

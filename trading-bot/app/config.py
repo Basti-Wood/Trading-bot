@@ -92,6 +92,17 @@ class Config:
     capital: float = 0
     position_fraction: float = .10
     gross_fraction: float = .30
+    # Risk-based sizing (app/sizing.py): a stop-out costs at most this share of the bot's budget,
+    # and all of a bot's open positions together risk at most portfolio_heat.
+    risk_per_trade: float = .01
+    portfolio_heat: float = .06
+    # Market posture (app/regime.py): share of gross_fraction usable in a cautious / defensive market.
+    benchmark: str = "SPY"
+    regime_caution: float = .6
+    regime_defensive: float = .3
+    # Losing-streak cooldown: after this many losing trades in a row a bot pauses new buys (0 = off).
+    cooldown_losses: int = 3
+    cooldown_hours: float = 24.
     daily_loss: float = .02
     stop_loss: float = .05
     take_profit: float = .10
@@ -131,6 +142,8 @@ class Config:
     # Demo account only: models that have not passed validation may still trade on a majority vote,
     # so the prediction book gathers real results. Never applies to a live account.
     trading212_research_trades: bool = True
+    # Index listing for the European market posture (app/regime.py); must be in the instruments file.
+    trading212_benchmark: str = "EXS1d_EQ"
     # Internal data/training identity; the public account remains Alpaca by default.
     broker_name: str = "alpaca"
     trading212_allow_fx: bool = False
@@ -199,7 +212,9 @@ class Config:
                   "strategy_fraction": (.05, 1), "min_votes": (2, 4),
                   "daytrade_run_minutes": (5, 240), "daytrade_trail_trigger": (.001, .05),
                   "daytrade_trail_gap": (.001, .05), "loop_timeout": (10, 1800),
-                  "loop_join_bars": (0, 20), "loop_join_max_gain": (0, .10)}
+                  "loop_join_bars": (0, 20), "loop_join_max_gain": (0, .10),
+                  "risk_per_trade": (.001, .05), "portfolio_heat": (.01, .30), "regime_caution": (0, 1),
+                  "regime_defensive": (0, 1), "cooldown_losses": (0, 20), "cooldown_hours": (1, 336)}
         for name, (lo, hi) in bounds.items():
             value = getattr(self, name)
             if not math.isfinite(value) or not lo <= value <= hi:
@@ -309,6 +324,13 @@ class Config:
             capital_fraction=float(os.getenv("CAPITAL_FRACTION", "1")),
             position_fraction=float(os.getenv("MAX_POSITION_FRACTION", ".10")),
             gross_fraction=float(os.getenv("MAX_GROSS_FRACTION", ".30")),
+            risk_per_trade=float(env_value("RISK_PER_TRADE", ".01")),
+            portfolio_heat=float(env_value("PORTFOLIO_HEAT", ".06")),
+            benchmark=env_value("MARKET_BENCHMARK", "SPY").upper(),
+            regime_caution=float(env_value("REGIME_CAUTION_SHARE", ".6")),
+            regime_defensive=float(env_value("REGIME_DEFENSIVE_SHARE", ".3")),
+            cooldown_losses=int(env_value("COOLDOWN_LOSING_TRADES", "3")),
+            cooldown_hours=float(env_value("COOLDOWN_HOURS", "24")),
             daily_loss=float(os.getenv("MAX_DAILY_LOSS", ".02")),
             stop_loss=float(os.getenv("STOP_LOSS", ".05")), take_profit=float(os.getenv("TAKE_PROFIT", ".10")),
             cost_bps=float(os.getenv("COST_BPS_PER_SIDE", "10")), edge_bps=float(os.getenv("MIN_EDGE_BPS", "10")),
@@ -332,6 +354,7 @@ class Config:
             trading212_min_votes=int(os.getenv("TRADING212_MIN_AGREEING_VOTES", "2")),
             trading212_allow_fx=flag("TRADING212_ALLOW_FX"),
             trading212_research_trades=flag("TRADING212_PAPER_RESEARCH_TRADES", True),
+            trading212_benchmark=env_value("TRADING212_BENCHMARK", "EXS1d_EQ"),
             twelvedata_key=os.getenv("TWELVEDATA_API_KEY", "").strip(),
             trading212_data_source=env_value("TRADING212_DATA_SOURCE", "yahoo").lower(),
             trading212_max_quote_age=int(env_value("TRADING212_MAX_QUOTE_AGE_SECONDS", "1200")),
