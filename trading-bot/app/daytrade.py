@@ -61,10 +61,11 @@ def baseline(daily, intraday, today):
     intraday = regular(intraday)
     intraday = intraday[intraday.index.tz_convert(NY).date < today]
     opening, moves = [], {}
-    for _, bars in list(intraday.groupby(intraday.index.tz_convert(NY).date))[-14:]:
+    sessions = [bars for _, bars in intraday.groupby(intraday.index.tz_convert(NY).date)
+                if bars.index[0].tz_convert(NY).hour * 60 + bars.index[0].tz_convert(NY).minute == OPEN_MINUTE]
+    # The last 14 sessions that have an opening bar (not the last 14 sessions, some of which may lack one).
+    for bars in sessions[-14:]:
         local = bars.index.tz_convert(NY)
-        if local[0].hour * 60 + local[0].minute != OPEN_MINUTE:
-            continue
         opening.append(float(bars.volume.iloc[0]))
         start = float(bars.open.iloc[0])
         # Five-minute bars are stamped at their start; the move is measured at the bar's close.

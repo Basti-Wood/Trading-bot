@@ -9,6 +9,7 @@ from contextlib import nullcontext
 import psutil
 import pandas as pd
 
+from .bar_cache import BarCache
 from .broker import Alpaca
 from .candles import snapshot
 from .execution import Executor
@@ -38,6 +39,7 @@ class Engine:
         self.cached = {}
         self.forecast_attempts = {}
         self.regime_thread = None
+        self.bar_caches = {}  # timeframe -> BarCache (Intraday-Loop, day-trading playbook)
         self.scan_thread = None
         self.forecast_thread = None
         self.retest_thread = None
@@ -336,7 +338,9 @@ class Engine:
             for timeframe in {versions[v]["timeframe"] for v in due}:
                 symbols = sorted({s for v in due if versions[v]["timeframe"] == timeframe for s in plans[v]})
                 try:
-                    data = broker.multi_bars(symbols, timeframe, start, end=now)
+                    cache = self.bar_caches.setdefault(timeframe, BarCache())
+                    data = cache.get(broker.multi_bars, symbols, timeframe, start, now,
+                                     now.tz_convert("America/New_York").date())
                     minutes = loop.TIMEFRAMES[timeframe]
                     # Completed bars only.
                     frames[timeframe] = {s: f[f.index + pd.Timedelta(minutes=minutes) <= now] for s, f in data.items()}
@@ -498,14 +502,15 @@ class Engine:
                 if missing:
                     # Once per day: daily ATR/previous close and 14 sessions of opening volume and noise.
                     daily = broker.multi_bars(missing, "1Day", now - pd.Timedelta(days=40))
-                    five = broker.multi_bars(missing, "5Min", now - pd.Timedelta(days=25), end=opening)
+                    # 14 sessions with an opening bar are needed; IEX often lacks it for thin stocks, so look back further.
+                    five = broker.multi_bars(missing, "5Min", now - pd.Timedelta(days=45), end=opening)
                     for symbol in missing:
                         try:
                             base = baseline(daily.get(symbol), five.get(symbol), today)
                         except ValueError as exc:
                             base = {"day": str(today), "error": str(exc)[:200]}
                         self.store.set(f"playbook_base:{symbol}", base)
-                minute = broker.multi_bars(symbols, "1Min", opening, end=now)
+                minute = self.bar_caches.setdefault("1Min", BarCache()).get(broker.multi_bars, symbols, "1Min", opening, now, today)
                 closing = pd.Timestamp(session_close) if session_close else None
                 for symbol in symbols:
                     frame = minute.get(symbol)

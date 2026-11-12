@@ -114,6 +114,20 @@ class StrategyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             baseline(daily.tail(5), pd.concat(five), days[-1].date())
 
+    def test_baseline_uses_older_sessions_when_recent_ones_lack_an_opening_bar(self):
+        days = pd.bdate_range('2026-09-01', '2026-10-15', tz='UTC')
+        daily = pd.DataFrame({'open': 100., 'high': 101., 'low': 99., 'close': 100., 'volume': 1e6},
+                             index=days + pd.Timedelta(hours=4))
+        five = []
+        for i, day in enumerate(days[:-1]):
+            # Thin IEX data: the 10 most recent sessions start at 9:35, older ones at 9:30.
+            late = i >= len(days) - 11
+            index = pd.date_range(day + pd.Timedelta(hours=13, minutes=35 if late else 30), periods=70, freq='5min')
+            five.append(pd.DataFrame({'open': 100., 'high': 100.5, 'low': 99.5, 'close': 100., 'volume': 500.}, index=index))
+        result = baseline(daily, pd.concat(five), days[-1].date())
+        self.assertEqual(result['opening_volume'], 500.)
+        self.assertIn('5', result['sigma'])
+
     def test_bracket_and_exit_rules(self):
         cfg = Config()
         self.assertEqual(bracket(cfg, {'entry': 100., 'stop': 99.5, 'target': 101.}), (.005, .01))
