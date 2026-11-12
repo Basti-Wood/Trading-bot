@@ -144,7 +144,7 @@ class Executor:
                 return "Pending buy order; waiting for updated exposure"
             sizing_stop = stop_fraction or (None if cfg.loop else cfg.effective_stop)
             owned_positions = [p for p in positions if self.store.get(f"owned:{p['symbol']}", False)]
-            plan_size = sizing.budget(capital=capital, share=bot_share(cfg, self.store), price=price, stop=sizing_stop,
+            plan_size = sizing.budget(capital=capital, share=bot_share(cfg, self.store), stop=sizing_stop,
                 gross_all=gross, gross_bot=strategy_gross, open_risk_bot=sizing.open_risk(owned_positions, sizing_stop),
                 cash=min(float(account["cash"]), float(account["buying_power"])),
                 settings=sizing.settings(cfg, self.store), test=test, ceiling=regime.ceiling(self.store, "alpaca"))

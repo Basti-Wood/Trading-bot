@@ -85,7 +85,7 @@ def edge(test):
     return factor, kelly, "; ".join(notes)
 
 
-def budget(*, capital, share, price, stop, gross_all, gross_bot, open_risk_bot, cash, settings,
+def budget(*, capital, share, stop, gross_all, gross_bot, open_risk_bot, cash, settings,
            test=None, ceiling=1.):
     """Cash this buy may spend and which limit decided it.
 

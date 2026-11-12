@@ -76,9 +76,6 @@ class Alpaca:
     def order(self, client_id):
         return self.request("GET", "/v2/orders:by_client_order_id", params={"client_order_id": client_id})
 
-    def order_by_id(self, order_id):
-        return self.request("GET", f"/v2/orders/{quote(order_id, safe='')}")
-
     def submit(self, payload):
         # Enforce routing at the network boundary, including direct callers. OTC stays excluded, as in the scanner.
         symbol = payload.get("symbol", "")

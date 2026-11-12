@@ -37,7 +37,7 @@ class Case(unittest.TestCase):
 
 class SizingTests(Case):
     def size(self, **changes):
-        args = dict(capital=100000, share=.5, price=100, stop=.05, gross_all=0, gross_bot=0, open_risk_bot=0,
+        args = dict(capital=100000, share=.5, stop=.05, gross_all=0, gross_bot=0, open_risk_bot=0,
                     cash=100000, settings=SETTINGS, test=None, ceiling=1.)
         args.update(changes)
         return sizing.budget(**args)
@@ -131,6 +131,23 @@ class RegimeTests(Case):
     def test_no_data_means_no_restriction(self):
         result = regime.posture(self.cfg, None, {}, "SPY")
         self.assertEqual(result["ceiling"], 1.)
+
+
+class RegimeRetryTests(Case):
+    def test_a_failing_data_request_is_not_retried_every_cycle_by_any_bot(self):
+        from unittest.mock import patch
+        from app.broker import BrokerError
+        from app.engine import Engine
+        engines = [Engine(replace(self.cfg, trading_mode=mode, coordinated=True), StrategyStore(self.store, mode))
+                   for mode in ("daily", "loop")]
+        with patch("app.engine.Alpaca.bars", side_effect=BrokerError("HTTP 429")) as bars:
+            for _ in range(3):
+                for engine in engines:
+                    engine.regime_tick(["AAA"])
+                    if engine.regime_thread:
+                        engine.regime_thread.join(5)
+        self.assertEqual(bars.call_count, 1)
+        self.assertIsNone(self.store.get("market_regime:alpaca"))
 
 
 class StreakTests(Case):

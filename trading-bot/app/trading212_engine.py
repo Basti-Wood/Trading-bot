@@ -453,7 +453,8 @@ class Trading212Engine:
                         reason = book.get("data_errors", {}).get(symbol) or "Listing/data mapping changed; waiting for a fresh evaluation"
                     elif not ready:
                         reason = "Waiting for reconciliation and broker stop protection"
-                    elif any(o["side"] == "buy" for o in [*orders, *self.store.unresolved_orders()]):
+                    elif any(o["side"] == "buy" for o in self.store.unresolved_orders()):
+                        # Only the bot's own buys: a manual order in the Trading 212 app must not block the bot.
                         reason = "A buy is still pending; waiting for a fresh position snapshot"
                     elif self.store.owner(symbol) not in {None, mode}:
                         reason = "Another Trading 212 strategy reserved this symbol"
@@ -477,7 +478,7 @@ class Trading212Engine:
                         own = [p for p in positions if self.store.owner(p["symbol"]) == mode]
                         own_gross = sum(abs(p["market_value"]) for p in own)
                         stop = (rules.get("stop_loss") or self.config.stop_loss * 100) / 100 if mode == "loop" else self.config.stop_loss
-                        plan = sizing.budget(capital=capital, share=self.strategy_share(mode), price=price * fx, stop=stop,
+                        plan = sizing.budget(capital=capital, share=self.strategy_share(mode), stop=stop,
                             gross_all=gross, gross_bot=own_gross, open_risk_bot=sizing.open_risk(own, stop),
                             cash=account["cash"], settings=sizing.settings(self.config, self.root),
                             test=choice.get("test") if mode == "loop" else None,

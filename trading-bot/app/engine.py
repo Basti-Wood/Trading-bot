@@ -239,20 +239,20 @@ class Engine:
         self.forecast_thread.start()
 
     def regime_tick(self, symbols):
-        """Market posture for all Alpaca bots (app/regime.py), refreshed every few hours by whichever bot gets there first."""
-        saved = getattr(self.store, "root", self.store).get("market_regime:alpaca")
+        """Market posture for all Alpaca bots (app/regime.py), refreshed every 4 hours by whichever bot gets there first."""
+        if not (isinstance(Alpaca, type) and isinstance(self.broker, Alpaca)):
+            return  # Test doubles have no daily index candles.
         if self.regime_thread and self.regime_thread.is_alive():
             return
+        root = getattr(self.store, "root", self.store)
         try:
-            if saved and (pd.Timestamp.now(tz="UTC") - pd.Timestamp(saved["at"])).total_seconds() < 4 * 3600:
-                return
+            age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(root.get("market_regime:alpaca")["at"])).total_seconds()
         except (KeyError, TypeError, ValueError):
-            pass
-        if time.time() - self.forecast_attempts.get("_regime", 0) < 900:
+            age = None
+        # The attempt time is shared by all Alpaca bots, so a failing data request is retried every 15 minutes, not every cycle.
+        if age is not None and age < 4 * 3600 or time.time() - (root.get("market_regime_attempt") or 0) < 900:
             return
-        self.forecast_attempts["_regime"] = time.time()
-        if not (isinstance(Alpaca, type) and isinstance(self.broker, Alpaca)):
-            return  # Test doubles and other brokers have no daily index candles.
+        root.set("market_regime_attempt", time.time())
         config = replace(self.config, history_days=400)
         names = [s for s in dict.fromkeys(symbols) if s != self.config.benchmark][:40]
 

@@ -314,6 +314,20 @@ class EngineTests(EngineFixture):
         self.broker.cancel.assert_called_once_with("1")
 
 
+    def test_a_manual_pending_buy_in_the_app_does_not_block_bot_entries(self):
+        self.broker.open_orders.return_value = [Trading212.normalize_order(remote(oid=42, ticker="OTHERd_EQ"))]
+        self.engine.cycle(NOW)
+        self.broker.submit.assert_called_once()
+        self.broker.cancel.assert_not_called()
+
+    def test_the_bots_own_pending_buy_still_blocks_a_second_buy(self):
+        self.engine.send(TICKER, "buy", 3, "limit", "pending", price=100, version="trend_v1")
+        self.broker.submit.reset_mock()
+        self.broker.open_orders.return_value = [Trading212.normalize_order(remote())]
+        self.engine.cycle(NOW)
+        self.broker.submit.assert_not_called()
+
+
 class AccountTests(Fixture):
     def snapshot(self, equity=10000, currency="USD", mode="paper", capital=None):
         capital = equity if capital is None else capital
